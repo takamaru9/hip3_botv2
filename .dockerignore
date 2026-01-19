@@ -1,0 +1,33 @@
+# Build artifacts
+target/
+*.rs.bk
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Git
+.git/
+.gitignore
+
+# Documentation
+*.md
+!README.md
+
+# Analysis (not needed in container)
+analysis/
+
+# Tests
+tests/
+
+# Local data (will mount volume instead)
+data/
+
+# Claude files
+.claude/
+
+# OS files
+.DS_Store
+Thumbs.db

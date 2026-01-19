@@ -1,0 +1,23 @@
+[package]
+name = "hip3-telemetry"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Prometheus metrics and structured logging for HIP-3"
+
+[dependencies]
+hip3-core = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+prometheus = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+chrono = { workspace = true }
+once_cell = { workspace = true }
+
+[dev-dependencies]
+tokio-test = { workspace = true }

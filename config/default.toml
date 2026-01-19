@@ -1,0 +1,70 @@
+# HIP-3 Bot Configuration - Default (Development)
+
+# Operating mode: "observation" or "trading"
+mode = "observation"
+
+# WebSocket endpoint
+ws_url = "wss://api.hyperliquid-testnet.xyz/ws"
+info_url = "https://api.hyperliquid-testnet.xyz/info"
+
+# xyz market auto-discovery (P0-15, P0-26, P0-27)
+# Markets are automatically fetched from perpDexs API
+xyz_pattern = "xyz"
+
+# Markets override (optional - if not specified, auto-discovery is used)
+# For testnet, xyz DEX may not exist, so specify markets manually
+[[markets]]
+asset_idx = 0
+coin = "BTC"
+
+[[markets]]
+asset_idx = 1
+coin = "ETH"
+
+[[markets]]
+asset_idx = 2
+coin = "SOL"
+
+[websocket]
+# Maximum reconnection attempts (0 = infinite)
+max_reconnect_attempts = 0
+# Base delay for exponential backoff (ms)
+reconnect_base_delay_ms = 1000
+# Heartbeat interval (ms) - 45 seconds per HIP-3 spec
+heartbeat_interval_ms = 45000
+
+[risk]
+# Maximum oracle age before blocking (ms)
+max_oracle_age_ms = 8000
+# Maximum mark-mid divergence (bps)
+max_mark_mid_divergence_bps = 50
+# Spread shock multiplier vs EWMA
+spread_shock_multiplier = 3
+# Minimum liquidation buffer ratio
+min_buffer_ratio = 0.15
+# Maximum position as fraction of OI cap
+max_oi_fraction = 0.01
+
+[detector]
+# Taker fee (bps)
+taker_fee_bps = 4
+# Expected slippage (bps)
+slippage_bps = 2
+# Minimum edge to trigger (bps)
+min_edge_bps = 5
+# Sizing alpha (fraction of top-of-book)
+sizing_alpha = 0.10
+# Maximum notional per trade
+max_notional = 1000
+
+[persistence]
+# Directory for Parquet output files
+data_dir = "./data/signals"
+# Buffer size before flush
+buffer_size = 100
+
+[telemetry]
+# Prometheus metrics port
+metrics_port = 9090
+# Log level
+log_level = "info"

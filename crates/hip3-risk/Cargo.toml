@@ -1,0 +1,23 @@
+[package]
+name = "hip3-risk"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Hard risk gates for HIP-3 trading"
+
+[dependencies]
+hip3-core = { workspace = true }
+hip3-feed = { workspace = true }
+hip3-registry = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+chrono = { workspace = true }
+rust_decimal = { workspace = true }
+
+[dev-dependencies]
+tokio-test = { workspace = true }
+rust_decimal_macros = { workspace = true }

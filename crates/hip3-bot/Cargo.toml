@@ -1,0 +1,39 @@
+[package]
+name = "hip3-bot"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Main application for HIP-3 Oracle/Mark Dislocation Taker Bot"
+
+[[bin]]
+name = "hip3-bot"
+path = "src/main.rs"
+
+[dependencies]
+hip3-core = { workspace = true }
+hip3-ws = { workspace = true }
+hip3-feed = { workspace = true }
+hip3-registry = { workspace = true }
+hip3-risk = { workspace = true }
+hip3-detector = { workspace = true }
+hip3-executor = { workspace = true }
+hip3-position = { workspace = true }
+hip3-telemetry = { workspace = true }
+hip3-persistence = { workspace = true }
+
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+config = { workspace = true }
+toml = { workspace = true }
+clap = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+chrono = { workspace = true }
+
+[dev-dependencies]
+tokio-test = { workspace = true }

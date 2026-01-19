@@ -1,0 +1,43 @@
+# HIP-3 Bot Configuration - Mainnet
+# For xyz HIP-3 deployment observation
+
+mode = "observation"
+ws_url = "wss://api.hyperliquid.xyz/ws"
+info_url = "https://api.hyperliquid.xyz/info"
+
+# xyz market auto-discovery (P0-15, P0-26, P0-27)
+# Markets are automatically fetched from perpDexs API
+# xyz_pattern is used to identify the xyz DEX
+xyz_pattern = "xyz"
+
+# If you want to override auto-discovery and specify markets manually:
+# [[markets]]
+# asset_idx = 0
+# coin = "BTC"
+
+[websocket]
+max_reconnect_attempts = 0
+reconnect_base_delay_ms = 1000
+heartbeat_interval_ms = 45000
+
+[risk]
+max_oracle_age_ms = 8000
+max_mark_mid_divergence_bps = 50
+spread_shock_multiplier = 3
+min_buffer_ratio = 0.15
+max_oi_fraction = 0.01
+
+[detector]
+taker_fee_bps = 4
+slippage_bps = 2
+min_edge_bps = 5
+sizing_alpha = 0.10
+max_notional = 1000
+
+[persistence]
+data_dir = "./data/mainnet/signals"
+buffer_size = 100
+
+[telemetry]
+metrics_port = 9090
+log_level = "info"

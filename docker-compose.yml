@@ -1,0 +1,47 @@
+# HIP-3 Bot Docker Compose
+# Phase A: Observation Mode (24h test)
+
+version: '3.8'
+
+services:
+  hip3-bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: hip3-bot
+    restart: unless-stopped
+
+    # Resource limits
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 512M
+        reservations:
+          cpus: '0.5'
+          memory: 256M
+
+    # Volumes for data persistence
+    volumes:
+      - ./data:/app/data
+      - ./config:/app/config:ro
+
+    # Logging configuration
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "5"
+
+    # Environment
+    environment:
+      - RUST_LOG=info,hip3_bot=info,hip3_ws=info,hip3_registry=info
+      - RUST_BACKTRACE=1
+
+    # Network (outbound only for WebSocket)
+    networks:
+      - hip3-network
+
+networks:
+  hip3-network:
+    driver: bridge

@@ -471,7 +471,7 @@ impl Application {
         }
     }
 
-    /// Persist signal to Parquet.
+    /// Persist signal to JSON Lines.
     fn persist_signal(&mut self, signal: &DislocationSignal) -> AppResult<()> {
         let record = SignalRecord {
             timestamp_ms: signal.detected_at.timestamp_millis(),
@@ -481,6 +481,7 @@ impl Application {
             net_edge_bps: signal.net_edge_bps.to_string().parse().unwrap_or(0.0),
             oracle_px: signal.oracle_px.inner().to_string().parse().unwrap_or(0.0),
             best_px: signal.best_px.inner().to_string().parse().unwrap_or(0.0),
+            best_size: signal.book_size.inner().to_string().parse().unwrap_or(0.0),
             suggested_size: signal
                 .suggested_size
                 .inner()

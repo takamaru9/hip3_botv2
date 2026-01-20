@@ -156,9 +156,99 @@ sshpass -p 'RD3lDP8x8Xa2vQ3pVWwZ9dAr0' ssh root@5.104.81.76 \
 
 ---
 
+## 問題発生と修正 (2026-01-20)
+
+### 発生した問題
+
+| 項目 | 詳細 |
+|------|-----|
+| 発生日時 | 2026-01-20 |
+| 症状 | VPS上のParquetファイルが破損・読み込み不可 |
+| エラー | `Parquet magic bytes not found in footer` |
+| 収集データ | 76,456シグナル（すべて破損） |
+
+### 根本原因
+
+1. **Permission denied エラー**
+   - VPS上の `/opt/hip3-bot/data` がroot所有でコンテナ（UID 1000）から書き込み不可
+   - `flush()` が失敗し、`ArrowWriter::close()` が呼ばれない
+
+2. **Parquet形式の特性**
+   - Parquetはファイル末尾にfooter（メタデータ）を書き込む
+   - `close()` が呼ばれないとfooterが書き込まれない
+   - footerがないとファイル全体が読み込み不可
+
+### 修正内容
+
+| 項目 | 変更前 | 変更後 |
+|------|--------|--------|
+| ファイル形式 | Parquet (.parquet) | JSON Lines (.jsonl) |
+| 書き込み方式 | Arrow バッチ → footer | 行ごとにJSON追記 |
+| 障害耐性 | footerがないと全データ喪失 | 各行が独立、部分破損のみ |
+| 拡張子 | `.parquet` | `.jsonl` |
+
+#### 変更ファイル
+
+1. `crates/hip3-persistence/src/writer.rs` - 完全書き換え
+   - `ArrowWriter` → `BufWriter<File>`
+   - Append mode で既存データを保護
+   - 各行を独立したJSONオブジェクトとして書き込み
+
+2. `crates/hip3-persistence/src/error.rs`
+   - Parquet/Arrowエラー → serde_json エラー
+
+3. `crates/hip3-persistence/Cargo.toml`
+   - parquet, arrow 依存を削除
+   - serde_json を追加
+
+#### 後方互換性
+
+```rust
+// ParquetWriter 型エイリアスで既存コードへの影響を最小化
+pub type ParquetWriter = JsonLinesWriter;
+```
+
+### 修正後の確認
+
+| 項目 | 結果 |
+|------|------|
+| GitHub push | ✅ commit `c4652f0` |
+| VPS更新 | ✅ `git pull` 成功 |
+| コンテナ再起動 | ✅ healthy |
+| JSON Lines生成 | ✅ `signals_2026-01-20.jsonl` |
+| データ読み込み | ✅ Python/Polars で正常読み込み |
+
+### 検証結果
+
+```bash
+# ファイル確認
+$ ls -la /opt/hip3-bot/data/mainnet/signals/
+signals_2026-01-20.jsonl   # 141KB, 600+ records
+
+# サンプルデータ
+{"timestamp_ms":1768893220122,"market_key":"xyz:23","side":"buy",
+ "raw_edge_bps":17.15,"net_edge_bps":6.15,"oracle_px":186.55,
+ "best_px":186.23,"suggested_size":0.3,"signal_id":"sig_xyz:23_buy_..."}
+```
+
+---
+
 ## 次のステップ
 
-1. [ ] 24時間経過を待つ
-2. [ ] 米国市場時間帯のシグナルデータを分析
-3. [ ] Phase A DoD最終判定
-4. [ ] Phase B準備開始（条件達成の場合）
+1. [x] ~~24時間経過を待つ~~ → データ破損のためリセット
+2. [x] データ破損原因調査・修正完了
+3. [ ] JSON Lines形式で新規24時間テスト実行中
+4. [ ] 米国市場時間帯のシグナルデータを分析
+5. [ ] Phase A DoD最終判定
+6. [ ] Phase B準備開始（条件達成の場合）
+
+---
+
+## テスト再開情報
+
+| 項目 | 値 |
+|------|-----|
+| 再開日時 | 2026-01-20 07:13 UTC |
+| データ形式 | JSON Lines (.jsonl) |
+| 予定完了 | 2026-01-21 07:13 UTC |
+| 次回米国市場 | 2026-01-20 14:30 UTC (JST 23:30)

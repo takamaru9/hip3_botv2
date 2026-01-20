@@ -23,6 +23,8 @@ pub struct SignalRecord {
     pub net_edge_bps: f64,
     pub oracle_px: f64,
     pub best_px: f64,
+    /// Size available at best price (top-of-book depth).
+    pub best_size: f64,
     pub suggested_size: f64,
     pub signal_id: String,
 }
@@ -207,6 +209,7 @@ mod tests {
             net_edge_bps: 5.5,
             oracle_px: 50000.0,
             best_px: 49990.0,
+            best_size: 1.0,
             suggested_size: 0.01,
             signal_id: format!("test_{}", id),
         }

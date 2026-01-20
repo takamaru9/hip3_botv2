@@ -11,22 +11,38 @@
 
 use crate::config::{AppConfig, MarketConfig, OperatingMode};
 use crate::error::{AppError, AppResult};
-use hip3_core::{AssetId, DexId, MarketKey};
+use chrono::Utc;
+use hip3_core::{AssetId, DexId, MarketKey, OrderSide};
 use hip3_detector::{CrossDurationTracker, DislocationDetector, DislocationSignal};
 use hip3_feed::{MarketEvent, MarketState, MessageParser};
-use hip3_persistence::{ParquetWriter, SignalRecord};
+use hip3_persistence::{FollowupRecord, FollowupWriter, ParquetWriter, SignalRecord};
 use hip3_registry::{MetaClient, PreflightChecker, SpecCache};
 use hip3_risk::{RiskError, RiskGate};
 use hip3_telemetry::{DailyStatsReporter, Metrics};
 use hip3_ws::{ConnectionConfig, ConnectionManager, WsMessage};
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 
 /// Daily stats output interval (1 hour).
 const DAILY_STATS_INTERVAL: Duration = Duration::from_secs(3600);
+
+/// Followup snapshot offsets in milliseconds (T+1s, T+3s, T+5s).
+const FOLLOWUP_OFFSETS_MS: [u64; 3] = [1000, 3000, 5000];
+
+/// Context passed to followup capture tasks.
+#[derive(Debug, Clone)]
+struct FollowupContext {
+    signal_id: String,
+    market_key: MarketKey,
+    side: OrderSide,
+    signal_timestamp_ms: i64,
+    t0_oracle_px: f64,
+    t0_best_px: f64,
+    t0_raw_edge_bps: f64,
+}
 
 /// Main application.
 pub struct Application {
@@ -36,6 +52,8 @@ pub struct Application {
     risk_gate: RiskGate,
     detector: DislocationDetector,
     writer: ParquetWriter,
+    /// Followup writer for signal validation snapshots.
+    followup_writer: Arc<Mutex<FollowupWriter>>,
     // P0-31: Cross duration tracking
     cross_tracker: CrossDurationTracker,
     // P0-31: Daily stats reporter (initialized after preflight)
@@ -61,6 +79,10 @@ impl Application {
         let detector = DislocationDetector::new(config.detector.clone());
         let writer =
             ParquetWriter::new(&config.persistence.data_dir, config.persistence.buffer_size);
+        let followup_writer = Arc::new(Mutex::new(FollowupWriter::new(
+            &config.persistence.data_dir,
+            config.persistence.buffer_size,
+        )));
 
         // P0-31: Cross tracker initialized, daily_stats deferred until markets known
         let cross_tracker = CrossDurationTracker::new();
@@ -72,6 +94,7 @@ impl Application {
             risk_gate,
             detector,
             writer,
+            followup_writer,
             cross_tracker,
             daily_stats: None, // Initialized after preflight
             last_stats_output: Instant::now(),
@@ -252,6 +275,9 @@ impl Application {
                             // Persist signal
                             self.persist_signal(&signal)?;
 
+                            // Schedule followup snapshots at T+1s, T+3s, T+5s
+                            self.schedule_followups(&signal);
+
                             // Phase B: Would execute here
                             if self.config.mode == OperatingMode::Trading {
                                 warn!("Trading mode not yet implemented");
@@ -289,6 +315,18 @@ impl Application {
         // BUG-001 fix: Call close() instead of flush() to ensure Parquet footer is written.
         // flush() only writes row groups, close() finalizes the file with proper footer.
         self.writer.close()?;
+
+        // Close followup writer
+        match self.followup_writer.lock() {
+            Ok(mut writer) => {
+                if let Err(e) = writer.close() {
+                    warn!(?e, "Failed to close followup writer");
+                }
+            }
+            Err(e) => {
+                warn!(?e, "Failed to acquire lock for followup writer");
+            }
+        }
 
         // Wait for WebSocket to close
         ws_handle.abort();
@@ -434,15 +472,17 @@ impl Application {
                     // BUG-003 fix: State-change-only logging to reduce log spam.
                     // Extract gate name and reason from error.
                     let (gate_name, reason) = match &e {
-                        RiskError::GateBlocked { gate, reason } => {
-                            (gate.clone(), reason.clone())
-                        }
+                        RiskError::GateBlocked { gate, reason } => (gate.clone(), reason.clone()),
                         _ => ("unknown".to_string(), e.to_string()),
                     };
 
                     // Check if this is a state change (wasn't blocked before)
                     let state_key = (key, gate_name.clone());
-                    let was_blocked = self.gate_block_state.get(&state_key).copied().unwrap_or(false);
+                    let was_blocked = self
+                        .gate_block_state
+                        .get(&state_key)
+                        .copied()
+                        .unwrap_or(false);
 
                     if !was_blocked {
                         // State changed: was passing, now blocked -> log once
@@ -494,5 +534,179 @@ impl Application {
         self.writer
             .add_record(record)
             .map_err(AppError::Persistence)
+    }
+
+    /// Schedule followup snapshots at T+1s, T+3s, T+5s.
+    ///
+    /// Spawns background tasks to capture market state after the signal
+    /// for validation analysis.
+    fn schedule_followups(&self, signal: &DislocationSignal) {
+        let ctx = FollowupContext {
+            signal_id: signal.signal_id.clone(),
+            market_key: signal.market_key,
+            side: signal.side,
+            signal_timestamp_ms: signal.detected_at.timestamp_millis(),
+            t0_oracle_px: signal.oracle_px.inner().to_string().parse().unwrap_or(0.0),
+            t0_best_px: signal.best_px.inner().to_string().parse().unwrap_or(0.0),
+            t0_raw_edge_bps: signal.raw_edge_bps.to_string().parse().unwrap_or(0.0),
+        };
+
+        for offset_ms in FOLLOWUP_OFFSETS_MS {
+            let market_state = self.market_state.clone();
+            let followup_writer = self.followup_writer.clone();
+            let ctx = ctx.clone();
+
+            tokio::spawn(async move {
+                capture_followup(market_state, followup_writer, ctx, offset_ms).await;
+            });
+        }
+
+        debug!(
+            signal_id = %signal.signal_id,
+            "Scheduled followup snapshots at T+1s, T+3s, T+5s"
+        );
+    }
+}
+
+/// Capture a followup snapshot after delay.
+///
+/// Called from spawned tasks to record market state at T+N ms after signal.
+async fn capture_followup(
+    market_state: Arc<MarketState>,
+    followup_writer: Arc<Mutex<FollowupWriter>>,
+    ctx: FollowupContext,
+    offset_ms: u64,
+) {
+    // Wait for the specified offset
+    tokio::time::sleep(Duration::from_millis(offset_ms)).await;
+
+    let captured_at = Utc::now();
+
+    // Get current market state
+    let snapshot = match market_state.get_snapshot(&ctx.market_key) {
+        Some(s) => s,
+        None => {
+            debug!(
+                signal_id = %ctx.signal_id,
+                offset_ms,
+                "Followup capture skipped: market state not available"
+            );
+            return;
+        }
+    };
+
+    // Get current prices
+    let (best_px, best_size) = match ctx.side {
+        OrderSide::Buy => (
+            snapshot
+                .bbo
+                .ask_price
+                .inner()
+                .to_string()
+                .parse()
+                .unwrap_or(0.0),
+            snapshot
+                .bbo
+                .ask_size
+                .inner()
+                .to_string()
+                .parse()
+                .unwrap_or(0.0),
+        ),
+        OrderSide::Sell => (
+            snapshot
+                .bbo
+                .bid_price
+                .inner()
+                .to_string()
+                .parse()
+                .unwrap_or(0.0),
+            snapshot
+                .bbo
+                .bid_size
+                .inner()
+                .to_string()
+                .parse()
+                .unwrap_or(0.0),
+        ),
+    };
+    let oracle_px: f64 = snapshot
+        .ctx
+        .oracle
+        .oracle_px
+        .inner()
+        .to_string()
+        .parse()
+        .unwrap_or(0.0);
+
+    // Calculate current edge
+    let raw_edge_bps = if oracle_px > 0.0 {
+        match ctx.side {
+            OrderSide::Buy => (oracle_px - best_px) / oracle_px * 10000.0,
+            OrderSide::Sell => (best_px - oracle_px) / oracle_px * 10000.0,
+        }
+    } else {
+        0.0
+    };
+
+    // Calculate movements
+    let oracle_moved_bps = if ctx.t0_oracle_px > 0.0 {
+        (oracle_px - ctx.t0_oracle_px) / ctx.t0_oracle_px * 10000.0
+    } else {
+        0.0
+    };
+    let market_moved_bps = if ctx.t0_best_px > 0.0 {
+        (best_px - ctx.t0_best_px) / ctx.t0_best_px * 10000.0
+    } else {
+        0.0
+    };
+    let edge_change_bps = raw_edge_bps - ctx.t0_raw_edge_bps;
+
+    let record = FollowupRecord {
+        signal_id: ctx.signal_id.clone(),
+        market_key: ctx.market_key.to_string(),
+        side: ctx.side.to_string(),
+        signal_timestamp_ms: ctx.signal_timestamp_ms,
+        offset_ms,
+        captured_at_ms: captured_at.timestamp_millis(),
+        t0_oracle_px: ctx.t0_oracle_px,
+        t0_best_px: ctx.t0_best_px,
+        t0_raw_edge_bps: ctx.t0_raw_edge_bps,
+        oracle_px,
+        best_px,
+        best_size,
+        raw_edge_bps,
+        edge_change_bps,
+        oracle_moved_bps,
+        market_moved_bps,
+    };
+
+    // Write record
+    match followup_writer.lock() {
+        Ok(mut writer) => {
+            if let Err(e) = writer.add_record(record) {
+                warn!(
+                    ?e,
+                    signal_id = %ctx.signal_id,
+                    offset_ms,
+                    "Failed to write followup record"
+                );
+            } else {
+                debug!(
+                    signal_id = %ctx.signal_id,
+                    offset_ms,
+                    edge_change_bps = format!("{:.2}", edge_change_bps),
+                    "Captured followup snapshot"
+                );
+            }
+        }
+        Err(e) => {
+            warn!(
+                ?e,
+                signal_id = %ctx.signal_id,
+                offset_ms,
+                "Failed to acquire lock for followup writer"
+            );
+        }
     }
 }

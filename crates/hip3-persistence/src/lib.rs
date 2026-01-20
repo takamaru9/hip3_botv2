@@ -12,4 +12,4 @@ pub mod error;
 pub mod writer;
 
 pub use error::{PersistenceError, PersistenceResult};
-pub use writer::{JsonLinesWriter, ParquetWriter, SignalRecord};
+pub use writer::{FollowupRecord, FollowupWriter, JsonLinesWriter, ParquetWriter, SignalRecord};

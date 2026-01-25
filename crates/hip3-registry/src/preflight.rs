@@ -7,9 +7,77 @@
 
 use crate::error::{RegistryError, RegistryResult};
 use hip3_core::{AssetId, DexId, MarketKey};
+use rust_decimal::Decimal;
 use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
 use tracing::{error, info, warn};
+
+/// Deserialize tickSize as Decimal, accepting both String and Number.
+fn deserialize_tick_size<'de, D>(deserializer: D) -> Result<Option<Decimal>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::{self, Visitor};
+    use std::fmt;
+
+    struct TickSizeVisitor;
+
+    impl<'de> Visitor<'de> for TickSizeVisitor {
+        type Value = Option<Decimal>;
+
+        fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+            formatter.write_str("a string, number, or null for tickSize")
+        }
+
+        fn visit_none<E>(self) -> Result<Self::Value, E>
+        where
+            E: de::Error,
+        {
+            Ok(None)
+        }
+
+        fn visit_unit<E>(self) -> Result<Self::Value, E>
+        where
+            E: de::Error,
+        {
+            Ok(None)
+        }
+
+        fn visit_str<E>(self, v: &str) -> Result<Self::Value, E>
+        where
+            E: de::Error,
+        {
+            v.parse::<Decimal>().map(Some).map_err(de::Error::custom)
+        }
+
+        fn visit_f64<E>(self, v: f64) -> Result<Self::Value, E>
+        where
+            E: de::Error,
+        {
+            // Convert to string first to minimize precision loss from f64 rounding.
+            // Note: f64 may already have lost some precision at this point,
+            // but string parsing preserves what remains.
+            let s = v.to_string();
+            s.parse::<Decimal>().map(Some).map_err(de::Error::custom)
+        }
+
+        fn visit_i64<E>(self, v: i64) -> Result<Self::Value, E>
+        where
+            E: de::Error,
+        {
+            Ok(Some(Decimal::from(v)))
+        }
+
+        fn visit_u64<E>(self, v: u64) -> Result<Self::Value, E>
+        where
+            E: de::Error,
+        {
+            Ok(Some(Decimal::from(v)))
+        }
+    }
+
+    deserializer.deserialize_any(TickSizeVisitor)
+}
 
 /// Raw perpDexs response from exchange meta endpoint.
 #[derive(Debug, Deserialize)]
@@ -26,6 +94,10 @@ pub struct PerpDexInfo {
     pub name: String,
     /// Markets in this DEX.
     pub markets: Vec<PerpMarketInfo>,
+    /// Original index in perpDexs API array (perp_dex_id for asset ID calculation).
+    /// This is NOT the enumeration index after filtering nulls.
+    #[serde(skip)]
+    pub perp_dex_id: u16,
 }
 
 /// Information about a single perp market within a DEX.
@@ -42,6 +114,19 @@ pub struct PerpMarketInfo {
     /// Whether only isolated margin is supported.
     #[serde(rename = "onlyIsolated", default)]
     pub only_isolated: bool,
+    /// Tick size from exchange (if provided).
+    /// Accepts both String ("0.01") and Number (0.01) from API.
+    #[serde(
+        rename = "tickSize",
+        default,
+        deserialize_with = "deserialize_tick_size"
+    )]
+    pub tick_size: Option<Decimal>,
+    /// Asset index from meta(dex=xyz) API for asset ID calculation.
+    /// This is the correct index to use for: 100000 + dex_id * 10000 + asset_index
+    /// NOTE: perpDexs API uses different ordering, so this must come from meta(dex=xyz).
+    #[serde(skip)]
+    pub asset_index: Option<u32>,
 }
 
 /// Result of preflight validation.
@@ -66,6 +151,8 @@ pub struct DiscoveredMarket {
     pub sz_decimals: u8,
     /// Maximum leverage.
     pub max_leverage: u8,
+    /// Tick size from exchange (if provided).
+    pub tick_size: Option<Decimal>,
 }
 
 /// Preflight validator.
@@ -129,15 +216,21 @@ impl PreflightChecker {
     }
 
     /// Find the xyz DEX by name pattern.
-    fn find_xyz_dex<'a>(&self, dexs: &'a [PerpDexInfo]) -> RegistryResult<(u16, &'a PerpDexInfo)> {
-        for (idx, dex) in dexs.iter().enumerate() {
+    /// Returns (perp_dex_id, dex_info).
+    /// NOTE: perp_dex_id is the original API array index, used for asset ID calculation.
+    pub fn find_xyz_dex<'a>(
+        &self,
+        dexs: &'a [PerpDexInfo],
+    ) -> RegistryResult<(u16, &'a PerpDexInfo)> {
+        for dex in dexs.iter() {
             // Match by pattern (case-insensitive)
             if dex
                 .name
                 .to_lowercase()
                 .contains(&self.xyz_pattern.to_lowercase())
             {
-                return Ok((idx as u16, dex));
+                // Return perp_dex_id (original API array index), not enumeration index
+                return Ok((dex.perp_dex_id, dex));
             }
         }
 
@@ -226,20 +319,44 @@ impl PreflightChecker {
         }
     }
 
-    /// Build the list of discoveredmarkets.
+    /// Build the list of discovered markets.
+    ///
+    /// # Asset ID Calculation
+    /// Formula: 100000 + perp_dex_id * 10000 + asset_index
+    ///
+    /// IMPORTANT: asset_index must come from `meta(dex=xyz)` API, NOT `perpDexs` API.
+    /// The perpDexs API returns markets in a different order than meta(dex=xyz).
+    /// If `market.asset_index` is set, it will be used; otherwise falls back to
+    /// enumerate index (which may be incorrect for xyz DEXs).
     fn build_market_list(
         &self,
         dex_id: DexId,
         markets: &[PerpMarketInfo],
     ) -> Vec<DiscoveredMarket> {
+        let perp_dex_id = dex_id.index() as u32;
         markets
             .iter()
             .enumerate()
-            .map(|(idx, market)| DiscoveredMarket {
-                key: MarketKey::new(dex_id, AssetId::new(idx as u16)),
-                name: market.name.clone(),
-                sz_decimals: market.sz_decimals,
-                max_leverage: market.max_leverage,
+            .map(|(fallback_idx, market)| {
+                // Use asset_index from meta(dex=xyz) if available, otherwise fall back
+                // to enumerate index (which may be incorrect for builder-deployed perps)
+                let asset_idx = market.asset_index.unwrap_or_else(|| {
+                    warn!(
+                        market = %market.name,
+                        fallback_idx = fallback_idx,
+                        "Using fallback enumerate index for asset_id (may be incorrect for xyz perps)"
+                    );
+                    fallback_idx as u32
+                });
+                // Calculate full asset ID for Hyperliquid order API
+                let full_asset_id = 100000 + perp_dex_id * 10000 + asset_idx;
+                DiscoveredMarket {
+                    key: MarketKey::new(dex_id, AssetId::new(full_asset_id)),
+                    name: market.name.clone(),
+                    sz_decimals: market.sz_decimals,
+                    max_leverage: market.max_leverage,
+                    tick_size: market.tick_size,
+                }
             })
             .collect()
     }
@@ -291,24 +408,32 @@ mod tests {
                             sz_decimals: 3,
                             max_leverage: 50,
                             only_isolated: false,
+                            tick_size: None,
+                            asset_index: None,
                         },
                         PerpMarketInfo {
                             name: "ETH".to_string(),
                             sz_decimals: 2,
                             max_leverage: 50,
                             only_isolated: false,
+                            tick_size: None,
+                            asset_index: None,
                         },
                         PerpMarketInfo {
                             name: "SOL".to_string(),
                             sz_decimals: 1,
                             max_leverage: 20,
                             only_isolated: false,
+                            tick_size: None,
+                            asset_index: None,
                         },
                     ],
+                    perp_dex_id: 1, // xyz is at index 1 in perpDexs API
                 },
                 PerpDexInfo {
                     name: "other/DEX".to_string(),
                     markets: vec![],
+                    perp_dex_id: 2,
                 },
             ],
         }
@@ -321,20 +446,22 @@ mod tests {
 
         let result = checker.validate(&response).unwrap();
 
-        assert_eq!(result.xyz_dex_id.index(), 0);
+        assert_eq!(result.xyz_dex_id.index(), 1);
         assert_eq!(result.markets.len(), 3);
         assert!(result.warnings.is_empty());
 
         // Check market details
+        // Asset IDs use formula: 100000 + perpDexId * 10000 + assetIndex
+        // perpDexId = 1 for this test, so: 110000, 110001, 110002
         assert_eq!(result.markets[0].name, "BTC");
-        assert_eq!(result.markets[0].key.asset.index(), 0);
+        assert_eq!(result.markets[0].key.asset.index(), 110000);
         assert_eq!(result.markets[0].sz_decimals, 3);
 
         assert_eq!(result.markets[1].name, "ETH");
-        assert_eq!(result.markets[1].key.asset.index(), 1);
+        assert_eq!(result.markets[1].key.asset.index(), 110001);
 
         assert_eq!(result.markets[2].name, "SOL");
-        assert_eq!(result.markets[2].key.asset.index(), 2);
+        assert_eq!(result.markets[2].key.asset.index(), 110002);
     }
 
     #[test]
@@ -361,20 +488,27 @@ mod tests {
                         sz_decimals: 3,
                         max_leverage: 50,
                         only_isolated: false,
+                        tick_size: None,
+                        asset_index: None,
                     },
                     PerpMarketInfo {
                         name: "ETH".to_string(),
                         sz_decimals: 2,
                         max_leverage: 50,
                         only_isolated: false,
+                        tick_size: None,
+                        asset_index: None,
                     },
                     PerpMarketInfo {
                         name: "BTC".to_string(), // Duplicate!
                         sz_decimals: 4,
                         max_leverage: 20,
                         only_isolated: false,
+                        tick_size: None,
+                        asset_index: None,
                     },
                 ],
+                perp_dex_id: 1,
             }],
         };
 
@@ -396,14 +530,19 @@ mod tests {
                         sz_decimals: 3,
                         max_leverage: 50,
                         only_isolated: false,
+                        tick_size: None,
+                        asset_index: None,
                     },
                     PerpMarketInfo {
                         name: "TEST_TOKEN".to_string(), // Suspicious
                         sz_decimals: 2,
                         max_leverage: 50,
                         only_isolated: false,
+                        tick_size: None,
+                        asset_index: None,
                     },
                 ],
+                perp_dex_id: 1,
             }],
         };
 
@@ -420,21 +559,23 @@ mod tests {
         let response = sample_perp_dexs();
         let preflight = checker.validate(&response).unwrap();
 
-        // Valid keys
+        // Valid keys - using full asset ID format: 100000 + perpDexId * 10000 + assetIndex
+        // perpDexId = 1 for xyz DEX (index 1 in perpDexs API array)
         let valid_keys = vec![
-            MarketKey::from_indices(0, 0), // BTC
-            MarketKey::from_indices(0, 1), // ETH
+            MarketKey::from_indices(1, 110000), // BTC (asset 0): 100000 + 1*10000 + 0
+            MarketKey::from_indices(1, 110001), // ETH (asset 1): 100000 + 1*10000 + 1
         ];
         assert!(validate_market_keys(&valid_keys, &preflight.markets).is_ok());
 
         // Invalid key
         let invalid_keys = vec![
-            MarketKey::from_indices(0, 0),  // BTC - valid
-            MarketKey::from_indices(0, 99), // Invalid - doesn't exist
+            MarketKey::from_indices(1, 110000), // BTC - valid
+            MarketKey::from_indices(1, 110099), // Invalid - doesn't exist
         ];
         let result = validate_market_keys(&invalid_keys, &preflight.markets);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("xyz:99"));
+        // MarketKey Display format is "dex:asset" (e.g., "1:110099")
+        assert!(result.unwrap_err().to_string().contains("1:110099"));
     }
 
     #[test]
@@ -447,12 +588,53 @@ mod tests {
                     sz_decimals: 3,
                     max_leverage: 50,
                     only_isolated: false,
+                    tick_size: None,
+                    asset_index: None,
                 }],
+                perp_dex_id: 1,
             }],
         };
 
         let checker = PreflightChecker::new("xyz"); // lowercase
         let result = checker.validate(&response);
         assert!(result.is_ok());
+    }
+
+    /// Test tick_size deserialization from String.
+    #[test]
+    fn test_deserialize_tick_size_string() {
+        use rust_decimal::Decimal;
+        use std::str::FromStr;
+
+        let json = r#"{"name":"BTC","szDecimals":3,"maxLeverage":50,"tickSize":"0.01"}"#;
+        let info: PerpMarketInfo = serde_json::from_str(json).unwrap();
+        assert_eq!(info.tick_size, Some(Decimal::from_str("0.01").unwrap()));
+    }
+
+    /// Test tick_size deserialization from Number.
+    #[test]
+    fn test_deserialize_tick_size_number() {
+        use rust_decimal::Decimal;
+        use std::str::FromStr;
+
+        let json = r#"{"name":"BTC","szDecimals":3,"maxLeverage":50,"tickSize":0.01}"#;
+        let info: PerpMarketInfo = serde_json::from_str(json).unwrap();
+        assert_eq!(info.tick_size, Some(Decimal::from_str("0.01").unwrap()));
+    }
+
+    /// Test tick_size deserialization from null.
+    #[test]
+    fn test_deserialize_tick_size_null() {
+        let json = r#"{"name":"BTC","szDecimals":3,"maxLeverage":50,"tickSize":null}"#;
+        let info: PerpMarketInfo = serde_json::from_str(json).unwrap();
+        assert_eq!(info.tick_size, None);
+    }
+
+    /// Test tick_size deserialization when field is missing.
+    #[test]
+    fn test_deserialize_tick_size_missing() {
+        let json = r#"{"name":"BTC","szDecimals":3,"maxLeverage":50}"#;
+        let info: PerpMarketInfo = serde_json::from_str(json).unwrap();
+        assert_eq!(info.tick_size, None);
     }
 }

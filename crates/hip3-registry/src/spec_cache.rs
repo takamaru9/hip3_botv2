@@ -22,8 +22,9 @@ pub struct RawPerpSpec {
     #[serde(rename = "onlyIsolated", default)]
     pub only_isolated: bool,
     /// P1-1: Tick size from exchange (if provided).
+    /// Now accepts Decimal directly (already parsed during deserialization).
     #[serde(rename = "tickSize", default)]
-    pub tick_size: Option<String>,
+    pub tick_size: Option<Decimal>,
 }
 
 /// Spec cache entry with change tracking.
@@ -93,22 +94,23 @@ impl SpecCache {
     /// Parse spec from raw perpDexs data.
     ///
     /// P1-1: Parses tick_size from exchange if provided, otherwise uses default.
-    /// Derives max_price_decimals from tick_size.
+    /// Derives max_price_decimals from tick_size, or from formula if tick_size unavailable.
     pub fn parse_spec(&self, raw: &RawPerpSpec) -> MarketSpec {
         // Calculate lot size from sz_decimals
         // sz_decimals=3 means minimum 0.001
         let lot_size = Size::new(Decimal::ONE / Decimal::from(10u64.pow(raw.sz_decimals as u32)));
 
-        // P1-1: Parse tick_size from exchange if provided
-        let tick_size = raw
-            .tick_size
-            .as_ref()
-            .and_then(|s| s.parse::<Decimal>().ok())
-            .map(Price::new)
-            .unwrap_or_else(|| Price::new(Decimal::new(1, 2))); // Default: 0.01
-
-        // P1-1: Derive max_price_decimals from tick_size
-        let max_price_decimals = Self::decimals_from_tick_size(tick_size.inner());
+        // P1-1: Use tick_size from exchange if provided
+        let (tick_size, max_price_decimals) = if let Some(ts) = raw.tick_size {
+            // tick_size provided: derive max_price_decimals from it
+            (Price::new(ts), Self::decimals_from_tick_size(ts))
+        } else {
+            // No tickSize from API: use default 0.01 and derive max_price_decimals from formula
+            // Per Hyperliquid docs: max_price_decimals = MAX_DECIMALS - szDecimals = 6 - szDecimals
+            let default_tick = Price::new(Decimal::new(1, 2)); // 0.01
+            let max_decimals = 6u8.saturating_sub(raw.sz_decimals);
+            (default_tick, max_decimals)
+        };
 
         MarketSpec {
             tick_size,
@@ -225,7 +227,7 @@ mod tests {
             sz_decimals: 3,
             max_leverage: 50,
             only_isolated: false,
-            tick_size: None, // P1-1: No tick_size -> use default 0.01
+            tick_size: None, // P1-1: No tick_size -> use default 0.01, max_price_decimals = 6 - sz_decimals
         };
 
         let spec = cache.parse_spec(&raw);
@@ -235,9 +237,9 @@ mod tests {
         // P0-23: sz_decimals preserved
         assert_eq!(spec.sz_decimals, 3);
         assert_eq!(spec.max_sig_figs, 5);
-        // P1-1: Default tick_size 0.01 -> 2 decimals
+        // P1-1: Default tick_size 0.01, max_price_decimals = 6 - 3 = 3
         assert_eq!(spec.tick_size.inner(), dec!(0.01));
-        assert_eq!(spec.max_price_decimals, 2);
+        assert_eq!(spec.max_price_decimals, 3); // 6 - sz_decimals
     }
 
     #[test]
@@ -292,7 +294,7 @@ mod tests {
             sz_decimals: 4,
             max_leverage: 25,
             only_isolated: false,
-            tick_size: Some("0.001".to_string()),
+            tick_size: Some(dec!(0.001)),
         };
         let spec = cache.parse_spec(&raw);
         assert_eq!(spec.tick_size.inner(), dec!(0.001));
@@ -304,7 +306,7 @@ mod tests {
             sz_decimals: 0,
             max_leverage: 20,
             only_isolated: false,
-            tick_size: Some("0.5".to_string()),
+            tick_size: Some(dec!(0.5)),
         };
         let spec2 = cache.parse_spec(&raw2);
         assert_eq!(spec2.tick_size.inner(), dec!(0.5));
@@ -316,7 +318,7 @@ mod tests {
             sz_decimals: 0,
             max_leverage: 10,
             only_isolated: false,
-            tick_size: Some("1".to_string()),
+            tick_size: Some(dec!(1)),
         };
         let spec3 = cache.parse_spec(&raw3);
         assert_eq!(spec3.tick_size.inner(), dec!(1));

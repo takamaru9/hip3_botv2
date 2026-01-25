@@ -15,8 +15,8 @@ pub mod user_state;
 pub use client::MetaClient;
 pub use error::{RegistryError, RegistryResult};
 pub use preflight::{
-    DiscoveredMarket, PerpDexInfo, PerpDexsResponse, PerpMarketInfo, PreflightChecker,
-    PreflightResult,
+    validate_market_keys, DiscoveredMarket, PerpDexInfo, PerpDexsResponse, PerpMarketInfo,
+    PreflightChecker, PreflightResult,
 };
-pub use spec_cache::SpecCache;
+pub use spec_cache::{RawPerpSpec, SpecCache};
 pub use user_state::{ParsedUserFees, RawUserFeesResponse, RawUserStateResponse};

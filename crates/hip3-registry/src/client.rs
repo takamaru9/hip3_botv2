@@ -21,6 +21,15 @@ struct InfoRequest {
     request_type: String,
 }
 
+/// Request type for info endpoint with dex parameter.
+#[derive(Debug, Serialize)]
+struct InfoRequestWithDex {
+    #[serde(rename = "type")]
+    request_type: String,
+    /// DEX name for builder-deployed perps (e.g., "xyz").
+    dex: String,
+}
+
 /// Raw perpDex entry from API.
 #[derive(Debug, Deserialize)]
 struct RawPerpDexEntry {
@@ -143,22 +152,112 @@ impl MetaClient {
                     sz_decimals,
                     max_leverage,
                     only_isolated: true, // HIP-3 is isolated-only
+                    tick_size: None,     // Not available from current API; use default in SpecCache
+                    asset_index: None,   // Will be set later from meta(dex=xyz) response
                 });
             }
 
             perp_dexs.push(crate::preflight::PerpDexInfo {
                 name: dex_name,
                 markets,
+                perp_dex_id: idx as u16, // Preserve original array index for asset ID calculation
             });
+        }
+
+        // Fetch correct asset indices from meta(dex=xyz) for each xyz DEX
+        // IMPORTANT: perpDexs returns markets in different order than meta(dex=xyz)
+        // Asset IDs must use indices from meta(dex=xyz), not perpDexs
+        for dex in &mut perp_dexs {
+            if let Ok(index_map) = self.fetch_dex_meta_indices(&dex.name).await {
+                for market in &mut dex.markets {
+                    // Look up the correct index using full coin name (e.g., "xyz:SILVER")
+                    let full_name = format!("{}:{}", dex.name, market.name);
+                    if let Some(&idx) = index_map.get(&full_name) {
+                        market.asset_index = Some(idx);
+                        debug!(
+                            dex = %dex.name,
+                            market = %market.name,
+                            asset_index = idx,
+                            "Set asset_index from meta(dex) API"
+                        );
+                    } else {
+                        warn!(
+                            dex = %dex.name,
+                            market = %market.name,
+                            "Could not find asset_index in meta(dex) response"
+                        );
+                    }
+                }
+            } else {
+                warn!(
+                    dex = %dex.name,
+                    "Failed to fetch meta(dex) for asset indices, using perpDexs order (may be incorrect)"
+                );
+            }
         }
 
         info!(
             dex_count = perp_dexs.len(),
             total_markets = perp_dexs.iter().map(|d| d.markets.len()).sum::<usize>(),
-            "Successfully fetched perpDexs"
+            "Successfully fetched perpDexs with asset indices"
         );
 
         Ok(PerpDexsResponse { perp_dexs })
+    }
+
+    /// Fetch asset indices from meta(dex=xyz) API.
+    ///
+    /// This is the correct source for asset IDs. The perpDexs API returns
+    /// markets in a different order than what's used for asset ID calculation.
+    ///
+    /// # Returns
+    /// Map from full coin name (e.g., "xyz:SILVER") to asset index.
+    async fn fetch_dex_meta_indices(&self, dex_name: &str) -> RegistryResult<HashMap<String, u32>> {
+        debug!(dex = %dex_name, "Fetching meta(dex) for asset indices");
+
+        let request = InfoRequestWithDex {
+            request_type: "meta".to_string(),
+            dex: dex_name.to_string(),
+        };
+
+        let response = self
+            .client
+            .post(&self.info_url)
+            .json(&request)
+            .send()
+            .await
+            .map_err(|e| RegistryError::HttpClient(format!("HTTP request failed: {e}")))?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            return Err(RegistryError::HttpClient(format!(
+                "meta(dex={dex_name}) failed: HTTP {status}: {body}"
+            )));
+        }
+
+        let body: serde_json::Value = response.json().await.map_err(|e| {
+            RegistryError::HttpClient(format!("Failed to parse meta(dex) response: {e}"))
+        })?;
+
+        let mut index_map = HashMap::new();
+
+        // Extract universe array and build name -> index map
+        if let Some(universe) = body.get("universe").and_then(|u| u.as_array()) {
+            for (idx, entry) in universe.iter().enumerate() {
+                if let Some(name) = entry.get("name").and_then(|n| n.as_str()) {
+                    index_map.insert(name.to_string(), idx as u32);
+                }
+            }
+        }
+
+        info!(
+            dex = %dex_name,
+            asset_count = index_map.len(),
+            "Fetched asset indices from meta(dex)"
+        );
+
+        Ok(index_map)
     }
 
     /// Fetch HIP-3 asset specifications (szDecimals, maxLeverage).

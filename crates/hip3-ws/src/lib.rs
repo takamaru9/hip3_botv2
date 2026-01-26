@@ -13,11 +13,18 @@ pub mod heartbeat;
 pub mod message;
 pub mod rate_limiter;
 pub mod subscription;
+pub mod ws_write_handle;
 
-pub use connection::{ConnectionConfig, ConnectionManager, SubscriptionTarget};
+pub use connection::{ConnectionConfig, ConnectionManager, ConnectionState, SubscriptionTarget};
 pub use error::{WsError, WsResult};
-pub use message::{ChannelMessage, PongMessage, WsMessage, WsRequest, WsResponse};
+pub use message::{
+    extract_subscription_type, is_order_updates_channel, ActionResponseDetails,
+    ActionResponsePayload, ChannelMessage, FillPayload, OrderInfo, OrderUpdatePayload,
+    OrderUpdatesResult, PongMessage, PostPayload, PostRequest, PostRequestBody, PostResponseBody,
+    PostResponseData, SignaturePayload, WsMessage, WsRequest,
+};
 pub use subscription::{ReadyState, SubscriptionManager};
+pub use ws_write_handle::{PostError, WsOutbound, WsWriteHandle};
 
 use std::sync::Once;
 

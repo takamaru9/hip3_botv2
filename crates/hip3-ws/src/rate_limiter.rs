@@ -125,6 +125,14 @@ impl RateLimiter {
         self.timestamps.lock().clear();
         *self.inflight.lock() = 0;
     }
+
+    /// Reset only inflight count (call on disconnect/reconnect).
+    ///
+    /// When connection is lost, pending post responses will never arrive,
+    /// so we must reset the inflight counter to prevent permanent blocking.
+    pub fn reset_inflight(&self) {
+        *self.inflight.lock() = 0;
+    }
 }
 
 #[cfg(test)]

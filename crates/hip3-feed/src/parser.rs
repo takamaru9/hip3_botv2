@@ -140,7 +140,8 @@ pub struct MessageParser {
     /// Statistics for spot rejection.
     spot_stats: SpotRejectionStats,
     /// Coin symbol to asset index mapping (for Hyperliquid format).
-    coin_to_idx: HashMap<String, u16>,
+    /// For xyz markets, asset_idx = 100000 + perp_dex_id * 10000 + local_index.
+    coin_to_idx: HashMap<String, u32>,
 }
 
 impl MessageParser {
@@ -154,7 +155,7 @@ impl MessageParser {
     }
 
     /// Create a new message parser with coin mapping.
-    pub fn with_coin_mapping(coin_mapping: HashMap<String, u16>) -> Self {
+    pub fn with_coin_mapping(coin_mapping: HashMap<String, u32>) -> Self {
         Self {
             dex_id: DexId::XYZ,
             spot_stats: SpotRejectionStats::default(),
@@ -163,7 +164,7 @@ impl MessageParser {
     }
 
     /// Add a coin to asset index mapping.
-    pub fn add_coin_mapping(&mut self, coin: String, asset_idx: u16) {
+    pub fn add_coin_mapping(&mut self, coin: String, asset_idx: u32) {
         self.coin_to_idx.insert(coin.to_uppercase(), asset_idx);
     }
 
@@ -404,8 +405,9 @@ impl MessageParser {
         Ok(Some(MarketEvent::CtxUpdate { key, ctx }))
     }
 
-    fn extract_asset_index(&self, channel: &str) -> FeedResult<u16> {
+    fn extract_asset_index(&self, channel: &str) -> FeedResult<u32> {
         // Channel format: "channel:type:index" e.g., "bbo:perp:0"
+        // Note: For xyz markets, asset index follows the full ID format (110027, etc.)
         let parts: Vec<&str> = channel.split(':').collect();
         if parts.len() >= 3 {
             parts[2]

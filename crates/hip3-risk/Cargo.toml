@@ -10,7 +10,9 @@ description = "Hard risk gates for HIP-3 trading"
 [dependencies]
 hip3-core = { workspace = true }
 hip3-feed = { workspace = true }
+hip3-position = { workspace = true }
 hip3-registry = { workspace = true }
+parking_lot = { workspace = true }
 tokio = { workspace = true }
 serde = { workspace = true }
 tracing = { workspace = true }

@@ -1,5 +1,6 @@
 //! Executor error types.
 
+use hip3_core::MarketKey;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -15,6 +16,9 @@ pub enum ExecutorError {
 
     #[error("Rate limited")]
     RateLimited,
+
+    #[error("MarketSpec not found for market: {0}")]
+    MarketSpecNotFound(MarketKey),
 }
 
 pub type ExecutorResult<T> = Result<T, ExecutorError>;

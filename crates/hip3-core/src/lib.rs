@@ -8,6 +8,7 @@
 
 pub mod decimal;
 pub mod error;
+pub mod execution;
 pub mod market;
 pub mod order;
 pub mod types;
@@ -17,3 +18,9 @@ pub use error::{CoreError, Result};
 pub use market::{AssetId, DexId, MarketKey, MarketSpec, HIP3_MAX_SIG_FIGS};
 pub use order::{ClientOrderId, OrderSide, OrderType, TimeInForce};
 pub use types::{AssetCtx, Bbo, BboState, MarketSnapshot, OracleData};
+
+// Execution types
+pub use execution::{
+    ActionBatch, EnqueueResult, ExecutionResult, OrderState, PendingCancel, PendingOrder,
+    RejectReason, SkipReason, TrackedOrder,
+};

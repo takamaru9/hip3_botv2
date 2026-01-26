@@ -11,6 +11,10 @@ description = "Main application for HIP-3 Oracle/Mark Dislocation Taker Bot"
 name = "hip3-bot"
 path = "src/main.rs"
 
+[[bin]]
+name = "test-order"
+path = "src/bin/test_order.rs"
+
 [dependencies]
 hip3-core = { workspace = true }
 hip3-ws = { workspace = true }
@@ -34,6 +38,13 @@ tracing-subscriber = { workspace = true }
 thiserror = { workspace = true }
 anyhow = { workspace = true }
 chrono = { workspace = true }
+alloy = { workspace = true }
+tokio-tungstenite = { workspace = true }
+futures-util = { workspace = true }
+rust_decimal = { workspace = true }
 
 [dev-dependencies]
 tokio-test = { workspace = true }
+tokio-tungstenite = { workspace = true }
+futures-util = { workspace = true }
+rust_decimal_macros = { workspace = true }

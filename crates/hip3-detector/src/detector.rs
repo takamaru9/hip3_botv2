@@ -6,6 +6,7 @@
 //! Implements P0-24: HIP-3 2x fee calculation with audit trail.
 
 use crate::config::DetectorConfig;
+use crate::error::DetectorError;
 use crate::fee::{FeeCalculator, UserFees};
 use crate::signal::{DislocationSignal, SignalStrength};
 use hip3_core::types::MarketSnapshot;
@@ -32,27 +33,38 @@ impl DislocationDetector {
     ///
     /// P0-4: Uses config.taker_fee_bps as effective fee (HIP-3 2x already applied).
     /// Creates UserFees from effective bps by deriving base fee.
-    pub fn new(config: DetectorConfig) -> Self {
+    ///
+    /// Returns Err if configuration is invalid.
+    pub fn new(config: DetectorConfig) -> Result<Self, DetectorError> {
+        config.validate().map_err(DetectorError::ConfigError)?;
+
         // P0-4: config.taker_fee_bps is effective (2x applied), derive base fee
         let user_fees = UserFees::from_effective_taker_bps(config.taker_fee_bps);
         let fee_calculator =
             FeeCalculator::new(user_fees, config.slippage_bps, config.min_edge_bps);
-        Self {
+        Ok(Self {
             config,
             fee_calculator,
-        }
+        })
     }
 
     /// Create detector with custom user fees.
     ///
     /// Use this when user-specific fees are available from REST API.
-    pub fn with_user_fees(config: DetectorConfig, user_fees: UserFees) -> Self {
+    ///
+    /// Returns Err if configuration is invalid.
+    pub fn with_user_fees(
+        config: DetectorConfig,
+        user_fees: UserFees,
+    ) -> Result<Self, DetectorError> {
+        config.validate().map_err(DetectorError::ConfigError)?;
+
         let fee_calculator =
             FeeCalculator::new(user_fees, config.slippage_bps, config.min_edge_bps);
-        Self {
+        Ok(Self {
             config,
             fee_calculator,
-        }
+        })
     }
 
     /// Update user fees (e.g., after REST API fetch).
@@ -68,14 +80,25 @@ impl DislocationDetector {
     /// Check for dislocation opportunity.
     ///
     /// Returns Some(signal) if a valid opportunity is detected.
-    pub fn check(&self, key: MarketKey, snapshot: &MarketSnapshot) -> Option<DislocationSignal> {
+    ///
+    /// # Arguments
+    /// * `key` - Market key
+    /// * `snapshot` - Market snapshot with BBO and oracle data
+    /// * `threshold_override_bps` - Optional per-market threshold in basis points.
+    ///   If provided, uses this instead of fee_calculator's total_cost_bps.
+    pub fn check(
+        &self,
+        key: MarketKey,
+        snapshot: &MarketSnapshot,
+        threshold_override_bps: Option<Decimal>,
+    ) -> Option<DislocationSignal> {
         // Check buy opportunity: ask below oracle
-        if let Some(signal) = self.check_buy(key, snapshot) {
+        if let Some(signal) = self.check_buy(key, snapshot, threshold_override_bps) {
             return Some(signal);
         }
 
         // Check sell opportunity: bid above oracle
-        if let Some(signal) = self.check_sell(key, snapshot) {
+        if let Some(signal) = self.check_sell(key, snapshot, threshold_override_bps) {
             return Some(signal);
         }
 
@@ -87,7 +110,12 @@ impl DislocationDetector {
     /// Buy when: best_ask <= oracle * (1 - cost_threshold)
     ///
     /// P0-24: Uses FeeCalculator with HIP-3 2x multiplier.
-    fn check_buy(&self, key: MarketKey, snapshot: &MarketSnapshot) -> Option<DislocationSignal> {
+    fn check_buy(
+        &self,
+        key: MarketKey,
+        snapshot: &MarketSnapshot,
+        threshold_override_bps: Option<Decimal>,
+    ) -> Option<DislocationSignal> {
         // P0-14: Check if BBO is tradeable
         if !snapshot.is_tradeable() {
             return None;
@@ -109,15 +137,27 @@ impl DislocationDetector {
             return None;
         }
 
-        // P0-24: Use FeeCalculator for HIP-3 2x fee
-        let total_cost = self.fee_calculator.total_cost_bps();
-        let net_edge_bps = self.fee_calculator.net_edge_bps(raw_edge_bps);
+        // Use per-market threshold if provided, otherwise use FeeCalculator's total_cost
+        let total_cost =
+            threshold_override_bps.unwrap_or_else(|| self.fee_calculator.total_cost_bps());
+        let net_edge_bps = raw_edge_bps - total_cost;
 
         // Check if edge is sufficient
         let strength = SignalStrength::from_edge(raw_edge_bps, total_cost)?;
 
-        // Calculate suggested size
+        // Calculate suggested size (may return ZERO if liquidity too low)
         let suggested_size = self.calculate_size(snapshot, OrderSide::Buy);
+
+        // Skip signal if size is zero (low liquidity)
+        if suggested_size.is_zero() {
+            tracing::debug!(
+                %key,
+                side = "buy",
+                raw_edge_bps = %raw_edge_bps,
+                "Signal skipped due to low liquidity"
+            );
+            return None;
+        }
 
         // P0-24: Generate fee metadata for audit trail
         let fee_metadata = self.fee_calculator.metadata();
@@ -153,7 +193,12 @@ impl DislocationDetector {
     /// Sell when: best_bid >= oracle * (1 + cost_threshold)
     ///
     /// P0-24: Uses FeeCalculator with HIP-3 2x multiplier.
-    fn check_sell(&self, key: MarketKey, snapshot: &MarketSnapshot) -> Option<DislocationSignal> {
+    fn check_sell(
+        &self,
+        key: MarketKey,
+        snapshot: &MarketSnapshot,
+        threshold_override_bps: Option<Decimal>,
+    ) -> Option<DislocationSignal> {
         // P0-14: Check if BBO is tradeable
         if !snapshot.is_tradeable() {
             return None;
@@ -175,15 +220,27 @@ impl DislocationDetector {
             return None;
         }
 
-        // P0-24: Use FeeCalculator for HIP-3 2x fee
-        let total_cost = self.fee_calculator.total_cost_bps();
-        let net_edge_bps = self.fee_calculator.net_edge_bps(raw_edge_bps);
+        // Use per-market threshold if provided, otherwise use FeeCalculator's total_cost
+        let total_cost =
+            threshold_override_bps.unwrap_or_else(|| self.fee_calculator.total_cost_bps());
+        let net_edge_bps = raw_edge_bps - total_cost;
 
         // Check if edge is sufficient
         let strength = SignalStrength::from_edge(raw_edge_bps, total_cost)?;
 
-        // Calculate suggested size
+        // Calculate suggested size (may return ZERO if liquidity too low)
         let suggested_size = self.calculate_size(snapshot, OrderSide::Sell);
+
+        // Skip signal if size is zero (low liquidity)
+        if suggested_size.is_zero() {
+            tracing::debug!(
+                %key,
+                side = "sell",
+                raw_edge_bps = %raw_edge_bps,
+                "Signal skipped due to low liquidity"
+            );
+            return None;
+        }
 
         // P0-24: Generate fee metadata for audit trail
         let fee_metadata = self.fee_calculator.metadata();
@@ -214,9 +271,30 @@ impl DislocationDetector {
         ))
     }
 
-    /// Calculate suggested trade size.
+    /// Calculate liquidity adjustment factor (0.0 ~ 1.0).
     ///
-    /// size = min(alpha * top_of_book_size, max_notional / mid_price)
+    /// - Below min_book_notional: returns 0.0 (skip signal)
+    /// - Between min and normal: linear interpolation
+    /// - Above normal_book_notional: returns 1.0 (full size)
+    fn liquidity_factor(&self, book_notional: Decimal) -> Decimal {
+        let min = self.config.min_book_notional;
+        let normal = self.config.normal_book_notional;
+
+        if book_notional >= normal {
+            Decimal::ONE
+        } else if book_notional <= min {
+            Decimal::ZERO
+        } else {
+            // Linear interpolation: (book_notional - min) / (normal - min)
+            (book_notional - min) / (normal - min)
+        }
+    }
+
+    /// Calculate suggested trade size with liquidity adjustment.
+    ///
+    /// size = min(alpha * liquidity_factor * top_of_book_size, max_notional / mid_price)
+    ///
+    /// Returns Size::ZERO if liquidity is below minimum threshold.
     fn calculate_size(&self, snapshot: &MarketSnapshot, side: OrderSide) -> Size {
         // P0-14: mid_price() now returns Option<Price>
         let mid = match snapshot.bbo.mid_price() {
@@ -224,14 +302,42 @@ impl DislocationDetector {
             _ => return Size::ZERO,
         };
 
-        // Top of book size
-        let book_size = match side {
-            OrderSide::Buy => snapshot.bbo.ask_size,
-            OrderSide::Sell => snapshot.bbo.bid_size,
+        // Side-aware book size and price
+        // Buy: take liquidity from ask side, Sell: from bid side
+        let (book_size, book_price) = match side {
+            OrderSide::Buy => (snapshot.bbo.ask_size, snapshot.bbo.ask_price),
+            OrderSide::Sell => (snapshot.bbo.bid_size, snapshot.bbo.bid_price),
         };
 
+        // Calculate book notional using side's price (not mid)
+        // This provides more accurate liquidity assessment
+        let book_notional = book_size.inner() * book_price.inner();
+
+        // Calculate liquidity factor (0.0 ~ 1.0)
+        let liquidity_factor = self.liquidity_factor(book_notional);
+        if liquidity_factor.is_zero() {
+            tracing::debug!(
+                %book_notional,
+                min = %self.config.min_book_notional,
+                normal = %self.config.normal_book_notional,
+                %liquidity_factor,
+                "Liquidity too low, skipping signal"
+            );
+            return Size::ZERO;
+        }
+
+        // Adjusted alpha (scaled by liquidity)
+        let adjusted_alpha = self.config.sizing_alpha * liquidity_factor;
+
+        tracing::debug!(
+            %book_notional,
+            %liquidity_factor,
+            %adjusted_alpha,
+            "Liquidity factor applied"
+        );
+
         // Alpha-scaled book size
-        let alpha_size = Size::new(book_size.inner() * self.config.sizing_alpha);
+        let alpha_size = Size::new(book_size.inner() * adjusted_alpha);
 
         // Max notional size
         let max_size = Size::new(self.config.max_notional / mid.inner());
@@ -261,11 +367,21 @@ mod tests {
     }
 
     fn make_snapshot(oracle: Decimal, bid: Decimal, ask: Decimal) -> MarketSnapshot {
+        make_snapshot_with_size(oracle, bid, ask, dec!(1), dec!(1))
+    }
+
+    fn make_snapshot_with_size(
+        oracle: Decimal,
+        bid: Decimal,
+        ask: Decimal,
+        bid_size: Decimal,
+        ask_size: Decimal,
+    ) -> MarketSnapshot {
         let bbo = Bbo::new(
             Price::new(bid),
-            Size::new(dec!(1)),
+            Size::new(bid_size),
             Price::new(ask),
-            Size::new(dec!(1)),
+            Size::new(ask_size),
         );
         let oracle_data = OracleData::new(Price::new(oracle), Price::new(oracle));
         let ctx = AssetCtx::new(oracle_data, dec!(0.0001));
@@ -285,13 +401,13 @@ mod tests {
             ..Default::default()
         };
         // Total cost = 4 (effective) + 2 (slip) + 5 (min_edge) = 11 bps
-        let detector = DislocationDetector::with_user_fees(config, user_fees);
+        let detector = DislocationDetector::with_user_fees(config, user_fees).unwrap();
         let key = test_key();
 
         // Oracle at 50000, bid/ask around it with normal spread
         let snapshot = make_snapshot(dec!(50000), dec!(49990), dec!(50010));
 
-        let signal = detector.check(key, &snapshot);
+        let signal = detector.check(key, &snapshot, None);
         assert!(signal.is_none());
     }
 
@@ -308,14 +424,14 @@ mod tests {
             ..Default::default()
         };
         // Total cost = 4 (effective) + 2 (slip) + 4 (min_edge) = 10 bps
-        let detector = DislocationDetector::with_user_fees(config, user_fees);
+        let detector = DislocationDetector::with_user_fees(config, user_fees).unwrap();
         let key = test_key();
 
         // Oracle at 50000, ask at 49940 (12 bps below = edge after 10 bps cost)
         // Edge = (50000 - 49940) / 50000 * 10000 = 12 bps
         let snapshot = make_snapshot(dec!(50000), dec!(49920), dec!(49940));
 
-        let signal = detector.check(key, &snapshot);
+        let signal = detector.check(key, &snapshot, None);
         assert!(signal.is_some());
 
         let signal = signal.unwrap();
@@ -342,13 +458,13 @@ mod tests {
             ..Default::default()
         };
         // Total cost = 4 (effective) + 2 (slip) + 4 (min_edge) = 10 bps
-        let detector = DislocationDetector::with_user_fees(config, user_fees);
+        let detector = DislocationDetector::with_user_fees(config, user_fees).unwrap();
         let key = test_key();
 
         // Oracle at 50000, bid at 50060 (12 bps above = edge after 10 bps cost)
         let snapshot = make_snapshot(dec!(50000), dec!(50060), dec!(50080));
 
-        let signal = detector.check(key, &snapshot);
+        let signal = detector.check(key, &snapshot, None);
         assert!(signal.is_some());
 
         let signal = signal.unwrap();
@@ -366,7 +482,7 @@ mod tests {
             max_notional: dec!(1000),
             ..Default::default()
         };
-        let detector = DislocationDetector::new(config);
+        let detector = DislocationDetector::new(config).unwrap();
 
         // Book size = 1 BTC, mid = 50000
         // Alpha size = 0.1 * 1 = 0.1 BTC = $5000
@@ -393,7 +509,7 @@ mod tests {
             ..Default::default()
         };
         // Total cost = 6 (effective) + 2 (slip) + 2 (min_edge) = 10 bps
-        let detector = DislocationDetector::with_user_fees(config, user_fees);
+        let detector = DislocationDetector::with_user_fees(config, user_fees).unwrap();
 
         assert_eq!(detector.fee_calculator().effective_taker_fee_bps(), dec!(6));
         assert_eq!(detector.fee_calculator().total_cost_bps(), dec!(10));
@@ -413,7 +529,7 @@ mod tests {
             min_edge_bps: dec!(5),
             ..Default::default()
         };
-        let detector = DislocationDetector::with_user_fees(config, user_fees);
+        let detector = DislocationDetector::with_user_fees(config, user_fees).unwrap();
         let metadata = detector.fee_calculator().metadata();
 
         // Full audit trail
@@ -429,7 +545,7 @@ mod tests {
     fn test_update_user_fees() {
         // P0-24: Verify user fees can be updated at runtime
         let config = DetectorConfig::default();
-        let mut detector = DislocationDetector::new(config);
+        let mut detector = DislocationDetector::new(config).unwrap();
 
         // Initial: default fees (2 bps base -> 4 bps effective)
         assert_eq!(detector.fee_calculator().effective_taker_fee_bps(), dec!(4));
@@ -450,7 +566,7 @@ mod tests {
     fn test_null_bbo_rejected() {
         // P0-14: Verify null BBO markets are rejected
         let config = DetectorConfig::default();
-        let detector = DislocationDetector::new(config);
+        let detector = DislocationDetector::new(config).unwrap();
         let key = test_key();
 
         // Null BBO: no bid
@@ -465,7 +581,293 @@ mod tests {
         let snapshot = MarketSnapshot::new(bbo, ctx);
 
         // Should return None even if ask is below oracle
-        let signal = detector.check(key, &snapshot);
+        let signal = detector.check(key, &snapshot, None);
         assert!(signal.is_none());
+    }
+
+    // ==========================================
+    // Liquidity Factor Tests
+    // ==========================================
+
+    #[test]
+    fn test_liquidity_factor_below_minimum() {
+        // Book notional < min_book_notional -> factor = 0
+        let config = DetectorConfig {
+            min_book_notional: dec!(500),
+            normal_book_notional: dec!(5000),
+            ..Default::default()
+        };
+        let detector = DislocationDetector::new(config).unwrap();
+
+        // $300 book notional (below $500 min)
+        assert_eq!(detector.liquidity_factor(dec!(300)), Decimal::ZERO);
+        // $500 exactly (at boundary, should be 0)
+        assert_eq!(detector.liquidity_factor(dec!(500)), Decimal::ZERO);
+    }
+
+    #[test]
+    fn test_liquidity_factor_above_normal() {
+        // Book notional >= normal_book_notional -> factor = 1.0
+        let config = DetectorConfig {
+            min_book_notional: dec!(500),
+            normal_book_notional: dec!(5000),
+            ..Default::default()
+        };
+        let detector = DislocationDetector::new(config).unwrap();
+
+        // $5000 exactly (at boundary)
+        assert_eq!(detector.liquidity_factor(dec!(5000)), Decimal::ONE);
+        // $10000 (above normal)
+        assert_eq!(detector.liquidity_factor(dec!(10000)), Decimal::ONE);
+    }
+
+    #[test]
+    fn test_liquidity_factor_interpolation() {
+        // Book notional between min and normal -> linear interpolation
+        // Factor = (book_notional - min) / (normal - min)
+        let config = DetectorConfig {
+            min_book_notional: dec!(500),
+            normal_book_notional: dec!(5000),
+            ..Default::default()
+        };
+        let detector = DislocationDetector::new(config).unwrap();
+
+        // $1000: (1000-500)/(5000-500) = 500/4500 ≈ 0.111
+        let factor_1000 = detector.liquidity_factor(dec!(1000));
+        assert!(factor_1000 > dec!(0.11) && factor_1000 < dec!(0.12));
+
+        // $2750 (midpoint): (2750-500)/(5000-500) = 2250/4500 = 0.5
+        let factor_2750 = detector.liquidity_factor(dec!(2750));
+        assert_eq!(factor_2750, dec!(0.5));
+
+        // $3000: (3000-500)/(5000-500) = 2500/4500 ≈ 0.556
+        let factor_3000 = detector.liquidity_factor(dec!(3000));
+        assert!(factor_3000 > dec!(0.55) && factor_3000 < dec!(0.56));
+    }
+
+    #[test]
+    fn test_low_liquidity_skips_signal() {
+        // When book notional is below min, signal should be skipped
+        let config = DetectorConfig {
+            slippage_bps: dec!(2),
+            min_edge_bps: dec!(4),
+            min_book_notional: dec!(500),
+            normal_book_notional: dec!(5000),
+            ..Default::default()
+        };
+        let detector = DislocationDetector::new(config).unwrap();
+        let key = test_key();
+
+        // Oracle at 50000, ask at 49940 (12 bps edge - would normally trigger)
+        // Book size = 0.005 BTC, book_notional = 0.005 * 50000 = $250 (below min)
+        let snapshot = make_snapshot_with_size(
+            dec!(50000),
+            dec!(49920),
+            dec!(49940),
+            dec!(0.005),
+            dec!(0.005),
+        );
+
+        let signal = detector.check(key, &snapshot, None);
+        assert!(
+            signal.is_none(),
+            "Signal should be skipped due to low liquidity"
+        );
+    }
+
+    #[test]
+    fn test_partial_liquidity_reduces_size() {
+        // When book notional is between min and normal, size should be reduced
+        let config = DetectorConfig {
+            sizing_alpha: dec!(0.10),
+            max_notional: dec!(10000), // High max so alpha is limiting factor
+            min_book_notional: dec!(500),
+            normal_book_notional: dec!(5000),
+            ..Default::default()
+        };
+        let detector = DislocationDetector::new(config).unwrap();
+
+        // Ask price = $50010
+        // Book size = 0.055 BTC -> book_notional = 0.055 * 50010 = $2750.55
+        // (Changed from mid_price to ask_price for Buy side)
+        // Liquidity factor = (2750.55 - 500) / (5000 - 500) ≈ 0.5001
+        // Adjusted alpha = 0.10 * 0.5001 = 0.05001
+        // Alpha size = 0.055 * 0.05001 ≈ 0.002750 BTC
+        let snapshot = make_snapshot_with_size(
+            dec!(50000),
+            dec!(49990),
+            dec!(50010),
+            dec!(0.055),
+            dec!(0.055),
+        );
+
+        let size = detector.calculate_size(&snapshot, OrderSide::Buy);
+
+        // Expected: approximately 0.00275 (within 1% tolerance due to price-based calculation)
+        let expected = dec!(0.00275);
+        let diff = (size.inner() - expected).abs();
+        assert!(
+            diff < dec!(0.00003),
+            "Size {} should be close to {} (diff: {})",
+            size.inner(),
+            expected,
+            diff
+        );
+    }
+
+    #[test]
+    fn test_sell_side_uses_bid_price_for_book_notional() {
+        // Verify Sell side uses bid_price × bid_size for book_notional
+        let config = DetectorConfig {
+            sizing_alpha: dec!(0.10),
+            max_notional: dec!(10000),
+            min_book_notional: dec!(500),
+            normal_book_notional: dec!(5000),
+            ..Default::default()
+        };
+        let detector = DislocationDetector::new(config).unwrap();
+
+        // Bid price = $49990, Ask price = $50010
+        // Sell side should use bid_price for book_notional
+        // book_size = 0.055 BTC → book_notional = 0.055 * 49990 = $2749.45
+        // liquidity_factor = (2749.45 - 500) / (5000 - 500) ≈ 0.4999
+        let snapshot = make_snapshot_with_size(
+            dec!(50000),
+            dec!(49990),
+            dec!(50010),
+            dec!(0.055),
+            dec!(0.055),
+        );
+
+        let size = detector.calculate_size(&snapshot, OrderSide::Sell);
+
+        // Expected: approximately 0.00275 (similar to buy but using bid_price)
+        let expected = dec!(0.00275);
+        let diff = (size.inner() - expected).abs();
+        assert!(
+            diff < dec!(0.00003),
+            "Size {} should be close to {} (diff: {})",
+            size.inner(),
+            expected,
+            diff
+        );
+    }
+
+    #[test]
+    fn test_full_liquidity_no_reduction() {
+        // When book notional >= normal, size should not be reduced
+        let config = DetectorConfig {
+            sizing_alpha: dec!(0.10),
+            max_notional: dec!(10000), // High max so alpha is limiting factor
+            min_book_notional: dec!(500),
+            normal_book_notional: dec!(5000),
+            ..Default::default()
+        };
+        let detector = DislocationDetector::new(config).unwrap();
+
+        // Mid price = $50000
+        // Book size = 0.2 BTC -> book_notional = 0.2 * 50000 = $10000 (above normal)
+        // Liquidity factor = 1.0
+        // Alpha size = 0.2 * 0.10 = 0.02 BTC
+        let snapshot =
+            make_snapshot_with_size(dec!(50000), dec!(49990), dec!(50010), dec!(0.2), dec!(0.2));
+
+        let size = detector.calculate_size(&snapshot, OrderSide::Buy);
+
+        // Expected: 0.2 * 0.10 * 1.0 = 0.02
+        assert_eq!(size.inner(), dec!(0.02));
+    }
+
+    #[test]
+    fn test_signal_with_partial_liquidity() {
+        // Verify signal is generated but with reduced size
+        let user_fees = UserFees {
+            taker_bps: dec!(2),
+            ..Default::default()
+        };
+        let config = DetectorConfig {
+            slippage_bps: dec!(2),
+            min_edge_bps: dec!(4),
+            sizing_alpha: dec!(0.10),
+            max_notional: dec!(10000),
+            min_book_notional: dec!(500),
+            normal_book_notional: dec!(5000),
+            ..Default::default()
+        };
+        let detector = DislocationDetector::with_user_fees(config, user_fees).unwrap();
+        let key = test_key();
+
+        // Oracle at 50000, ask at 49930 (14 bps edge - enough to trigger)
+        // bid=49920, ask=49930 -> mid=49925
+        // Total cost = 4 + 2 + 4 = 10 bps, so 14 bps edge is sufficient
+        // Book size = 0.055 BTC -> book_notional = 0.055 * 49925 ≈ $2745.875
+        // Liquidity factor = (2745.875 - 500) / (5000 - 500) ≈ 0.499
+        let snapshot = make_snapshot_with_size(
+            dec!(50000),
+            dec!(49920),
+            dec!(49930),
+            dec!(0.055),
+            dec!(0.055),
+        );
+
+        let signal = detector.check(key, &snapshot, None);
+        assert!(
+            signal.is_some(),
+            "Signal should be generated with partial liquidity"
+        );
+
+        let signal = signal.unwrap();
+        // Size should be reduced by liquidity factor (roughly 50%)
+        // Full size = 0.055 * 0.10 = 0.0055
+        // With ~50% liquidity factor: ~0.00275
+        assert!(
+            signal.suggested_size.inner() > dec!(0.002)
+                && signal.suggested_size.inner() < dec!(0.003),
+            "Size should be reduced by liquidity factor, got: {}",
+            signal.suggested_size.inner()
+        );
+    }
+
+    /// Test per-market threshold override.
+    /// When threshold_override_bps is provided, it should be used instead of
+    /// the FeeCalculator's total_cost_bps.
+    #[test]
+    fn test_threshold_override() {
+        // Default config: taker_fee=4, slippage=2, min_edge=4 -> total 10bps
+        let config = DetectorConfig {
+            taker_fee_bps: dec!(4),
+            slippage_bps: dec!(2),
+            min_edge_bps: dec!(4),
+            sizing_alpha: dec!(0.1),
+            max_notional: dec!(1000),
+            min_book_notional: dec!(100),
+            normal_book_notional: dec!(1000),
+        };
+        let detector = DislocationDetector::new(config).unwrap();
+        let key = MarketKey::from_indices(1, 0);
+
+        // Snapshot with 15bps edge: oracle=50000, ask=49925 -> edge = 75/50000*10000 = 15bps
+        let snapshot = make_snapshot(dec!(50000), dec!(49925), dec!(49930));
+
+        // Test 1: Without override, signal should be generated (15bps > 10bps threshold)
+        let signal = detector.check(key, &snapshot, None);
+        assert!(
+            signal.is_some(),
+            "Signal should be generated without override (15bps > 10bps)"
+        );
+
+        // Test 2: With higher threshold override (20bps), no signal should be generated
+        let signal = detector.check(key, &snapshot, Some(dec!(20)));
+        assert!(
+            signal.is_none(),
+            "No signal should be generated with 20bps threshold (15bps < 20bps)"
+        );
+
+        // Test 3: With lower threshold override (12bps), signal should be generated
+        let signal = detector.check(key, &snapshot, Some(dec!(12)));
+        assert!(
+            signal.is_some(),
+            "Signal should be generated with 12bps threshold (15bps > 12bps)"
+        );
     }
 }

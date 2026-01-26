@@ -9,6 +9,8 @@ description = "IOC order execution for HIP-3 (Phase B)"
 
 [dependencies]
 hip3-core = { workspace = true }
+hip3-position = { workspace = true }
+hip3-registry = { workspace = true }
 hip3-ws = { workspace = true }
 tokio = { workspace = true }
 serde = { workspace = true }
@@ -17,6 +19,17 @@ tracing = { workspace = true }
 thiserror = { workspace = true }
 chrono = { workspace = true }
 rust_decimal = { workspace = true }
+parking_lot = { workspace = true }
+dashmap = { workspace = true }
+
+# Signing and cryptography
+alloy = { workspace = true }
+hex = { workspace = true }
+zeroize = { workspace = true }
+
+# MessagePack serialization (for action_hash)
+rmp-serde = { workspace = true }
 
 [dev-dependencies]
 tokio-test = { workspace = true }
+rust_decimal_macros = { workspace = true }

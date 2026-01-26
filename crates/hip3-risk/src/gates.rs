@@ -2,10 +2,33 @@
 //!
 //! These gates must ALL pass before any trade can be executed.
 //! The bot prioritizes stopping over trading when in doubt.
+//!
+//! # Gate Types
+//!
+//! ## Market Data Gates
+//! - OracleFresh (deprecated): Oracle data not stale
+//! - BboUpdate: BBO data not stale (P0-12)
+//! - CtxUpdate: AssetCtx data not stale (P0-12)
+//! - TimeRegression: No backwards time detected (P0-16)
+//! - MarkMidDivergence: Mark-Mid gap within threshold
+//! - SpreadShock: Spread not abnormally wide
+//!
+//! ## Position Gates
+//! - OiCap: Open interest below limit
+//! - MaxPositionPerMarket: Position per market within limit
+//! - MaxPositionTotal: Total portfolio position within limit
+//!
+//! ## System Gates
+//! - ParamChange: No tick/lot/fee changes
+//! - Halt: Market not halted
+//! - BufferLow: Liquidation buffer adequate
+
+use std::collections::HashMap;
 
 use crate::error::{RiskError, RiskResult};
 use hip3_core::types::MarketSnapshot;
-use hip3_core::{MarketSpec, Size};
+use hip3_core::{MarketKey, MarketSpec, Price, RejectReason, Size};
+use hip3_position::PositionTrackerHandle;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, trace, warn};
@@ -747,5 +770,413 @@ mod tests {
         for r in &results {
             assert!(!r.is_block(), "No gate should block with valid data");
         }
+    }
+}
+
+// ============================================================================
+// MaxPositionPerMarket Gate
+// ============================================================================
+
+/// MaxPositionPerMarket Gate: Limits position size per market.
+///
+/// Checks that current position + pending order notional does not exceed
+/// the maximum notional limit for a single market.
+pub struct MaxPositionPerMarketGate {
+    /// Maximum notional value in USD per market.
+    max_notional_usd: Price,
+    /// Position tracker handle for checking current positions.
+    position_handle: PositionTrackerHandle,
+}
+
+impl MaxPositionPerMarketGate {
+    /// Create a new MaxPositionPerMarket gate.
+    ///
+    /// # Arguments
+    /// - `max_notional_usd`: Maximum notional value in USD per market
+    /// - `position_handle`: Handle to the position tracker
+    #[must_use]
+    pub fn new(max_notional_usd: Price, position_handle: PositionTrackerHandle) -> Self {
+        Self {
+            max_notional_usd,
+            position_handle,
+        }
+    }
+
+    /// Check if the order would exceed the maximum position limit.
+    ///
+    /// # Arguments
+    /// - `market`: Target market
+    /// - `order_size`: Size of the proposed order
+    /// - `order_price`: Price of the proposed order
+    /// - `mark_price`: Current mark price for position valuation
+    ///
+    /// # Returns
+    /// - `Ok(())` if the order is allowed
+    /// - `Err(RejectReason::MaxPositionPerMarket)` if it would exceed the limit
+    pub fn check(
+        &self,
+        market: &MarketKey,
+        order_size: Size,
+        order_price: Price,
+        mark_price: Price,
+    ) -> Result<(), RejectReason> {
+        // Calculate current position notional at mark price
+        let current_notional = self.position_handle.get_notional(market, mark_price);
+
+        // Calculate pending notional (excluding reduce-only orders)
+        let pending_notional = self
+            .position_handle
+            .get_pending_notional_excluding_reduce_only(market, mark_price);
+
+        // Calculate order notional
+        let order_notional = Size::new(order_size.inner() * order_price.inner());
+
+        // Total notional after this order
+        let total_notional =
+            Size::new(current_notional.inner() + pending_notional.inner() + order_notional.inner());
+
+        // Check against limit
+        if total_notional.inner() > self.max_notional_usd.inner() {
+            debug!(
+                market = %market,
+                current_notional = %current_notional,
+                pending_notional = %pending_notional,
+                order_notional = %order_notional,
+                total_notional = %total_notional,
+                max_notional = %self.max_notional_usd,
+                "MaxPositionPerMarket gate blocked"
+            );
+            return Err(RejectReason::MaxPositionPerMarket);
+        }
+
+        trace!(
+            market = %market,
+            total_notional = %total_notional,
+            max_notional = %self.max_notional_usd,
+            "MaxPositionPerMarket gate passed"
+        );
+
+        Ok(())
+    }
+
+    /// Get the maximum notional limit.
+    #[must_use]
+    pub fn max_notional_usd(&self) -> Price {
+        self.max_notional_usd
+    }
+}
+
+// ============================================================================
+// MaxPositionTotal Gate
+// ============================================================================
+
+/// MaxPositionTotal Gate: Limits total portfolio position across all markets.
+///
+/// Checks that the sum of all positions + pending orders does not exceed
+/// the maximum total notional limit.
+pub struct MaxPositionTotalGate {
+    /// Maximum total notional value in USD across all markets.
+    max_total_notional_usd: Price,
+    /// Position tracker handle for checking current positions.
+    position_handle: PositionTrackerHandle,
+}
+
+impl MaxPositionTotalGate {
+    /// Create a new MaxPositionTotal gate.
+    ///
+    /// # Arguments
+    /// - `max_total_notional_usd`: Maximum total notional value in USD
+    /// - `position_handle`: Handle to the position tracker
+    #[must_use]
+    pub fn new(max_total_notional_usd: Price, position_handle: PositionTrackerHandle) -> Self {
+        Self {
+            max_total_notional_usd,
+            position_handle,
+        }
+    }
+
+    /// Check if the order would exceed the total position limit.
+    ///
+    /// # Arguments
+    /// - `order_notional`: Notional value of the proposed order
+    /// - `mark_prices`: Current mark prices for all markets with positions
+    ///
+    /// # Returns
+    /// - `Ok(())` if the order is allowed
+    /// - `Err(RejectReason::MaxPositionTotal)` if it would exceed the limit
+    pub fn check(
+        &self,
+        order_notional: Size,
+        mark_prices: &HashMap<MarketKey, Price>,
+    ) -> Result<(), RejectReason> {
+        // Calculate total current notional across all markets
+        let positions = self.position_handle.positions_snapshot();
+        let mut total_current_notional = Decimal::ZERO;
+
+        for pos in &positions {
+            if let Some(mark_px) = mark_prices.get(&pos.market) {
+                let pos_notional = pos.notional(*mark_px);
+                total_current_notional += pos_notional.inner();
+            } else {
+                // If no mark price available, use entry price as fallback
+                let pos_notional = pos.notional(pos.entry_price);
+                total_current_notional += pos_notional.inner();
+                warn!(
+                    market = %pos.market,
+                    "No mark price available for position, using entry price"
+                );
+            }
+        }
+
+        // Add order notional
+        let total_notional = total_current_notional + order_notional.inner();
+
+        // Check against limit
+        if total_notional > self.max_total_notional_usd.inner() {
+            debug!(
+                total_current_notional = %total_current_notional,
+                order_notional = %order_notional,
+                total_notional = %total_notional,
+                max_total_notional = %self.max_total_notional_usd,
+                "MaxPositionTotal gate blocked"
+            );
+            return Err(RejectReason::MaxPositionTotal);
+        }
+
+        trace!(
+            total_notional = %total_notional,
+            max_total_notional = %self.max_total_notional_usd,
+            "MaxPositionTotal gate passed"
+        );
+
+        Ok(())
+    }
+
+    /// Get the maximum total notional limit.
+    #[must_use]
+    pub fn max_total_notional_usd(&self) -> Price {
+        self.max_total_notional_usd
+    }
+}
+
+// ============================================================================
+// MaxPosition Gate Tests
+// ============================================================================
+
+#[cfg(test)]
+mod max_position_tests {
+    use super::*;
+    use hip3_core::{AssetId, DexId, OrderSide, PendingOrder, TrackedOrder};
+    use hip3_position::spawn_position_tracker;
+    use rust_decimal_macros::dec;
+
+    fn sample_market() -> MarketKey {
+        MarketKey::new(DexId::XYZ, AssetId::new(0))
+    }
+
+    fn sample_market_2() -> MarketKey {
+        MarketKey::new(DexId::XYZ, AssetId::new(1))
+    }
+
+    #[tokio::test]
+    async fn test_max_position_per_market_pass() {
+        let (handle, _join) = spawn_position_tracker(100);
+
+        // Set max notional to $10,000
+        let gate = MaxPositionPerMarketGate::new(Price::new(dec!(10000)), handle.clone());
+
+        let market = sample_market();
+        let order_size = Size::new(dec!(0.1)); // 0.1 BTC
+        let order_price = Price::new(dec!(50000)); // $50,000
+        let mark_price = Price::new(dec!(50000));
+
+        // Order notional = 0.1 * 50000 = $5000 < $10000 limit
+        let result = gate.check(&market, order_size, order_price, mark_price);
+        assert!(result.is_ok());
+
+        handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn test_max_position_per_market_block() {
+        let (handle, _join) = spawn_position_tracker(100);
+
+        // Set max notional to $10,000
+        let gate = MaxPositionPerMarketGate::new(Price::new(dec!(10000)), handle.clone());
+
+        let market = sample_market();
+        let order_size = Size::new(dec!(0.3)); // 0.3 BTC
+        let order_price = Price::new(dec!(50000)); // $50,000
+        let mark_price = Price::new(dec!(50000));
+
+        // Order notional = 0.3 * 50000 = $15000 > $10000 limit
+        let result = gate.check(&market, order_size, order_price, mark_price);
+        assert_eq!(result, Err(RejectReason::MaxPositionPerMarket));
+
+        handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn test_max_position_per_market_with_existing_position() {
+        let (handle, _join) = spawn_position_tracker(100);
+
+        let market = sample_market();
+
+        // Create existing position: 0.1 BTC @ $50000 = $5000 notional
+        handle
+            .fill(
+                market,
+                OrderSide::Buy,
+                Price::new(dec!(50000)),
+                Size::new(dec!(0.1)),
+                1234567890,
+            )
+            .await;
+
+        tokio::time::sleep(tokio::time::Duration::from_millis(20)).await;
+
+        // Set max notional to $10,000
+        let gate = MaxPositionPerMarketGate::new(Price::new(dec!(10000)), handle.clone());
+
+        // New order: 0.05 BTC @ $50000 = $2500 notional
+        // Total = $5000 + $2500 = $7500 < $10000 limit
+        let result = gate.check(
+            &market,
+            Size::new(dec!(0.05)),
+            Price::new(dec!(50000)),
+            Price::new(dec!(50000)),
+        );
+        assert!(result.is_ok());
+
+        // New order: 0.15 BTC @ $50000 = $7500 notional
+        // Total = $5000 + $7500 = $12500 > $10000 limit
+        let result = gate.check(
+            &market,
+            Size::new(dec!(0.15)),
+            Price::new(dec!(50000)),
+            Price::new(dec!(50000)),
+        );
+        assert_eq!(result, Err(RejectReason::MaxPositionPerMarket));
+
+        handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn test_max_position_total_pass() {
+        let (handle, _join) = spawn_position_tracker(100);
+
+        // Set max total notional to $20,000
+        let gate = MaxPositionTotalGate::new(Price::new(dec!(20000)), handle.clone());
+
+        let order_notional = Size::new(dec!(5000)); // $5000
+        let mark_prices = HashMap::new();
+
+        // No existing positions, order $5000 < $20000 limit
+        let result = gate.check(order_notional, &mark_prices);
+        assert!(result.is_ok());
+
+        handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn test_max_position_total_block() {
+        let (handle, _join) = spawn_position_tracker(100);
+
+        let market1 = sample_market();
+        let market2 = sample_market_2();
+
+        // Create positions in two markets
+        // Market 1: 0.2 BTC @ $50000 = $10000
+        handle
+            .fill(
+                market1,
+                OrderSide::Buy,
+                Price::new(dec!(50000)),
+                Size::new(dec!(0.2)),
+                1234567890,
+            )
+            .await;
+
+        // Market 2: 0.1 ETH @ $3000 = $300
+        handle
+            .fill(
+                market2,
+                OrderSide::Buy,
+                Price::new(dec!(3000)),
+                Size::new(dec!(0.1)),
+                1234567891,
+            )
+            .await;
+
+        tokio::time::sleep(tokio::time::Duration::from_millis(20)).await;
+
+        // Set max total notional to $15,000
+        let gate = MaxPositionTotalGate::new(Price::new(dec!(15000)), handle.clone());
+
+        let mut mark_prices = HashMap::new();
+        mark_prices.insert(market1, Price::new(dec!(50000)));
+        mark_prices.insert(market2, Price::new(dec!(3000)));
+
+        // Total current: $10000 + $300 = $10300
+        // New order: $5000
+        // Total after: $15300 > $15000 limit
+        let result = gate.check(Size::new(dec!(5000)), &mark_prices);
+        assert_eq!(result, Err(RejectReason::MaxPositionTotal));
+
+        // Smaller order: $4000
+        // Total after: $14300 < $15000 limit
+        let result = gate.check(Size::new(dec!(4000)), &mark_prices);
+        assert!(result.is_ok());
+
+        handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn test_max_position_per_market_with_pending_order() {
+        let (handle, _join) = spawn_position_tracker(100);
+
+        let market = sample_market();
+
+        // Register a pending order (not reduce-only)
+        let pending = PendingOrder::new(
+            hip3_core::ClientOrderId::new(),
+            market,
+            OrderSide::Buy,
+            Price::new(dec!(50000)),
+            Size::new(dec!(0.1)), // $5000 notional
+            false,                // not reduce-only
+            1234567890,
+        );
+        let tracked = TrackedOrder::from_pending(pending);
+        handle.register_order(tracked).await;
+
+        tokio::time::sleep(tokio::time::Duration::from_millis(20)).await;
+
+        // Set max notional to $10,000
+        let gate = MaxPositionPerMarketGate::new(Price::new(dec!(10000)), handle.clone());
+
+        // New order: 0.08 BTC @ $50000 = $4000 notional
+        // Pending: $5000
+        // Total = $4000 + $5000 = $9000 < $10000 limit
+        let result = gate.check(
+            &market,
+            Size::new(dec!(0.08)),
+            Price::new(dec!(50000)),
+            Price::new(dec!(50000)),
+        );
+        assert!(result.is_ok());
+
+        // New order: 0.12 BTC @ $50000 = $6000 notional
+        // Pending: $5000
+        // Total = $6000 + $5000 = $11000 > $10000 limit
+        let result = gate.check(
+            &market,
+            Size::new(dec!(0.12)),
+            Price::new(dec!(50000)),
+            Price::new(dec!(50000)),
+        );
+        assert_eq!(result, Err(RejectReason::MaxPositionPerMarket));
+
+        handle.shutdown().await;
     }
 }

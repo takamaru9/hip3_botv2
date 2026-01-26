@@ -11,9 +11,9 @@ use tracing::info;
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
 struct Args {
-    /// Configuration file path
-    #[arg(short, long, default_value = "config/default.toml")]
-    config: String,
+    /// Configuration file path (can also be set via HIP3_CONFIG env var)
+    #[arg(short, long)]
+    config: Option<String>,
 }
 
 #[tokio::main]
@@ -28,11 +28,18 @@ async fn main() -> Result<()> {
     hip3_telemetry::init_logging()?;
 
     info!("Starting HIP-3 Bot v{}", env!("CARGO_PKG_VERSION"));
-    info!("Phase A: Observation Mode");
+
+    // Determine config path: CLI arg > HIP3_CONFIG env var > default
+    let config_path = args
+        .config
+        .or_else(|| std::env::var("HIP3_CONFIG").ok())
+        .unwrap_or_else(|| "config/default.toml".to_string());
+
+    info!(config_path = %config_path, "Loading configuration");
 
     // Load configuration from specified file
-    let config = hip3_bot::AppConfig::from_file(&args.config)?;
-    info!(?config.mode, "Configuration loaded");
+    let config = hip3_bot::AppConfig::from_file(&config_path)?;
+    info!(?config.mode, info_url = %config.info_url, "Configuration loaded");
 
     // Create application
     let mut app = hip3_bot::Application::new(config)?;

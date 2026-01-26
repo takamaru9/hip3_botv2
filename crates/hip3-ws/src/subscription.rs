@@ -194,7 +194,8 @@ pub struct SubscriptionManager {
     /// Ready state for trading (global).
     ready_state: Arc<RwLock<ReadyState>>,
     /// Per-market ready state (P0-4, P0-7).
-    market_states: Arc<RwLock<HashMap<u16, MarketReadyState>>>,
+    /// Keys are asset IDs (u32 for xyz markets: 100000 + perpDexId * 10000 + idx).
+    market_states: Arc<RwLock<HashMap<u32, MarketReadyState>>>,
     /// Subscription start time (for timeout calculation).
     start_time: DateTime<Utc>,
 }
@@ -236,18 +237,30 @@ impl SubscriptionManager {
         self.ready_state.read().is_md_ready()
     }
 
+    /// Mark orderUpdates as ready (ACK-based).
+    ///
+    /// Called when subscriptionResponse for orderUpdates is received.
+    /// This enables READY-TRADING even when no orders exist (no orderUpdates data messages).
+    pub fn mark_order_updates_ready(&self) {
+        let mut state = self.ready_state.write();
+        if !state.order_updates_ready {
+            info!("OrderUpdates subscription ACKed, marking ready");
+            state.order_updates_ready = true;
+        }
+    }
+
     /// Get per-market ready state.
-    pub fn market_state(&self, asset_idx: u16) -> Option<MarketReadyState> {
+    pub fn market_state(&self, asset_idx: u32) -> Option<MarketReadyState> {
         self.market_states.read().get(&asset_idx).cloned()
     }
 
     /// Get all market states.
-    pub fn all_market_states(&self) -> HashMap<u16, MarketReadyState> {
+    pub fn all_market_states(&self) -> HashMap<u32, MarketReadyState> {
         self.market_states.read().clone()
     }
 
     /// Get list of ready markets (not excluded, MD ready).
-    pub fn ready_markets(&self) -> Vec<u16> {
+    pub fn ready_markets(&self) -> Vec<u32> {
         self.market_states
             .read()
             .iter()
@@ -257,7 +270,7 @@ impl SubscriptionManager {
     }
 
     /// Get list of excluded markets.
-    pub fn excluded_markets(&self) -> Vec<(u16, String)> {
+    pub fn excluded_markets(&self) -> Vec<(u32, String)> {
         self.market_states
             .read()
             .iter()
@@ -290,7 +303,7 @@ impl SubscriptionManager {
     }
 
     /// Handle incoming message with asset index for per-market tracking.
-    pub fn handle_message_with_asset(&self, channel: &str, asset_idx: Option<u16>) {
+    pub fn handle_message_with_asset(&self, channel: &str, asset_idx: Option<u32>) {
         let now = Utc::now();
         let mut state = self.ready_state.write();
 
@@ -343,7 +356,7 @@ impl SubscriptionManager {
     ///
     /// Markets that haven't received initial BBO within timeout are excluded.
     /// Returns list of newly excluded market indices.
-    pub fn check_timeouts(&self, expected_markets: &[u16]) -> Vec<u16> {
+    pub fn check_timeouts(&self, expected_markets: &[u32]) -> Vec<u32> {
         let elapsed = (Utc::now() - self.start_time)
             .to_std()
             .unwrap_or(Duration::ZERO);
@@ -377,7 +390,7 @@ impl SubscriptionManager {
     /// Check data freshness for a market (P0-12).
     ///
     /// Returns true if both BBO and AssetCtx are fresh.
-    pub fn is_market_fresh(&self, asset_idx: u16) -> bool {
+    pub fn is_market_fresh(&self, asset_idx: u32) -> bool {
         let market_states = self.market_states.read();
         let Some(state) = market_states.get(&asset_idx) else {
             return false;
@@ -417,6 +430,36 @@ impl SubscriptionManager {
     /// Get list of active subscriptions.
     pub fn active_subscriptions(&self) -> Vec<String> {
         self.subscriptions.read().iter().cloned().collect()
+    }
+
+    /// Create orderUpdates subscription request JSON.
+    ///
+    /// Returns the JSON string for subscribing to orderUpdates for a user.
+    /// Use with `WsWriteHandle::send_text()` to send.
+    pub fn order_updates_subscription_request(user_address: &str) -> String {
+        let request = serde_json::json!({
+            "method": "subscribe",
+            "subscription": {
+                "type": "orderUpdates",
+                "user": user_address
+            }
+        });
+        serde_json::to_string(&request).expect("JSON serialization should not fail")
+    }
+
+    /// Create userFills subscription request JSON.
+    ///
+    /// Returns the JSON string for subscribing to userFills for a user.
+    /// Use with `WsWriteHandle::send_text()` to send.
+    pub fn user_fills_subscription_request(user_address: &str) -> String {
+        let request = serde_json::json!({
+            "method": "subscribe",
+            "subscription": {
+                "type": "userFills",
+                "user": user_address
+            }
+        });
+        serde_json::to_string(&request).expect("JSON serialization should not fail")
     }
 }
 

@@ -192,7 +192,7 @@ impl JsonLinesWriter {
             let active = self
                 .active_writer
                 .as_mut()
-                .expect("active_writer should exist");
+                .expect("BUG: active_writer is None after create_new_writer");
 
             for record in &self.buffer {
                 // Serialize to JSON
@@ -347,7 +347,7 @@ impl FollowupWriter {
             let active = self
                 .active_writer
                 .as_mut()
-                .expect("active_writer should exist");
+                .expect("BUG: active_writer is None after create_new_writer");
 
             for record in &self.buffer {
                 let json = serde_json::to_string(record)?;

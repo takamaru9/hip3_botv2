@@ -1,0 +1,95 @@
+# HIP-3 Bot Configuration - Per-Market Optimal Thresholds
+# Purpose: Test trading with per-market optimal thresholds from Phase A analysis
+# Based on: analysis/optimal_thresholds_complete.json
+#
+# Per-market threshold_bps feature allows different thresholds per ticker.
+# This enables optimal threshold tuning based on historical EV analysis.
+#
+# Asset ID formula for xyz: 100000 + perpDexId(1) * 10000 + index_in_meta
+
+mode = "trading"
+ws_url = "wss://api.hyperliquid.xyz/ws"
+info_url = "https://api.hyperliquid.xyz/info"
+xyz_pattern = "xyz"
+is_mainnet = true
+
+# Account configuration (API wallet setup)
+user_address = "0x0116A3D95994BcC7D6A84380ED6256FBb32cD25D"
+signer_address = "0xbf8e23f88aead1a3b17d1ad39ef766e9f77de281"
+private_key = "0xd7fb667b6c9ecea9d66b6acc1f1d7b15c50dbcb93bff0eeff6a42de957fa155f"
+
+# High-EV markets with per-market optimal thresholds
+# threshold_bps: total threshold including taker_fee + slippage + min_edge
+
+# GOLD (index 3): EV=37.63bps, win=100%, signals=293/48h @ 30bps
+[[markets]]
+asset_idx = 110003
+coin = "xyz:GOLD"
+threshold_bps = 30
+
+# SILVER (index 26): EV=29.25bps, win=100%, signals=102/48h @ 30bps
+[[markets]]
+asset_idx = 110026
+coin = "xyz:SILVER"
+threshold_bps = 30
+
+# GOOGL (index 12): EV=74.22bps, win=100%, signals=165/48h @ 45bps
+[[markets]]
+asset_idx = 110012
+coin = "xyz:GOOGL"
+threshold_bps = 45
+
+# TSLA (index 1): EV=35.68bps, win=100%, signals=220/48h @ 40bps
+[[markets]]
+asset_idx = 110001
+coin = "xyz:TSLA"
+threshold_bps = 40
+
+# NVDA (index 2): EV=21.87bps, win=100%, signals=237/48h @ 25bps
+[[markets]]
+asset_idx = 110002
+coin = "xyz:NVDA"
+threshold_bps = 25
+
+[websocket]
+max_reconnect_attempts = 0
+reconnect_base_delay_ms = 1000
+heartbeat_interval_ms = 45000
+
+[risk]
+max_oracle_age_ms = 8000
+max_mark_mid_divergence_bps = 50
+spread_shock_multiplier = 3
+min_buffer_ratio = 0.15
+max_oi_fraction = 0.01
+
+[detector]
+# Global fallback threshold (used when per-market threshold_bps not set)
+# threshold = taker_fee + slippage + min_edge = 4 + 2 + 29 = 35bps
+taker_fee_bps = 4
+slippage_bps = 2
+min_edge_bps = 29  # Fallback for markets without threshold_bps
+sizing_alpha = 0.10
+max_notional = 11  # $11 limit for micro test
+min_book_notional = 500
+normal_book_notional = 5000
+
+[persistence]
+data_dir = "./data/signals"
+buffer_size = 100
+
+[telemetry]
+metrics_port = 9090
+log_level = "info"
+
+[time_stop]
+threshold_ms = 30000
+reduce_only_timeout_ms = 60000
+check_interval_ms = 1000
+slippage_bps = 50
+
+[risk_monitor]
+max_consecutive_failures = 5
+max_loss_usd = 20.0
+max_flatten_failed = 3
+window_seconds = 3600

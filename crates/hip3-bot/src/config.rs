@@ -21,10 +21,104 @@ pub enum OperatingMode {
 /// Market configuration with coin symbol mapping.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MarketConfig {
-    /// Asset index on Hyperliquid (0=BTC, 1=ETH, etc.).
-    pub asset_idx: u16,
-    /// Coin symbol (e.g., "BTC", "ETH", "SOL").
+    /// Asset index on Hyperliquid.
+    /// For xyz/HIP-3 markets: 100000 + perp_dex_id * 10000 + asset_index
+    /// Example: xyz:SILVER (perpDexId=1, index=27) = 110027
+    pub asset_idx: u32,
+    /// Coin symbol (e.g., "BTC", "ETH", "xyz:SILVER").
     pub coin: String,
+    /// Per-market threshold in basis points. If None, uses global detector config.
+    /// threshold_bps = taker_fee + slippage + min_edge
+    #[serde(default)]
+    pub threshold_bps: Option<u32>,
+}
+
+/// Time stop configuration for automatic position exit.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TimeStopConfig {
+    /// Position holding time threshold (ms). Default: 30,000 (30 seconds).
+    #[serde(default = "default_time_stop_threshold_ms")]
+    pub threshold_ms: u64,
+    /// Reduce-only order timeout before retry (ms). Default: 60,000 (60 seconds).
+    #[serde(default = "default_reduce_only_timeout_ms")]
+    pub reduce_only_timeout_ms: u64,
+    /// Check interval (ms). Default: 1,000 (1 second).
+    #[serde(default = "default_check_interval_ms")]
+    pub check_interval_ms: u64,
+    /// Slippage tolerance for flatten orders (bps). Default: 50 (0.5%).
+    #[serde(default = "default_slippage_bps")]
+    pub slippage_bps: u64,
+}
+
+fn default_time_stop_threshold_ms() -> u64 {
+    30_000
+}
+
+fn default_reduce_only_timeout_ms() -> u64 {
+    60_000
+}
+
+fn default_check_interval_ms() -> u64 {
+    1_000
+}
+
+fn default_slippage_bps() -> u64 {
+    50
+}
+
+impl Default for TimeStopConfig {
+    fn default() -> Self {
+        Self {
+            threshold_ms: default_time_stop_threshold_ms(),
+            reduce_only_timeout_ms: default_reduce_only_timeout_ms(),
+            check_interval_ms: default_check_interval_ms(),
+            slippage_bps: default_slippage_bps(),
+        }
+    }
+}
+
+/// Risk monitor configuration for HardStop triggering.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RiskMonitorConfig {
+    /// Maximum consecutive order failures before HardStop. Default: 5.
+    #[serde(default = "default_max_consecutive_failures")]
+    pub max_consecutive_failures: u32,
+    /// Maximum cumulative loss (USD) before HardStop. Default: 1000.0.
+    #[serde(default = "default_max_loss_usd")]
+    pub max_loss_usd: f64,
+    /// Maximum flatten failures before critical alert. Default: 3.
+    #[serde(default = "default_max_flatten_failed")]
+    pub max_flatten_failed: u32,
+    /// Monitoring window (seconds). Default: 3600 (1 hour).
+    #[serde(default = "default_window_seconds")]
+    pub window_seconds: u64,
+}
+
+fn default_max_consecutive_failures() -> u32 {
+    5
+}
+
+fn default_max_loss_usd() -> f64 {
+    1000.0
+}
+
+fn default_max_flatten_failed() -> u32 {
+    3
+}
+
+fn default_window_seconds() -> u64 {
+    3600
+}
+
+impl Default for RiskMonitorConfig {
+    fn default() -> Self {
+        Self {
+            max_consecutive_failures: default_max_consecutive_failures(),
+            max_loss_usd: default_max_loss_usd(),
+            max_flatten_failed: default_max_flatten_failed(),
+            window_seconds: default_window_seconds(),
+        }
+    }
 }
 
 /// Application configuration.
@@ -60,6 +154,32 @@ pub struct AppConfig {
     /// Telemetry configuration.
     #[serde(default)]
     pub telemetry: TelemetryConfig,
+    /// Time stop configuration (Trading mode only).
+    #[serde(default)]
+    pub time_stop: TimeStopConfig,
+    /// Risk monitor configuration (Trading mode only).
+    #[serde(default)]
+    pub risk_monitor: RiskMonitorConfig,
+    /// User address for trading subscriptions (required for Trading mode).
+    /// Format: "0x..." Ethereum address.
+    #[serde(default)]
+    pub user_address: Option<String>,
+    /// Expected signer address for HIP3_TRADING_KEY (API wallet / execution key).
+    /// If set, the derived address from HIP3_TRADING_KEY must match this value.
+    #[serde(default)]
+    pub signer_address: Option<String>,
+    /// Whether to use mainnet (true) or testnet (false).
+    /// Default: false (testnet).
+    #[serde(default)]
+    pub is_mainnet: Option<bool>,
+    /// Optional vault/active_pool address for post payload and signing.
+    /// If set, it is included as `vaultAddress` and affects the signed action hash.
+    #[serde(default)]
+    pub vault_address: Option<String>,
+    /// Whether to enable trading key (loaded from HIP3_TRADING_KEY env var).
+    /// If Some, trading mode will load the private key from environment variable.
+    #[serde(default)]
+    pub private_key: Option<String>,
 }
 
 fn default_info_url() -> String {
@@ -101,6 +221,7 @@ impl From<WsConfig> for ConnectionConfig {
             heartbeat_interval_ms: cfg.heartbeat_interval_ms,
             heartbeat_timeout_ms: 10000,
             subscriptions: Vec::new(), // Set separately from markets
+            user_address: None,        // Set separately for Trading mode
         }
     }
 }
@@ -159,6 +280,15 @@ impl AppConfig {
         self.markets
             .as_ref()
             .expect("Markets not set - run preflight first")
+    }
+
+    /// Try to get market configs without panicking.
+    ///
+    /// Returns `None` if markets are not set (preflight not run yet).
+    /// Prefer this over `get_markets()` when handling optional/early initialization.
+    #[must_use]
+    pub fn try_get_markets(&self) -> Option<&[MarketConfig]> {
+        self.markets.as_deref()
     }
 
     /// Set markets discovered from preflight.
@@ -221,6 +351,13 @@ impl Default for AppConfig {
             detector: DetectorConfig::default(),
             persistence: PersistenceConfig::default(),
             telemetry: TelemetryConfig::default(),
+            time_stop: TimeStopConfig::default(),
+            risk_monitor: RiskMonitorConfig::default(),
+            user_address: None,
+            signer_address: None,
+            is_mainnet: None,
+            vault_address: None,
+            private_key: None,
         }
     }
 }
@@ -244,6 +381,7 @@ mod tests {
         config.set_discovered_markets(vec![MarketConfig {
             asset_idx: 0,
             coin: "BTC".to_string(),
+            threshold_bps: None,
         }]);
         assert!(config.has_markets());
         assert_eq!(config.get_markets().len(), 1);

@@ -11,17 +11,37 @@
 
 use crate::config::{AppConfig, MarketConfig, OperatingMode};
 use crate::error::{AppError, AppResult};
+use alloy::primitives::Address;
 use chrono::Utc;
-use hip3_core::{AssetId, DexId, MarketKey, OrderSide};
+use hip3_core::{
+    AssetId, ClientOrderId, DexId, MarketKey, OrderSide, OrderState, PendingOrder, Price, Size,
+};
 use hip3_detector::{CrossDurationTracker, DislocationDetector, DislocationSignal};
+use hip3_executor::{
+    ActionBudget, BatchConfig, BatchScheduler, DynWsSender, ExecutionEvent, ExecutorConfig,
+    ExecutorHandle, ExecutorLoop, HardStopLatch, InflightTracker, KeyManager, KeySource,
+    MarkPriceProvider, MarketStateCache, NonceManager, RealWsSender, RiskMonitor,
+    RiskMonitorConfig as ExecutorRiskMonitorConfig, Signer, SystemClock, TradingReadyChecker,
+};
 use hip3_feed::{MarketEvent, MarketState, MessageParser};
 use hip3_persistence::{FollowupRecord, FollowupWriter, ParquetWriter, SignalRecord};
-use hip3_registry::{MetaClient, PreflightChecker, SpecCache};
+use hip3_position::{
+    flatten_all_positions, spawn_position_tracker, FlattenReason, PositionTrackerHandle,
+    TimeStopConfig as PositionTimeStopConfig, TimeStopMonitor,
+};
+use hip3_registry::{
+    validate_market_keys, MetaClient, PerpDexsResponse, PreflightChecker, RawPerpSpec, SpecCache,
+};
 use hip3_risk::{RiskError, RiskGate};
 use hip3_telemetry::{DailyStatsReporter, Metrics};
-use hip3_ws::{ConnectionConfig, ConnectionManager, WsMessage};
+use hip3_ws::{
+    is_order_updates_channel, ConnectionConfig, ConnectionManager, FillPayload, OrderUpdatePayload,
+    PostResponseBody, WsMessage,
+};
+use rust_decimal::Decimal;
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::str::FromStr;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
@@ -31,6 +51,17 @@ const DAILY_STATS_INTERVAL: Duration = Duration::from_secs(3600);
 
 /// Followup snapshot offsets in milliseconds (T+1s, T+3s, T+5s).
 const FOLLOWUP_OFFSETS_MS: [u64; 3] = [1000, 3000, 5000];
+
+/// Get current time in milliseconds since UNIX epoch.
+///
+/// Returns 0 if system time is before UNIX epoch (should never happen).
+fn current_time_ms() -> u64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or(std::time::Duration::ZERO)
+        .as_millis() as u64
+}
 
 /// Context passed to followup capture tasks.
 #[derive(Debug, Clone)]
@@ -53,7 +84,7 @@ pub struct Application {
     detector: DislocationDetector,
     writer: ParquetWriter,
     /// Followup writer for signal validation snapshots.
-    followup_writer: Arc<Mutex<FollowupWriter>>,
+    followup_writer: Arc<tokio::sync::Mutex<FollowupWriter>>,
     // P0-31: Cross duration tracking
     cross_tracker: CrossDurationTracker,
     // P0-31: Daily stats reporter (initialized after preflight)
@@ -65,6 +96,20 @@ pub struct Application {
     // BUG-003: Track gate block state per (market, gate) for state-change logging
     // Key: (MarketKey, gate_name), Value: was_blocked_last_tick
     gate_block_state: HashMap<(MarketKey, String), bool>,
+    // Per-market threshold overrides in basis points.
+    // Key: asset_idx (from MarketConfig), Value: threshold_bps
+    market_threshold_map: HashMap<u32, Decimal>,
+    // Phase B: Trading mode components (None in Observation mode)
+    /// Executor loop for batch order processing.
+    executor_loop: Option<Arc<ExecutorLoop>>,
+    /// Position tracker handle for order/fill state management.
+    position_tracker: Option<PositionTrackerHandle>,
+    /// Position tracker task join handle for graceful shutdown.
+    position_tracker_handle: Option<tokio::task::JoinHandle<()>>,
+    /// Connection manager reference for READY check.
+    connection_manager: Option<Arc<ConnectionManager>>,
+    /// Risk event sender for RiskMonitor.
+    risk_event_tx: Option<mpsc::Sender<ExecutionEvent>>,
 }
 
 impl Application {
@@ -76,16 +121,35 @@ impl Application {
         let market_state = Arc::new(MarketState::new());
         let spec_cache = Arc::new(SpecCache::default());
         let risk_gate = RiskGate::new(config.risk.clone());
-        let detector = DislocationDetector::new(config.detector.clone());
+        let detector = DislocationDetector::new(config.detector.clone())?;
         let writer =
             ParquetWriter::new(&config.persistence.data_dir, config.persistence.buffer_size);
-        let followup_writer = Arc::new(Mutex::new(FollowupWriter::new(
+        let followup_writer = Arc::new(tokio::sync::Mutex::new(FollowupWriter::new(
             &config.persistence.data_dir,
             config.persistence.buffer_size,
         )));
 
         // P0-31: Cross tracker initialized, daily_stats deferred until markets known
         let cross_tracker = CrossDurationTracker::new();
+
+        // Build per-market threshold map from config
+        let market_threshold_map: HashMap<u32, Decimal> = config
+            .markets
+            .as_ref()
+            .map(|markets| {
+                markets
+                    .iter()
+                    .filter_map(|m| m.threshold_bps.map(|t| (m.asset_idx, Decimal::from(t))))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        if !market_threshold_map.is_empty() {
+            info!(
+                thresholds = ?market_threshold_map,
+                "Per-market thresholds configured"
+            );
+        }
 
         Ok(Self {
             config,
@@ -100,35 +164,64 @@ impl Application {
             last_stats_output: Instant::now(),
             xyz_dex_id: None,
             gate_block_state: HashMap::new(),
+            market_threshold_map,
+            // Phase B: Initialized in Trading mode only
+            executor_loop: None,
+            position_tracker: None,
+            position_tracker_handle: None,
+            connection_manager: None,
+            risk_event_tx: None,
         })
     }
 
     /// Run preflight validation and market discovery (P0-15, P0-26, P0-27).
     ///
-    /// This fetches perpDexs from the exchange and discovers xyz markets.
+    /// This fetches perpDexs from the exchange, populates SpecCache,
+    /// and discovers xyz markets.
     /// Must be called before `run()` if markets are not specified in config.
     pub async fn run_preflight(&mut self) -> AppResult<()> {
-        // Skip if markets already configured
+        // Always fetch perpDexs for SpecCache (even if markets are configured)
+        info!(
+            info_url = %self.config.info_url,
+            "Fetching perpDexs for SpecCache initialization"
+        );
+
+        let client = MetaClient::new(&self.config.info_url)
+            .map_err(|e| AppError::Preflight(format!("Failed to create HTTP client: {e}")))?;
+
+        const PREFLIGHT_TIMEOUT: Duration = Duration::from_secs(30);
+        let perp_dexs = tokio::time::timeout(PREFLIGHT_TIMEOUT, client.fetch_perp_dexs())
+            .await
+            .map_err(|_| AppError::Preflight("Preflight HTTP request timed out (30s)".to_string()))?
+            .map_err(|e| AppError::Preflight(format!("Failed to fetch perpDexs: {e}")))?;
+
+        // Always populate SpecCache (sets xyz_dex_id too)
+        self.populate_spec_cache(&perp_dexs)?;
+
+        // Safety: In Trading mode, require explicit markets allowlist in config.
+        // Auto-discovery would subscribe/trade all xyz markets, which is too risky
+        // for mainnet micro-tests and can cause accidental multi-market exposure.
+        if self.config.mode == OperatingMode::Trading && !self.config.has_markets() {
+            return Err(AppError::Preflight(
+                "Trading mode requires explicit [[markets]] in config (auto-discovery disabled for safety)"
+                    .to_string(),
+            ));
+        }
+
+        // If markets already configured, validate against perpDexs then skip discovery
         if self.config.has_markets() {
-            info!("Markets already configured, skipping preflight");
+            // Validate configured markets exist in perpDexs
+            self.validate_configured_markets(&perp_dexs)?;
+
+            info!("Markets already configured and validated, skipping market discovery");
             self.initialize_daily_stats();
             return Ok(());
         }
 
         info!(
-            info_url = %self.config.info_url,
             xyz_pattern = %self.config.xyz_pattern,
-            "Running preflight validation (P0-15, P0-26, P0-27)"
+            "Running market discovery (P0-15, P0-26, P0-27)"
         );
-
-        // Fetch perpDexs from exchange
-        let client = MetaClient::new(&self.config.info_url)
-            .map_err(|e| AppError::Preflight(format!("Failed to create HTTP client: {e}")))?;
-
-        let perp_dexs = client
-            .fetch_perp_dexs()
-            .await
-            .map_err(|e| AppError::Preflight(format!("Failed to fetch perpDexs: {e}")))?;
 
         // Validate and discover markets
         let checker = PreflightChecker::new(&self.config.xyz_pattern);
@@ -141,9 +234,6 @@ impl Application {
             warn!(warning = %warning, "Preflight warning");
         }
 
-        // Store xyz DEX ID
-        self.xyz_dex_id = Some(result.xyz_dex_id);
-
         // Convert discovered markets to config format
         // WebSocket subscriptions require full coin name with dex prefix (e.g., "xyz:AAPL")
         let dex_prefix = &self.config.xyz_pattern;
@@ -153,6 +243,7 @@ impl Application {
             .map(|m| MarketConfig {
                 asset_idx: m.key.asset.index(),
                 coin: format!("{}:{}", dex_prefix, m.name),
+                threshold_bps: None, // Discovered markets use global threshold
             })
             .collect();
 
@@ -168,6 +259,133 @@ impl Application {
 
         // Initialize daily stats now that markets are known
         self.initialize_daily_stats();
+
+        Ok(())
+    }
+
+    /// Populate SpecCache from perpDexs response.
+    ///
+    /// Must be called during initialization to ensure ExecutorLoop has access
+    /// to market specifications for order formatting.
+    ///
+    /// # Important
+    /// This method also sets `xyz_dex_id` on the App, ensuring that the correct
+    /// DEX index is used throughout the application.
+    fn populate_spec_cache(&mut self, perp_dexs: &PerpDexsResponse) -> AppResult<()> {
+        // Use PreflightChecker to find xyz DEX (reuse same logic as validate())
+        // This ensures consistent DEX detection: contains + case-insensitive
+        let checker = PreflightChecker::new(&self.config.xyz_pattern);
+        let (dex_idx, xyz_dex) = checker
+            .find_xyz_dex(&perp_dexs.perp_dexs)
+            .map_err(|e| AppError::Preflight(format!("Failed to find xyz DEX: {e}")))?;
+
+        let dex_id = DexId::new(dex_idx);
+
+        // Set xyz_dex_id on App to ensure get_dex_id() returns correct value
+        self.xyz_dex_id = Some(dex_id);
+
+        info!(
+            dex_name = %xyz_dex.name,
+            dex_idx = dex_idx,
+            market_count = xyz_dex.markets.len(),
+            "Found xyz DEX for SpecCache initialization"
+        );
+
+        for (fallback_idx, market) in xyz_dex.markets.iter().enumerate() {
+            let raw = RawPerpSpec {
+                name: market.name.clone(),
+                sz_decimals: market.sz_decimals,
+                max_leverage: market.max_leverage,
+                only_isolated: market.only_isolated,
+                tick_size: market.tick_size, // Option<Decimal>
+            };
+            let spec = self.spec_cache.parse_spec(&raw);
+
+            // Use asset_index from meta(dex=xyz) if available
+            // IMPORTANT: perpDexs order differs from meta(dex=xyz) order
+            // Asset IDs must use indices from meta(dex=xyz) for correct order execution
+            let asset_idx = market.asset_index.unwrap_or_else(|| {
+                warn!(
+                    market = %market.name,
+                    fallback_idx = fallback_idx,
+                    "Using fallback enumerate index for SpecCache (may cause incorrect asset IDs)"
+                );
+                fallback_idx as u32
+            });
+
+            // Calculate full asset ID for Hyperliquid order API:
+            // Formula: 100000 + perp_dex_id * 10000 + asset_index
+            let full_asset_id = 100000 + (dex_idx as u32) * 10000 + asset_idx;
+            let key = MarketKey::new(dex_id, AssetId::new(full_asset_id));
+
+            self.spec_cache
+                .update(key, spec)
+                .map_err(|e| AppError::Preflight(format!("Failed to update SpecCache: {e}")))?;
+
+            debug!(
+                market = %key,
+                name = %market.name,
+                sz_decimals = market.sz_decimals,
+                tick_size = ?market.tick_size,
+                asset_index = asset_idx,
+                "Populated SpecCache"
+            );
+        }
+
+        info!(
+            market_count = xyz_dex.markets.len(),
+            dex_id = %dex_id,
+            "SpecCache populated from perpDexs with correct asset indices"
+        );
+
+        Ok(())
+    }
+
+    /// Validate that configured markets exist in perpDexs.
+    ///
+    /// This catches configuration errors like:
+    /// - Invalid asset_idx (market doesn't exist)
+    /// - Coin name mismatch
+    fn validate_configured_markets(&self, perp_dexs: &PerpDexsResponse) -> AppResult<()> {
+        let checker = PreflightChecker::new(&self.config.xyz_pattern);
+        let result = checker
+            .validate(perp_dexs)
+            .map_err(|e| AppError::Preflight(format!("Preflight validation failed: {e}")))?;
+
+        let dex_id = self.get_dex_id();
+
+        // Build configured market keys from asset_idx
+        let configured_keys: Vec<MarketKey> = self
+            .config
+            .get_markets()
+            .iter()
+            .map(|m| MarketKey::new(dex_id, AssetId::new(m.asset_idx)))
+            .collect();
+
+        // Validate all configured keys exist in discovered markets
+        validate_market_keys(&configured_keys, &result.markets).map_err(|e| {
+            AppError::Preflight(format!("Configured market validation failed: {e}"))
+        })?;
+
+        // Optional: Warn if coin names don't match
+        for configured in self.config.get_markets() {
+            let key = MarketKey::new(dex_id, AssetId::new(configured.asset_idx));
+            if let Some(discovered) = result.markets.iter().find(|m| m.key == key) {
+                if !configured.coin.ends_with(&discovered.name) {
+                    warn!(
+                        configured_coin = %configured.coin,
+                        discovered_name = %discovered.name,
+                        key = %key,
+                        "Configured coin name doesn't match perpDexs - verify configuration"
+                    );
+                }
+            }
+        }
+
+        info!(
+            market_count = configured_keys.len(),
+            "Configured markets validated against perpDexs"
+        );
 
         Ok(())
     }
@@ -203,6 +421,74 @@ impl Application {
 
         info!(mode = ?self.config.mode, "Starting application");
 
+        // Trading-mode config validation (fail fast before starting background tasks).
+        let (
+            trading_expected_signer_address,
+            trading_user_address,
+            trading_is_mainnet,
+            trading_vault_address,
+            trading_vault_address_str,
+        ) = if self.config.mode == OperatingMode::Trading {
+            let user_address = self.config.user_address.as_deref().ok_or_else(|| {
+                AppError::Config("Trading mode requires `user_address`".to_string())
+            })?;
+
+            // Validate formatting early (used for subscriptions/account scoping).
+            Address::from_str(user_address).map_err(|e| {
+                AppError::Config(format!("Invalid `user_address` (expected 0x...): {e}"))
+            })?;
+
+            let expected_signer_address = match self.config.signer_address.as_deref() {
+                Some(addr) => Some(Address::from_str(addr).map_err(|e| {
+                    AppError::Config(format!("Invalid `signer_address` (expected 0x...): {e}"))
+                })?),
+                None => None,
+            };
+
+            if self.config.private_key.is_none() {
+                return Err(AppError::Config(
+                    "Trading mode requires `private_key` (enable HIP3_TRADING_KEY env var)"
+                        .to_string(),
+                ));
+            }
+
+            let is_mainnet = self.config.is_mainnet.ok_or_else(|| {
+                AppError::Config("Trading mode requires `is_mainnet` = true|false".to_string())
+            })?;
+
+            let vault_address_str = self.config.vault_address.clone();
+            let vault_address = match vault_address_str.as_deref() {
+                Some(addr) => Some(Address::from_str(addr).map_err(|e| {
+                    AppError::Config(format!("Invalid `vault_address` (expected 0x...): {e}"))
+                })?),
+                None => None,
+            };
+
+            // Heuristic safety warnings for common misconfiguration.
+            if self.config.ws_url.contains("testnet") && is_mainnet {
+                warn!(
+                    ws_url = %self.config.ws_url,
+                    "ws_url looks testnet but is_mainnet=true"
+                );
+            }
+            if !self.config.ws_url.contains("testnet") && !is_mainnet {
+                warn!(
+                    ws_url = %self.config.ws_url,
+                    "ws_url looks mainnet but is_mainnet=false"
+                );
+            }
+
+            (
+                expected_signer_address,
+                Some(user_address.to_string()),
+                is_mainnet,
+                vault_address,
+                vault_address_str,
+            )
+        } else {
+            (None, self.config.user_address.clone(), false, None, None)
+        };
+
         // Create message channel
         let (message_tx, mut message_rx) = mpsc::channel::<WsMessage>(1000);
 
@@ -210,21 +496,367 @@ impl Application {
         let mut ws_config: ConnectionConfig = self.config.websocket.clone().into();
         ws_config.url = self.config.ws_url.clone();
         ws_config.subscriptions = self.config.subscription_targets();
+        ws_config.user_address = trading_user_address.clone();
 
         info!(
             subscriptions = ?ws_config.subscriptions.iter().map(|s| &s.coin).collect::<Vec<_>>(),
+            user_address = ?ws_config.user_address,
             "Configured WebSocket subscriptions"
         );
 
         let connection_manager = Arc::new(ConnectionManager::new(ws_config, message_tx));
+        self.connection_manager = Some(connection_manager.clone());
         let connection_manager_clone = connection_manager.clone();
 
         // Spawn WebSocket connection task
-        let ws_handle = tokio::spawn(async move {
+        let mut ws_handle = tokio::spawn(async move {
             if let Err(e) = connection_manager_clone.connect().await {
                 error!(?e, "WebSocket connection failed");
             }
         });
+
+        // Trading mode initialization
+        let _tick_handle: Option<tokio::task::JoinHandle<()>> = if self.config.mode
+            == OperatingMode::Trading
+        {
+            info!("Initializing Trading mode components");
+
+            // 1. Position Tracker (actor)
+            let (position_tracker, pos_join_handle) = spawn_position_tracker(100);
+            self.position_tracker = Some(position_tracker.clone());
+            self.position_tracker_handle = Some(pos_join_handle);
+
+            // 2. HardStopLatch and InflightTracker (shared dependencies)
+            let hard_stop_latch = Arc::new(HardStopLatch::new());
+            let inflight_tracker = Arc::new(InflightTracker::new(10)); // max 10 inflight
+
+            // 3. BatchScheduler
+            let batch_scheduler = Arc::new(BatchScheduler::new(
+                BatchConfig::default(),
+                inflight_tracker.clone(),
+                hard_stop_latch.clone(),
+            ));
+
+            // 4. TradingReadyChecker
+            let (ready_checker, _ready_rx) = TradingReadyChecker::new();
+            let ready_checker = Arc::new(ready_checker);
+
+            // 5. ActionBudget
+            let action_budget = Arc::new(ActionBudget::default());
+
+            // 6. Executor core
+            // Safety: Tie executor notional caps to detector.max_notional so config-level
+            // micro-test limits also apply at the executor gate layer.
+            let executor_config = ExecutorConfig {
+                max_notional_per_market: self.config.detector.max_notional,
+                max_notional_total: self.config.detector.max_notional,
+            };
+            let executor = Arc::new(hip3_executor::Executor::new(
+                position_tracker.clone(),
+                batch_scheduler.clone(),
+                ready_checker.clone(),
+                hard_stop_latch.clone(),
+                action_budget.clone(),
+                executor_config,
+                Arc::new(MarketStateCache::default()),
+            ));
+
+            // 7. KeyManager (uses KeySource struct variant)
+            let key_source = self.config.private_key.as_ref().map(|_| {
+                // Use env var for security (config just indicates "use env")
+                KeySource::EnvVar {
+                    var_name: "HIP3_TRADING_KEY".to_string(),
+                }
+            });
+            let key_manager = Arc::new(
+                KeyManager::load(key_source, trading_expected_signer_address)
+                    .map_err(|e| AppError::Executor(format!("KeyManager error: {e}")))?,
+            );
+
+            // 8. Signer
+            let signer = Arc::new(
+                Signer::new(key_manager.clone(), trading_is_mainnet)
+                    .map_err(|e| AppError::Executor(format!("Signer error: {e}")))?,
+            );
+            info!(
+                trading_address = ?signer.trading_address(),
+                user_address = ?trading_user_address,
+                expected_signer_address = ?trading_expected_signer_address,
+                vault_address = ?trading_vault_address_str,
+                is_mainnet = trading_is_mainnet,
+                "Signer initialized"
+            );
+
+            // 9. NonceManager
+            let nonce_manager = Arc::new(NonceManager::new(SystemClock));
+
+            // 10. ExecutorLoop
+            let mut executor_loop = ExecutorLoop::new(
+                executor.clone(),
+                nonce_manager,
+                signer,
+                5000,
+                self.spec_cache.clone(),
+            );
+            executor_loop.set_vault_address(trading_vault_address);
+
+            // 11. Wire WsSender
+            let ws_write_handle = connection_manager.write_handle();
+            let real_ws_sender: DynWsSender = Arc::new(RealWsSender::new(
+                ws_write_handle,
+                trading_vault_address_str.clone(),
+            ));
+            executor_loop.set_ws_sender(real_ws_sender);
+
+            let executor_loop = Arc::new(executor_loop);
+            self.executor_loop = Some(executor_loop.clone());
+
+            // 12. Spawn ExecutorLoop tick task (100ms interval)
+            let tick_executor_loop = executor_loop.clone();
+            let tick_handle = tokio::spawn(async move {
+                let mut interval = tokio::time::interval(Duration::from_millis(100));
+                loop {
+                    interval.tick().await;
+                    tick_executor_loop.tick(current_time_ms()).await;
+                }
+            });
+
+            // 13. TimeStopMonitor for automatic position exit
+            {
+                // Create flatten channel (TimeStopMonitor -> BatchScheduler)
+                let (flatten_tx, mut flatten_rx) = mpsc::channel::<hip3_core::PendingOrder>(100);
+
+                // Spawn flatten receiver task that forwards to BatchScheduler
+                let flatten_batch_scheduler = batch_scheduler.clone();
+                tokio::spawn(async move {
+                    while let Some(order) = flatten_rx.recv().await {
+                        debug!(
+                            cloid = %order.cloid,
+                            market = %order.market,
+                            side = ?order.side,
+                            "Flatten order received, enqueueing to BatchScheduler"
+                        );
+                        flatten_batch_scheduler.enqueue_reduce_only(order);
+                    }
+                    info!("Flatten receiver task stopped (channel closed)");
+                });
+
+                // Create MarkPriceProvider from executor's market_state_cache
+                let price_provider = Arc::new(MarkPriceProvider::new(
+                    executor_loop.executor().market_state_cache().clone(),
+                ));
+
+                // Create TimeStopConfig from app config
+                let time_stop_config = PositionTimeStopConfig::new(
+                    self.config.time_stop.threshold_ms,
+                    self.config.time_stop.reduce_only_timeout_ms,
+                );
+
+                // Create TimeStopMonitor
+                let time_stop_monitor = TimeStopMonitor::new(
+                    time_stop_config,
+                    position_tracker.clone(),
+                    flatten_tx,
+                    price_provider,
+                    self.config.time_stop.slippage_bps,
+                    self.config.time_stop.check_interval_ms,
+                );
+
+                // Spawn TimeStopMonitor task
+                tokio::spawn(async move {
+                    time_stop_monitor.run().await;
+                });
+
+                info!(
+                    threshold_ms = self.config.time_stop.threshold_ms,
+                    slippage_bps = self.config.time_stop.slippage_bps,
+                    "TimeStopMonitor started"
+                );
+            }
+
+            // 14. RiskMonitor for risk condition monitoring
+            {
+                // Create event channel (Application -> RiskMonitor)
+                let (event_tx, event_rx) = mpsc::channel::<ExecutionEvent>(100);
+                self.risk_event_tx = Some(event_tx);
+
+                // Create executor handle channel (RiskMonitor -> Executor on HardStop)
+                let (executor_handle_tx, mut executor_handle_rx) = mpsc::channel::<String>(10);
+                let executor_handle = ExecutorHandle::new(executor_handle_tx);
+
+                // Spawn executor handle receiver task
+                let hard_stop_for_handle = hard_stop_latch.clone();
+                tokio::spawn(async move {
+                    while let Some(reason) = executor_handle_rx.recv().await {
+                        warn!(reason = %reason, "Received HardStop command from RiskMonitor");
+                        // HardStop is already triggered by RiskMonitor, but we log for visibility
+                        if !hard_stop_for_handle.is_triggered() {
+                            hard_stop_for_handle.trigger(&reason);
+                        }
+                    }
+                });
+
+                // Map app config to executor RiskMonitorConfig
+                let risk_config = ExecutorRiskMonitorConfig {
+                    max_cumulative_loss: Decimal::from_f64_retain(
+                        self.config.risk_monitor.max_loss_usd,
+                    )
+                    .unwrap_or_default(),
+                    max_consecutive_losses: self.config.risk_monitor.max_consecutive_failures,
+                    max_flatten_failed: self.config.risk_monitor.max_flatten_failed,
+                    max_rejected_per_hour: 10,         // Default
+                    max_slippage_bps: 50.0,            // Default
+                    slippage_consecutive_threshold: 3, // Default
+                };
+
+                // Create RiskMonitor
+                let risk_monitor = RiskMonitor::new(
+                    event_rx,
+                    hard_stop_latch.clone(),
+                    executor_handle,
+                    risk_config,
+                );
+
+                // Spawn RiskMonitor task
+                tokio::spawn(async move {
+                    risk_monitor.run().await;
+                });
+
+                info!(
+                    max_loss_usd = self.config.risk_monitor.max_loss_usd,
+                    max_consecutive_failures = self.config.risk_monitor.max_consecutive_failures,
+                    max_flatten_failed = self.config.risk_monitor.max_flatten_failed,
+                    "RiskMonitor started"
+                );
+            }
+
+            // 15. HardStop Flatten Watcher
+            {
+                let hard_stop_watcher_latch = hard_stop_latch.clone();
+                let hard_stop_watcher_tracker = position_tracker.clone();
+                let hard_stop_watcher_scheduler = batch_scheduler.clone();
+                let hard_stop_watcher_cache = executor_loop.executor().market_state_cache().clone();
+                let hard_stop_slippage_bps = self.config.time_stop.slippage_bps;
+
+                tokio::spawn(async move {
+                    const MAX_RETRIES: u32 = 3;
+                    const RETRY_INTERVAL_MS: u64 = 1000;
+                    const CHECK_INTERVAL_MS: u64 = 100;
+
+                    let mut triggered = false;
+                    let mut retry_count = 0u32;
+
+                    loop {
+                        tokio::time::sleep(Duration::from_millis(CHECK_INTERVAL_MS)).await;
+
+                        if hard_stop_watcher_latch.is_triggered() && !triggered {
+                            triggered = true;
+                            warn!("🛑 HardStop detected, initiating flatten sequence");
+                        }
+
+                        if triggered {
+                            // Get all positions
+                            let positions = hard_stop_watcher_tracker.positions_snapshot();
+
+                            if positions.is_empty() {
+                                info!("All positions flattened successfully (or none existed)");
+                                break;
+                            }
+
+                            // Create flatten requests
+                            let now_ms = current_time_ms();
+                            let flatten_requests =
+                                flatten_all_positions(&positions, FlattenReason::HardStop, now_ms);
+
+                            if flatten_requests.is_empty() {
+                                info!("No non-zero positions to flatten");
+                                break;
+                            }
+
+                            // Convert to PendingOrders and enqueue
+                            for request in &flatten_requests {
+                                // Get mark price for limit price calculation
+                                let mark_price =
+                                    match hard_stop_watcher_cache.get_mark_px(&request.market) {
+                                        Some(p) => p,
+                                        None => {
+                                            error!(
+                                                market = %request.market,
+                                                "Cannot flatten: no mark price available"
+                                            );
+                                            continue;
+                                        }
+                                    };
+
+                                // Calculate limit price with slippage
+                                let slippage_multiplier = if request.side == OrderSide::Buy {
+                                    // Buy (close short): mark * (1 + slippage)
+                                    Decimal::new(10000 + hard_stop_slippage_bps as i64, 4)
+                                } else {
+                                    // Sell (close long): mark * (1 - slippage)
+                                    Decimal::new(10000 - hard_stop_slippage_bps as i64, 4)
+                                };
+                                let limit_price =
+                                    Price::new(mark_price.inner() * slippage_multiplier);
+
+                                // Create reduce-only PendingOrder
+                                let pending_order = PendingOrder {
+                                    cloid: ClientOrderId::new(),
+                                    market: request.market,
+                                    side: request.side,
+                                    price: limit_price,
+                                    size: request.size,
+                                    reduce_only: true,
+                                    created_at: now_ms,
+                                };
+
+                                debug!(
+                                    market = %request.market,
+                                    side = ?request.side,
+                                    size = %request.size,
+                                    limit_price = %limit_price,
+                                    "Enqueuing HardStop flatten order"
+                                );
+
+                                hard_stop_watcher_scheduler.enqueue_reduce_only(pending_order);
+                            }
+
+                            info!(
+                                count = flatten_requests.len(),
+                                retry = retry_count,
+                                "Enqueued HardStop flatten orders"
+                            );
+
+                            retry_count += 1;
+                            if retry_count >= MAX_RETRIES {
+                                let remaining =
+                                    hard_stop_watcher_tracker.positions_snapshot().len();
+                                if remaining > 0 {
+                                    error!(
+                                            remaining = remaining,
+                                            max_retries = MAX_RETRIES,
+                                            "⚠️ CRITICAL: Positions remain after max retries. Manual intervention required."
+                                        );
+                                }
+                                break;
+                            }
+
+                            // Wait before retry
+                            tokio::time::sleep(Duration::from_millis(RETRY_INTERVAL_MS)).await;
+                        }
+                    }
+
+                    info!("HardStop flatten watcher stopped");
+                });
+
+                info!("HardStop flatten watcher started");
+            }
+
+            info!("Trading mode initialized with ExecutorLoop, PositionTracker, TimeStopMonitor, RiskMonitor, and HardStop Flatten");
+            Some(tick_handle)
+        } else {
+            None
+        };
 
         // Create message parser with coin mappings
         let mut parser = MessageParser::new();
@@ -278,9 +910,34 @@ impl Application {
                             // Schedule followup snapshots at T+1s, T+3s, T+5s
                             self.schedule_followups(&signal);
 
-                            // Phase B: Would execute here
+                            // Phase B: Execute signal
                             if self.config.mode == OperatingMode::Trading {
-                                warn!("Trading mode not yet implemented");
+                                // Gate: Check WS READY-TRADING before processing signal
+                                if let Some(ref cm) = self.connection_manager {
+                                    if !cm.is_ready() {
+                                        debug!(
+                                            market = %signal.market_key,
+                                            "Signal dropped: not ready for trading"
+                                        );
+                                        continue;
+                                    }
+                                }
+
+                                // Execute signal via Executor
+                                if let Some(ref executor_loop) = self.executor_loop {
+                                    let result = executor_loop.executor().on_signal(
+                                        &signal.market_key,
+                                        signal.side,
+                                        signal.best_px,
+                                        signal.suggested_size,
+                                        current_time_ms(),
+                                    );
+                                    debug!(
+                                        signal_id = %signal.signal_id,
+                                        result = ?result,
+                                        "Signal execution result"
+                                    );
+                                }
                             }
                         }
                     }
@@ -317,38 +974,126 @@ impl Application {
         self.writer.close()?;
 
         // Close followup writer
-        match self.followup_writer.lock() {
-            Ok(mut writer) => {
-                if let Err(e) = writer.close() {
-                    warn!(?e, "Failed to close followup writer");
-                }
-            }
-            Err(e) => {
-                warn!(?e, "Failed to acquire lock for followup writer");
+        {
+            let mut writer = self.followup_writer.lock().await;
+            if let Err(e) = writer.close() {
+                warn!(?e, "Failed to close followup writer");
             }
         }
 
-        // Wait for WebSocket to close
-        ws_handle.abort();
+        // Abort tick handle if running
+        if let Some(handle) = _tick_handle {
+            handle.abort();
+        }
+
+        // Graceful shutdown of Position Tracker (P0-2)
+        if let Some(ref tracker) = self.position_tracker {
+            debug!("Sending shutdown to position tracker");
+            tracker.shutdown().await;
+        }
+        if let Some(handle) = self.position_tracker_handle.take() {
+            const POSITION_TRACKER_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
+            match tokio::time::timeout(POSITION_TRACKER_SHUTDOWN_TIMEOUT, handle).await {
+                Ok(Ok(())) => debug!("Position tracker task completed"),
+                Ok(Err(e)) => warn!(?e, "Position tracker task panicked"),
+                Err(_) => warn!("Position tracker shutdown timed out (5s)"),
+            }
+        }
+
+        // Graceful shutdown of WebSocket connection (F2-4)
+        if let Some(ref cm) = self.connection_manager {
+            cm.shutdown();
+        }
+        const WS_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
+
+        // Use select! instead of timeout to keep handle for abort
+        tokio::select! {
+            result = &mut ws_handle => {
+                match result {
+                    Ok(()) => debug!("WebSocket task completed"),
+                    Err(e) => warn!(?e, "WebSocket task panicked"),
+                }
+            }
+            () = tokio::time::sleep(WS_SHUTDOWN_TIMEOUT) => {
+                warn!("WebSocket shutdown timed out (5s), aborting task");
+                ws_handle.abort();
+            }
+        }
 
         Ok(())
     }
 
     /// Handle incoming WebSocket message.
     async fn handle_message(&self, parser: &MessageParser, msg: WsMessage) -> AppResult<()> {
-        match msg {
+        match &msg {
             WsMessage::Channel(channel_msg) => {
-                // Parse and update market state
+                let channel = &channel_msg.channel;
+
+                // Handle post responses (Trading mode)
+                if channel == "post" {
+                    if let Some(resp) = msg.as_post_response() {
+                        if let Some(ref executor_loop) = self.executor_loop {
+                            match resp.response {
+                                PostResponseBody::Action { .. } => {
+                                    executor_loop.on_response_ok(resp.id);
+                                    debug!(post_id = resp.id, "Post response OK");
+                                }
+                                PostResponseBody::Error { ref payload } => {
+                                    executor_loop.on_response_rejected(resp.id, payload.clone());
+                                    warn!(post_id = resp.id, reason = %payload, "Post response rejected");
+                                }
+                            }
+                        } else {
+                            debug!(post_id = resp.id, "Post response ignored: no executor_loop");
+                        }
+                    }
+                    return Ok(());
+                }
+
+                // Handle orderUpdates (Trading mode)
+                if is_order_updates_channel(channel) {
+                    let result = msg.as_order_updates();
+
+                    // Log parse failures at warn level for visibility
+                    if result.failed_count > 0 {
+                        warn!(
+                            channel = %channel,
+                            failed_count = result.failed_count,
+                            parsed_count = result.updates.len(),
+                            "Some orderUpdate elements failed to parse"
+                        );
+                    }
+
+                    if result.updates.is_empty() {
+                        // Empty array (initial snapshot) or all elements failed
+                        debug!(channel = %channel, "orderUpdates: no updates to process");
+                    } else {
+                        for update in &result.updates {
+                            self.handle_order_update(update);
+                        }
+                    }
+                    return Ok(());
+                }
+
+                // Handle userFills (Trading mode)
+                if channel == "userFills" {
+                    if let Some(fill) = msg.as_fill() {
+                        self.handle_user_fill(&fill);
+                    } else {
+                        // Initial subscription may return snapshot/empty format (isSnapshot:true or [])
+                        // This is not an error - just a different format we don't need to process
+                        debug!("userFills message not a fill (possibly initial snapshot or empty)");
+                    }
+                    return Ok(());
+                }
+
+                // Parse and update market state (bbo, activeAssetCtx, etc.)
                 if let Some(event) = parser
-                    .parse_channel_message(&channel_msg.channel, &channel_msg.data)
+                    .parse_channel_message(channel, &channel_msg.data)
                     .map_err(AppError::Feed)?
                 {
                     self.apply_market_event(event);
                 }
-            }
-            WsMessage::Response(_) => {
-                // Handle response (subscriptions, etc.)
-                debug!("Received response");
             }
             WsMessage::Pong(_) => {
                 // Pong is handled by connection manager and not forwarded,
@@ -358,6 +1103,174 @@ impl Application {
         }
 
         Ok(())
+    }
+
+    /// Map Hyperliquid order status to internal OrderState.
+    ///
+    /// Status classification based on:
+    /// https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/info-endpoint
+    fn map_order_status(status: &str) -> OrderState {
+        match status {
+            // Active states (non-terminal)
+            "open" => OrderState::Open,
+            "triggered" => OrderState::Open, // Trigger order activated, treat as open
+
+            // Filled state
+            "filled" => OrderState::Filled,
+
+            // Explicit cancel
+            "canceled" => OrderState::Cancelled,
+
+            // Explicit reject
+            "rejected" => OrderState::Rejected,
+
+            // Pattern matching for *Rejected statuses
+            s if s.ends_with("Rejected") => {
+                debug!(status = %s, "Order rejected by exchange");
+                OrderState::Rejected
+            }
+
+            // Pattern matching for *Canceled statuses
+            s if s.ends_with("Canceled") => {
+                debug!(status = %s, "Order canceled by exchange");
+                OrderState::Cancelled
+            }
+
+            // Special case: scheduledCancel (ends with "Cancel", not "Canceled")
+            "scheduledCancel" => {
+                debug!("Order canceled by scheduled cancel deadline");
+                OrderState::Cancelled
+            }
+
+            // Unknown status - treat as terminal to avoid pending order leak
+            other => {
+                warn!(
+                    status = %other,
+                    "Unknown order status, treating as cancelled to prevent pending leak"
+                );
+                OrderState::Cancelled
+            }
+        }
+    }
+
+    /// Handle orderUpdates message.
+    fn handle_order_update(&self, update: &OrderUpdatePayload) {
+        let cloid_str = update.order.cloid.as_deref().unwrap_or("<no cloid>");
+        let oid = update.order.oid;
+        let status = &update.status;
+        let coin = &update.order.coin;
+        let sz = &update.order.sz;
+
+        debug!(
+            cloid = %cloid_str,
+            oid = oid,
+            status = %status,
+            coin = %coin,
+            sz = %sz,
+            "Order update received"
+        );
+
+        let Some(ref tracker) = self.position_tracker else {
+            debug!("Order update ignored: no position tracker");
+            return;
+        };
+
+        let cloid = match &update.order.cloid {
+            Some(s) => ClientOrderId::from(s.clone()),
+            None => {
+                warn!(oid = oid, "Order update missing cloid");
+                return;
+            }
+        };
+
+        let state = Self::map_order_status(status);
+
+        // Send Rejected event to RiskMonitor
+        if state == OrderState::Rejected {
+            if let Some(ref event_tx) = self.risk_event_tx {
+                let event = ExecutionEvent::Rejected {
+                    cloid: cloid.clone(),
+                    reason: status.clone(),
+                };
+                let tx = event_tx.clone();
+                tokio::spawn(async move {
+                    if tx.send(event).await.is_err() {
+                        warn!("Failed to send Rejected event to RiskMonitor");
+                    }
+                });
+            }
+        }
+
+        let filled_size = sz.parse().map(Size::new).unwrap_or(Size::ZERO);
+
+        let tracker = tracker.clone();
+        tokio::spawn(async move {
+            tracker
+                .order_update(cloid, state, filled_size, Some(oid))
+                .await;
+        });
+    }
+
+    /// Handle userFills message.
+    fn handle_user_fill(&self, fill: &FillPayload) {
+        let coin = &fill.coin;
+        let side_str = &fill.side;
+        let px = &fill.px;
+        let sz = &fill.sz;
+        let time = fill.time;
+
+        debug!(
+            coin = %coin,
+            side = %side_str,
+            px = %px,
+            sz = %sz,
+            time = time,
+            "User fill received"
+        );
+
+        let Some(ref tracker) = self.position_tracker else {
+            debug!("Fill ignored: no position tracker");
+            return;
+        };
+
+        // Convert coin to MarketKey
+        let market = match self.coin_to_market(coin) {
+            Some(m) => m,
+            None => {
+                warn!(coin = %coin, "Unknown coin in fill");
+                return;
+            }
+        };
+
+        let side = match side_str.as_str() {
+            "B" => OrderSide::Buy,
+            "A" => OrderSide::Sell,
+            other => {
+                warn!(side = %other, "Unknown side in fill");
+                return;
+            }
+        };
+
+        let price = px.parse().map(Price::new).unwrap_or(Price::ZERO);
+        let size = sz.parse().map(Size::new).unwrap_or(Size::ZERO);
+
+        let tracker = tracker.clone();
+        let timestamp = time;
+        tokio::spawn(async move {
+            tracker.fill(market, side, price, size, timestamp).await;
+        });
+    }
+
+    /// Convert coin name to MarketKey.
+    fn coin_to_market(&self, coin: &str) -> Option<MarketKey> {
+        let dex_id = self.get_dex_id();
+        for market in self.config.get_markets() {
+            // Match full coin name (e.g., "xyz:AAPL") or suffix (e.g., "AAPL")
+            if market.coin == coin || market.coin.ends_with(&format!(":{}", coin)) {
+                return Some(MarketKey::new(dex_id, AssetId::new(market.asset_idx)));
+            }
+        }
+        None
     }
 
     /// Apply market event to state.
@@ -394,6 +1307,17 @@ impl Application {
             }
             MarketEvent::CtxUpdate { key, ctx } => {
                 let key_str = key.to_string();
+
+                // Phase B: keep executor's markPx cache updated for notional gates.
+                // Use ctx.received_at as the monotonic timestamp source.
+                let mark_px = ctx.oracle.mark_px;
+                let now_ms = ctx.received_at.timestamp_millis() as u64;
+                if let Some(ref executor_loop) = self.executor_loop {
+                    executor_loop
+                        .executor()
+                        .market_state_cache()
+                        .update(&key, mark_px, now_ms);
+                }
 
                 // P2-1: Update state first, then record metrics
                 self.market_state.update_ctx(key, ctx);
@@ -456,8 +1380,11 @@ impl Application {
                     // This allows state-change logging when block resumes
                     self.gate_block_state.retain(|(k, _), _| *k != key);
 
+                    // Look up per-market threshold override
+                    let threshold_override = self.market_threshold_map.get(&key.asset.0).copied();
+
                     // All gates passed, check for dislocation
-                    if let Some(signal) = self.detector.check(key, &snapshot) {
+                    if let Some(signal) = self.detector.check(key, &snapshot, threshold_override) {
                         // P0-31: Cross detected - record cross count and update tracker
                         let side = signal.side;
                         Metrics::cross_detected(&key.to_string(), &side.to_string());
@@ -573,7 +1500,7 @@ impl Application {
 /// Called from spawned tasks to record market state at T+N ms after signal.
 async fn capture_followup(
     market_state: Arc<MarketState>,
-    followup_writer: Arc<Mutex<FollowupWriter>>,
+    followup_writer: Arc<tokio::sync::Mutex<FollowupWriter>>,
     ctx: FollowupContext,
     offset_ms: u64,
 ) {
@@ -682,31 +1609,198 @@ async fn capture_followup(
     };
 
     // Write record
-    match followup_writer.lock() {
-        Ok(mut writer) => {
-            if let Err(e) = writer.add_record(record) {
-                warn!(
-                    ?e,
-                    signal_id = %ctx.signal_id,
-                    offset_ms,
-                    "Failed to write followup record"
-                );
-            } else {
-                debug!(
-                    signal_id = %ctx.signal_id,
-                    offset_ms,
-                    edge_change_bps = format!("{:.2}", edge_change_bps),
-                    "Captured followup snapshot"
-                );
-            }
-        }
-        Err(e) => {
+    {
+        let mut writer = followup_writer.lock().await;
+        if let Err(e) = writer.add_record(record) {
             warn!(
                 ?e,
                 signal_id = %ctx.signal_id,
                 offset_ms,
-                "Failed to acquire lock for followup writer"
+                "Failed to write followup record"
+            );
+        } else {
+            debug!(
+                signal_id = %ctx.signal_id,
+                offset_ms,
+                edge_change_bps = format!("{:.2}", edge_change_bps),
+                "Captured followup snapshot"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Helper to create a minimal config for testing.
+    fn test_config_with_markets(markets: Vec<MarketConfig>) -> AppConfig {
+        let mut config = AppConfig::default();
+        config.mode = OperatingMode::Observation;
+        config.markets = Some(markets);
+        config
+    }
+
+    /// Test coin_to_market with full match.
+    #[test]
+    fn test_coin_to_market_full_match() {
+        let markets = vec![
+            MarketConfig {
+                coin: "BTC".to_string(),
+                asset_idx: 0,
+                threshold_bps: None,
+            },
+            MarketConfig {
+                coin: "ETH".to_string(),
+                asset_idx: 1,
+                threshold_bps: None,
+            },
+        ];
+        let config = test_config_with_markets(markets);
+        let app = Application::new(config).unwrap();
+
+        let result = app.coin_to_market("BTC");
+        assert!(result.is_some(), "Should find BTC");
+        let market_key = result.unwrap();
+        assert_eq!(market_key.asset, AssetId::new(0));
+
+        let result = app.coin_to_market("ETH");
+        assert!(result.is_some(), "Should find ETH");
+        let market_key = result.unwrap();
+        assert_eq!(market_key.asset, AssetId::new(1));
+    }
+
+    /// Test coin_to_market with suffix match (e.g., "xyz:AAPL" matches "AAPL").
+    #[test]
+    fn test_coin_to_market_suffix_match() {
+        let markets = vec![MarketConfig {
+            coin: "xyz:AAPL".to_string(),
+            asset_idx: 10,
+            threshold_bps: None,
+        }];
+        let config = test_config_with_markets(markets);
+        let app = Application::new(config).unwrap();
+
+        // Should match by suffix
+        let result = app.coin_to_market("AAPL");
+        assert!(result.is_some(), "Should find AAPL by suffix match");
+        let market_key = result.unwrap();
+        assert_eq!(market_key.asset, AssetId::new(10));
+    }
+
+    /// Test coin_to_market with not found.
+    #[test]
+    fn test_coin_to_market_not_found() {
+        let markets = vec![MarketConfig {
+            coin: "BTC".to_string(),
+            asset_idx: 0,
+            threshold_bps: None,
+        }];
+        let config = test_config_with_markets(markets);
+        let app = Application::new(config).unwrap();
+
+        let result = app.coin_to_market("UNKNOWN");
+        assert!(result.is_none(), "Should not find unknown coin");
+    }
+
+    /// Test get_dex_id with default value.
+    #[test]
+    fn test_get_dex_id_default() {
+        let config = test_config_with_markets(vec![]);
+        let app = Application::new(config).unwrap();
+
+        // When xyz_dex_id is None, should return default DexId::XYZ
+        let dex_id = app.get_dex_id();
+        assert_eq!(dex_id, DexId::XYZ);
+    }
+
+    /// Test current_time_ms helper function.
+    #[test]
+    fn test_current_time_ms() {
+        let t1 = current_time_ms();
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        let t2 = current_time_ms();
+
+        assert!(t2 > t1, "Time should advance");
+        assert!(t2 - t1 >= 10, "Should have at least 10ms difference");
+    }
+
+    /// Test map_order_status for active states.
+    #[test]
+    fn test_map_order_status_active() {
+        assert_eq!(Application::map_order_status("open"), OrderState::Open);
+        assert_eq!(Application::map_order_status("triggered"), OrderState::Open);
+    }
+
+    /// Test map_order_status for filled state.
+    #[test]
+    fn test_map_order_status_filled() {
+        assert_eq!(Application::map_order_status("filled"), OrderState::Filled);
+    }
+
+    /// Test map_order_status for explicit cancel/reject.
+    #[test]
+    fn test_map_order_status_explicit_terminal() {
+        assert_eq!(
+            Application::map_order_status("canceled"),
+            OrderState::Cancelled
+        );
+        assert_eq!(
+            Application::map_order_status("rejected"),
+            OrderState::Rejected
+        );
+    }
+
+    /// Test map_order_status for *Rejected pattern.
+    #[test]
+    fn test_map_order_status_rejected_pattern() {
+        assert_eq!(
+            Application::map_order_status("perpMarginRejected"),
+            OrderState::Rejected
+        );
+        assert_eq!(
+            Application::map_order_status("oracleRejected"),
+            OrderState::Rejected
+        );
+        assert_eq!(
+            Application::map_order_status("tickRejected"),
+            OrderState::Rejected
+        );
+    }
+
+    /// Test map_order_status for *Canceled pattern.
+    #[test]
+    fn test_map_order_status_canceled_pattern() {
+        assert_eq!(
+            Application::map_order_status("marginCanceled"),
+            OrderState::Cancelled
+        );
+        assert_eq!(
+            Application::map_order_status("liquidatedCanceled"),
+            OrderState::Cancelled
+        );
+        assert_eq!(
+            Application::map_order_status("selfTradeCanceled"),
+            OrderState::Cancelled
+        );
+    }
+
+    /// Test map_order_status for scheduledCancel special case.
+    #[test]
+    fn test_map_order_status_scheduled_cancel() {
+        assert_eq!(
+            Application::map_order_status("scheduledCancel"),
+            OrderState::Cancelled
+        );
+    }
+
+    /// Test map_order_status for unknown status (fail safe).
+    #[test]
+    fn test_map_order_status_unknown() {
+        // Unknown status should be treated as Cancelled to prevent pending leak
+        assert_eq!(
+            Application::map_order_status("unknownFutureStatus"),
+            OrderState::Cancelled
+        );
     }
 }

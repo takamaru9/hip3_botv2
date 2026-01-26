@@ -5,24 +5,27 @@
 
 use crate::error::{WsError, WsResult};
 use crate::heartbeat::HeartbeatManager;
-use crate::message::{WsMessage, WsRequest};
+use crate::message::{extract_subscription_type, WsMessage, WsRequest};
 use crate::rate_limiter::RateLimiter;
 use crate::subscription::{ReadyState, SubscriptionManager};
+use crate::ws_write_handle::{WsOutbound, WsWriteHandle};
 use futures_util::{SinkExt, StreamExt};
 use parking_lot::RwLock;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Mutex as TokioMutex};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
 /// Subscription target for a market.
 #[derive(Debug, Clone)]
 pub struct SubscriptionTarget {
-    /// Coin symbol (e.g., "BTC", "ETH", "SOL").
+    /// Coin symbol (e.g., "BTC", "ETH", "xyz:SILVER").
     pub coin: String,
     /// Asset index for internal tracking.
-    pub asset_idx: u16,
+    /// For xyz markets: 100000 + perp_dex_id * 10000 + local_index.
+    pub asset_idx: u32,
 }
 
 /// Connection configuration.
@@ -42,6 +45,9 @@ pub struct ConnectionConfig {
     pub heartbeat_timeout_ms: u64,
     /// Markets to subscribe to (coin symbols with asset indices).
     pub subscriptions: Vec<SubscriptionTarget>,
+    /// User address for trading subscriptions (orderUpdates, userFills).
+    /// If None, trading subscriptions are skipped and READY-TRADING cannot be achieved.
+    pub user_address: Option<String>,
 }
 
 impl Default for ConnectionConfig {
@@ -54,6 +60,7 @@ impl Default for ConnectionConfig {
             heartbeat_interval_ms: 45000,
             heartbeat_timeout_ms: 10000,
             subscriptions: Vec::new(),
+            user_address: None,
         }
     }
 }
@@ -72,28 +79,51 @@ pub struct ConnectionManager {
     config: ConnectionConfig,
     state: Arc<RwLock<ConnectionState>>,
     subscriptions: Arc<SubscriptionManager>,
-    /// Rate limiter for Phase B (execution). Reserved for future use.
-    _rate_limiter: Arc<RateLimiter>,
+    /// Rate limiter for Phase B (execution).
+    rate_limiter: Arc<RateLimiter>,
     heartbeat: Arc<HeartbeatManager>,
     message_tx: mpsc::Sender<WsMessage>,
     reconnect_count: Arc<RwLock<u32>>,
+    /// Outbound message sender (for WsWriteHandle).
+    outbound_tx: mpsc::Sender<WsOutbound>,
+    /// Outbound message receiver (consumed by message loop).
+    outbound_rx: Arc<TokioMutex<mpsc::Receiver<WsOutbound>>>,
+    /// Cancellation token for graceful shutdown.
+    shutdown_token: CancellationToken,
 }
 
 impl ConnectionManager {
     /// Create a new connection manager.
     pub fn new(config: ConnectionConfig, message_tx: mpsc::Sender<WsMessage>) -> Self {
+        let (outbound_tx, outbound_rx) = mpsc::channel(100);
         Self {
             config: config.clone(),
             state: Arc::new(RwLock::new(ConnectionState::Disconnected)),
             subscriptions: Arc::new(SubscriptionManager::new()),
-            _rate_limiter: Arc::new(RateLimiter::new(2000, 60)), // 2000 msg/min
+            rate_limiter: Arc::new(RateLimiter::new(2000, 60)), // 2000 msg/min
             heartbeat: Arc::new(HeartbeatManager::new(
                 config.heartbeat_interval_ms,
                 config.heartbeat_timeout_ms,
             )),
             message_tx,
             reconnect_count: Arc::new(RwLock::new(0)),
+            outbound_tx,
+            outbound_rx: Arc::new(TokioMutex::new(outbound_rx)),
+            shutdown_token: CancellationToken::new(),
         }
+    }
+
+    /// Get a write handle for sending messages.
+    ///
+    /// The write handle can be cloned and shared across tasks.
+    /// It provides a channel-based API that is reconnect-safe.
+    pub fn write_handle(&self) -> WsWriteHandle {
+        WsWriteHandle::new(
+            self.outbound_tx.clone(),
+            self.rate_limiter.clone(),
+            self.state.clone(),
+            self.subscriptions.clone(),
+        )
     }
 
     /// Get current connection state.
@@ -111,6 +141,20 @@ impl ConnectionManager {
         self.state() == ConnectionState::Connected && self.subscriptions.is_ready()
     }
 
+    /// Signal graceful shutdown.
+    ///
+    /// Cancels the shutdown token, which will cause both the message loop
+    /// and reconnect loop to exit promptly.
+    pub fn shutdown(&self) {
+        info!("ConnectionManager shutdown requested");
+        self.shutdown_token.cancel();
+    }
+
+    /// Check if shutdown has been requested.
+    pub fn is_shutdown(&self) -> bool {
+        self.shutdown_token.is_cancelled()
+    }
+
     /// Connect to WebSocket and run message loop.
     pub async fn connect(&self) -> WsResult<()> {
         self.connect_with_retry().await
@@ -120,6 +164,13 @@ impl ConnectionManager {
         let mut attempt = 0u32;
 
         loop {
+            // Check shutdown flag at start of loop
+            if self.is_shutdown() {
+                info!("Shutdown requested, exiting connect loop");
+                *self.state.write() = ConnectionState::Disconnected;
+                return Ok(());
+            }
+
             *self.state.write() = ConnectionState::Connecting;
 
             match self.try_connect().await {
@@ -130,6 +181,13 @@ impl ConnectionManager {
                 Err(e) => {
                     error!(?e, "WebSocket connection error");
                 }
+            }
+
+            // Check shutdown flag before reconnect attempt
+            if self.is_shutdown() {
+                info!("Shutdown requested after disconnect, not reconnecting");
+                *self.state.write() = ConnectionState::Disconnected;
+                return Ok(());
             }
 
             // Check if we should reconnect
@@ -150,10 +208,21 @@ impl ConnectionManager {
             // Calculate backoff delay with jitter
             let delay = self.calculate_backoff_delay(attempt);
             warn!(attempt, delay_ms = delay.as_millis(), "Reconnecting");
-            tokio::time::sleep(delay).await;
+
+            // Wait for delay OR shutdown signal (cancellation-aware sleep)
+            tokio::select! {
+                () = tokio::time::sleep(delay) => {}
+                () = self.shutdown_token.cancelled() => {
+                    info!("Shutdown requested during backoff, exiting");
+                    *self.state.write() = ConnectionState::Disconnected;
+                    return Ok(());
+                }
+            }
 
             // Reset subscriptions ready state
             self.subscriptions.reset_ready_state();
+            // Reset inflight counter (pending posts will never get responses)
+            self.rate_limiter.reset_inflight();
         }
     }
 
@@ -175,7 +244,23 @@ impl ConnectionManager {
 
         // Message loop
         loop {
+            // Lock outbound_rx for the select! block
+            let outbound_recv = async { self.outbound_rx.lock().await.recv().await };
+
             tokio::select! {
+                // Shutdown signal - highest priority (biased)
+                () = self.shutdown_token.cancelled() => {
+                    info!("Shutdown signal received in message loop");
+                    // Send WebSocket Close frame for graceful disconnect
+                    if let Err(e) = write.send(Message::Close(None)).await {
+                        warn!(?e, "Failed to send Close frame during shutdown");
+                    }
+                    // Reset inflight on shutdown
+                    self.rate_limiter.reset_inflight();
+                    *self.state.write() = ConnectionState::Disconnected;
+                    return Ok(());
+                }
+
                 // Incoming message
                 msg = read.next() => {
                     match msg {
@@ -195,17 +280,38 @@ impl ConnectionManager {
                                 .map(|f| (f.code.into(), f.reason.to_string()))
                                 .unwrap_or((1000, "Normal close".to_string()));
                             warn!(code, %reason, "WebSocket closed by server");
+                            // Reset inflight on disconnect
+                            self.rate_limiter.reset_inflight();
                             return Err(WsError::ConnectionClosed { code, reason });
                         }
                         Some(Err(e)) => {
                             error!(?e, "WebSocket read error");
+                            // Reset inflight on error
+                            self.rate_limiter.reset_inflight();
                             return Err(e.into());
                         }
                         None => {
                             warn!("WebSocket stream ended");
+                            // Reset inflight on stream end
+                            self.rate_limiter.reset_inflight();
                             return Ok(());
                         }
                         _ => {}
+                    }
+                }
+
+                // Outbound message
+                outbound = outbound_recv => {
+                    if let Some(msg) = outbound {
+                        match msg {
+                            WsOutbound::Text(text) => {
+                                write.send(Message::Text(text)).await?;
+                            }
+                            WsOutbound::Post { post_id, payload } => {
+                                write.send(Message::Text(payload)).await?;
+                                debug!(post_id, "Post sent to WebSocket");
+                            }
+                        }
                     }
                 }
 
@@ -213,6 +319,8 @@ impl ConnectionManager {
                 _ = self.heartbeat.wait_for_check() => {
                     if self.heartbeat.is_timed_out() {
                         error!("Heartbeat timeout");
+                        // Reset inflight on heartbeat timeout
+                        self.rate_limiter.reset_inflight();
                         return Err(WsError::HeartbeatTimeout);
                     }
 
@@ -247,12 +355,32 @@ impl ConnectionManager {
                 return Ok(());
             }
             WsMessage::Channel(channel_msg) => {
-                // Update subscription state
+                // Handle subscriptionResponse: internal ACK only
+                if channel_msg.channel == "subscriptionResponse" {
+                    debug!(?channel_msg.data, "Received subscription response");
+
+                    // Process ACK using extracted function
+                    // Note: Arc<SubscriptionManager> から &SubscriptionManager を取得
+                    process_subscription_response(&channel_msg.data, &self.subscriptions);
+
+                    // IMPORTANT: subscriptionResponse は内部 ACK 専用
+                    // → message_tx.send() には送らない（downstream 転送しない）
+                    return Ok(());
+                }
+
+                // Handle error channel (log only, but still forward downstream)
+                if channel_msg.channel == "error" {
+                    warn!(?channel_msg.data, "Received error channel message");
+                    // Note: error は forward する（アプリ側で処理する可能性あり）
+                }
+
+                // Decrement inflight on post response (transport responsibility)
+                if channel_msg.channel == "post" {
+                    self.rate_limiter.record_post_response();
+                    debug!("Post response received, inflight decremented");
+                }
+                // Update subscription state for market data channels
                 self.subscriptions.handle_message(&channel_msg.channel);
-            }
-            WsMessage::Response(response_msg) => {
-                // Subscription response or other responses
-                debug!(channel = %response_msg.channel, "Received response");
             }
         }
 
@@ -335,8 +463,58 @@ impl ConnectionManager {
 
         info!(
             total = total_subs,
-            "All subscriptions sent and responses drained"
+            "All market data subscriptions sent and responses drained"
         );
+
+        // Subscribe to trading channels if user_address is configured
+        if let Some(ref user_address) = self.config.user_address {
+            self.subscribe_trading_channels(write, read, user_address)
+                .await?;
+        } else {
+            info!("No user_address configured, skipping trading subscriptions");
+        }
+
+        Ok(())
+    }
+
+    /// Subscribe to orderUpdates and userFills for a user.
+    /// Call after market data subscriptions to achieve READY-TRADING.
+    async fn subscribe_trading_channels(
+        &self,
+        write: &mut futures_util::stream::SplitSink<
+            tokio_tungstenite::WebSocketStream<
+                tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+            >,
+            Message,
+        >,
+        read: &mut futures_util::stream::SplitStream<
+            tokio_tungstenite::WebSocketStream<
+                tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+            >,
+        >,
+        user_address: &str,
+    ) -> WsResult<()> {
+        info!(user = %user_address, "Subscribing to trading channels");
+
+        // Subscribe to orderUpdates
+        let order_updates_req =
+            SubscriptionManager::order_updates_subscription_request(user_address);
+        write.send(Message::Text(order_updates_req)).await?;
+        self.subscriptions
+            .add_subscription(format!("orderUpdates:user:{}", user_address));
+
+        // Drain response and wait
+        self.drain_and_wait(write, read, 100).await?;
+
+        // Subscribe to userFills
+        let user_fills_req = SubscriptionManager::user_fills_subscription_request(user_address);
+        write.send(Message::Text(user_fills_req)).await?;
+        self.subscriptions.add_subscription("userFills".to_string());
+
+        // Drain response and wait
+        self.drain_and_wait(write, read, 100).await?;
+
+        info!(user = %user_address, "Trading subscriptions sent");
         Ok(())
     }
 
@@ -370,12 +548,10 @@ impl ConnectionManager {
                 msg = read.next() => {
                     match msg {
                         Some(Ok(Message::Text(text))) => {
-                            // Forward to message channel if it's data
-                            if let Ok(ws_msg) = serde_json::from_str::<WsMessage>(&text) {
-                                if !matches!(ws_msg, WsMessage::Pong(_)) {
-                                    let _ = self.message_tx.send(ws_msg).await;
-                                }
-                            }
+                            // Use the same handler as the main loop to ensure consistent state updates
+                            // (heartbeat, pong, subscriptions, inflight, message forwarding)
+                            // Propagate errors to caller for proper reconnection handling
+                            self.handle_text_message(&text).await?;
                         }
                         Some(Ok(Message::Ping(data))) => {
                             write.send(Message::Pong(data)).await?;
@@ -403,11 +579,9 @@ impl ConnectionManager {
                     }
                 }
                 _ = tokio::time::sleep(Duration::from_millis(20)) => {
-                    // No more messages pending, wait the remaining time then continue
-                    let remaining = drain_timeout.saturating_sub(drain_start.elapsed());
-                    if !remaining.is_zero() {
-                        tokio::time::sleep(remaining).await;
-                    }
+                    // No more messages pending, wait the remaining time then exit
+                    let final_wait = drain_timeout.saturating_sub(drain_start.elapsed());
+                    tokio::time::sleep(final_wait).await;
                     break;
                 }
             }
@@ -439,19 +613,128 @@ fn rand_jitter() -> u64 {
     use std::time::{SystemTime, UNIX_EPOCH};
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .subsec_nanos();
+        .map(|d| d.subsec_nanos())
+        .unwrap_or(0);
     (nanos % 1000) as u64
+}
+
+/// Process subscriptionResponse ACK and update subscription state.
+///
+/// Returns `true` if orderUpdates ACK was processed.
+/// Extracted as separate function for testability.
+///
+/// Note: SubscriptionManager uses internal RwLock, so &self is sufficient.
+fn process_subscription_response(
+    data: &serde_json::Value,
+    subscriptions: &SubscriptionManager,
+) -> bool {
+    // Guard: only mark Ready for subscribe ACKs (not unsubscribe/error)
+    let is_subscribe = data
+        .get("method")
+        .and_then(|v| v.as_str())
+        .is_some_and(|m| m == "subscribe");
+
+    if !is_subscribe {
+        return false;
+    }
+
+    let subscription_type = extract_subscription_type(data);
+
+    if subscription_type.is_some_and(|t| t == "orderUpdates") {
+        subscriptions.mark_order_updates_ready();
+        true
+    } else {
+        false
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn test_default_config() {
         let config = ConnectionConfig::default();
         assert_eq!(config.max_reconnect_attempts, 0); // Infinite
         assert_eq!(config.heartbeat_interval_ms, 45000);
+    }
+
+    // ========================================================================
+    // process_subscription_response tests
+    // ========================================================================
+
+    #[test]
+    fn test_process_subscription_response_official_format() {
+        let subs = SubscriptionManager::new();
+        let data = json!({
+            "method": "subscribe",
+            "subscription": {
+                "type": "orderUpdates",
+                "user": "0x1234"
+            }
+        });
+
+        let result = process_subscription_response(&data, &subs);
+
+        assert!(result, "Should return true for orderUpdates ACK");
+        assert!(
+            subs.ready_state().order_updates_ready,
+            "Should mark order_updates_ready"
+        );
+    }
+
+    #[test]
+    fn test_process_subscription_response_unsubscribe_ignored() {
+        let subs = SubscriptionManager::new();
+        let data = json!({
+            "method": "unsubscribe",
+            "subscription": {
+                "type": "orderUpdates",
+                "user": "0x1234"
+            }
+        });
+
+        let result = process_subscription_response(&data, &subs);
+
+        assert!(!result, "Should return false for unsubscribe");
+        assert!(
+            !subs.ready_state().order_updates_ready,
+            "Should NOT mark ready for unsubscribe"
+        );
+    }
+
+    #[test]
+    fn test_process_subscription_response_other_type() {
+        let subs = SubscriptionManager::new();
+        let data = json!({
+            "method": "subscribe",
+            "subscription": {
+                "type": "allMids"
+            }
+        });
+
+        let result = process_subscription_response(&data, &subs);
+
+        assert!(!result, "Should return false for non-orderUpdates");
+        assert!(
+            !subs.ready_state().order_updates_ready,
+            "Should NOT mark ready for other types"
+        );
+    }
+
+    #[test]
+    fn test_process_subscription_response_fallback_format() {
+        let subs = SubscriptionManager::new();
+        let data = json!({
+            "method": "subscribe",
+            "type": "orderUpdates",
+            "user": "0x1234"
+        });
+
+        let result = process_subscription_response(&data, &subs);
+
+        assert!(result, "Should handle fallback format");
+        assert!(subs.ready_state().order_updates_ready);
     }
 }

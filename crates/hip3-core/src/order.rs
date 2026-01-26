@@ -90,17 +90,21 @@ impl fmt::Display for TimeInForce {
 ///
 /// CRITICAL: Every order must have a unique cloid to prevent
 /// duplicate submissions on retries. This is non-negotiable.
+///
+/// Hyperliquid requires cloid as 128-bit hex string with 0x prefix:
+/// e.g., "0x1234567890abcdef1234567890abcdef"
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ClientOrderId(String);
 
 impl ClientOrderId {
     /// Create a new unique client order ID.
     ///
-    /// Format: `hip3_{timestamp_ms}_{uuid_short}`
+    /// Format: `0x{128-bit-hex}` (UUID v4 as hex without hyphens)
+    /// Example: "0x550e8400e29b41d4a716446655440000"
     pub fn new() -> Self {
-        let ts = chrono::Utc::now().timestamp_millis();
-        let uuid_short = &Uuid::new_v4().to_string()[..8];
-        Self(format!("hip3_{ts}_{uuid_short}"))
+        let uuid = Uuid::new_v4();
+        // UUID is 128 bits, format as hex without hyphens, with 0x prefix
+        Self(format!("0x{}", uuid.as_simple()))
     }
 
     /// Create from an existing string (for parsing responses).
@@ -163,6 +167,8 @@ mod tests {
     #[test]
     fn test_client_order_id_format() {
         let id = ClientOrderId::new();
-        assert!(id.as_str().starts_with("hip3_"));
+        // Must be 0x prefix + 32 hex chars (128 bits)
+        assert!(id.as_str().starts_with("0x"));
+        assert_eq!(id.as_str().len(), 34); // "0x" + 32 hex chars
     }
 }

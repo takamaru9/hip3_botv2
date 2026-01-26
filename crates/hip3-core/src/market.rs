@@ -40,15 +40,18 @@ impl fmt::Display for DexId {
 /// Asset identifier within a DEX.
 ///
 /// Each perpetual market within a DEX is identified by an asset index.
+/// For xyz/HIP-3 markets, asset IDs use the formula:
+///   100000 + perp_dex_id * 10000 + asset_index
+/// Example: xyz:SILVER (perpDexId=1, index=27) = 110027
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct AssetId(pub u16);
+pub struct AssetId(pub u32);
 
 impl AssetId {
-    pub fn new(id: u16) -> Self {
+    pub fn new(id: u32) -> Self {
         Self(id)
     }
 
-    pub fn index(&self) -> u16 {
+    pub fn index(&self) -> u32 {
         self.0
     }
 }
@@ -75,7 +78,7 @@ impl MarketKey {
     }
 
     /// Create from DEX index and asset index.
-    pub fn from_indices(dex_idx: u16, asset_idx: u16) -> Self {
+    pub fn from_indices(dex_idx: u16, asset_idx: u32) -> Self {
         Self {
             dex: DexId(dex_idx),
             asset: AssetId(asset_idx),

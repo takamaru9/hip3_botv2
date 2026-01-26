@@ -7,6 +7,13 @@
 //! - Risk gate blocks
 //! - Rate limiting (P0-8)
 //! - Cross judgment (P0-8)
+//!
+//! # Panics
+//!
+//! Metric registration uses `unwrap()` intentionally. If registration fails,
+//! it indicates a fatal configuration error (e.g., duplicate metric names)
+//! that should cause an immediate crash at startup rather than silent failure.
+//! These panics only occur during static initialization, never at runtime.
 
 use once_cell::sync::Lazy;
 use prometheus::{

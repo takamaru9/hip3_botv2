@@ -31,6 +31,9 @@ pub enum AppError {
     #[error("Preflight error: {0}")]
     Preflight(String),
 
+    #[error("Executor error: {0}")]
+    Executor(String),
+
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
 

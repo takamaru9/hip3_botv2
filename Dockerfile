@@ -50,4 +50,4 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
     CMD test -f /proc/1/exe || exit 1
 
 ENTRYPOINT ["/app/hip3-bot"]
-CMD ["-c", "/app/config/mainnet.toml"]
+CMD ["--config", "/app/config/mainnet-optimal-test.toml"]

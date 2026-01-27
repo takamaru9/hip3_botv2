@@ -265,12 +265,13 @@
                             <th>Ask</th>
                             <th>Spread</th>
                             <th>Oracle</th>
-                            <th>Edge</th>
+                            <th>Buy Edge</th>
+                            <th>Sell Edge</th>
                             <th>Age</th>
                         </tr>
                     </thead>
                     <tbody id="markets-body">
-                        <tr><td colspan="7" class="empty-state">No market data</td></tr>
+                        <tr><td colspan="8" class="empty-state">No market data</td></tr>
                     </tbody>
                 </table>
             </div>
@@ -438,13 +439,14 @@
             const entries = Object.entries(markets);
 
             if (entries.length === 0) {
-                tbody.innerHTML = '<tr><td colspan="7" class="empty-state">No market data</td></tr>';
+                tbody.innerHTML = '<tr><td colspan="8" class="empty-state">No market data</td></tr>';
                 return;
             }
 
             tbody.innerHTML = entries.map(([key, m]) => {
                 const spreadClass = m.spread_bps > 10 ? 'warning' : 'neutral';
-                const edgeClass = m.edge_bps > 0 ? 'positive' : (m.edge_bps < 0 ? 'negative' : 'neutral');
+                const buyEdgeClass = m.buy_edge_bps > 0 ? 'positive' : (m.buy_edge_bps < 0 ? 'negative' : 'neutral');
+                const sellEdgeClass = m.sell_edge_bps > 0 ? 'positive' : (m.sell_edge_bps < 0 ? 'negative' : 'neutral');
                 const ageClass = (m.bbo_age_ms && m.bbo_age_ms > 2000) ? 'warning' : 'neutral';
 
                 return `<tr>
@@ -453,7 +455,8 @@
                     <td class="mono">${formatPrice(m.ask_price)}</td>
                     <td class="mono ${spreadClass}">${formatBps(m.spread_bps)}</td>
                     <td class="mono">${formatPrice(m.oracle_price)}</td>
-                    <td class="mono ${edgeClass}">${formatBps(m.edge_bps)}</td>
+                    <td class="mono ${buyEdgeClass}">${formatBps(m.buy_edge_bps)}</td>
+                    <td class="mono ${sellEdgeClass}">${formatBps(m.sell_edge_bps)}</td>
                     <td class="mono ${ageClass}">${formatAge(m.bbo_age_ms)}</td>
                 </tr>`;
             }).join('');

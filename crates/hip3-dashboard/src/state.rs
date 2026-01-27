@@ -154,12 +154,22 @@ impl DashboardState {
             )
         };
 
-        // Calculate edge (oracle vs mid) in basis points
+        // Calculate buy/sell edges matching signal detection logic
         let oracle = ctx.oracle.oracle_px.inner();
-        let edge_bps = if mid.is_zero() {
+        let buy_edge_bps = if oracle.is_zero() {
             None
         } else {
-            let edge = (oracle - mid) / mid * Decimal::from(10000);
+            // Buy edge: (oracle - ask) / oracle
+            // Positive means ask is cheap (buy opportunity)
+            let edge = (oracle - bbo.ask_price.inner()) / oracle * Decimal::from(10000);
+            Some(edge.to_string().parse::<f64>().unwrap_or(0.0))
+        };
+        let sell_edge_bps = if oracle.is_zero() {
+            None
+        } else {
+            // Sell edge: (bid - oracle) / oracle
+            // Positive means bid is expensive (sell opportunity)
+            let edge = (bbo.bid_price.inner() - oracle) / oracle * Decimal::from(10000);
             Some(edge.to_string().parse::<f64>().unwrap_or(0.0))
         };
 
@@ -176,7 +186,8 @@ impl DashboardState {
             spread_bps,
             oracle_price: Some(ctx.oracle.oracle_px.inner()),
             mark_price: Some(ctx.oracle.mark_px.inner()),
-            edge_bps,
+            buy_edge_bps,
+            sell_edge_bps,
             bbo_age_ms,
             oracle_age_ms,
         }
@@ -317,7 +328,9 @@ impl DashboardState {
     /// Get hard stop reason.
     /// Returns None in Observation mode.
     pub fn get_hard_stop_reason(&self) -> Option<String> {
-        self.hard_stop_latch.as_ref().and_then(|l| l.trigger_reason())
+        self.hard_stop_latch
+            .as_ref()
+            .and_then(|l| l.trigger_reason())
     }
 
     /// Check if running in observation mode.

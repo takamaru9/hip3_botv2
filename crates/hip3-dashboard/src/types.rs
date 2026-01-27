@@ -43,8 +43,12 @@ pub struct MarketDataSnapshot {
     pub oracle_price: Option<Decimal>,
     /// Mark price.
     pub mark_price: Option<Decimal>,
-    /// Edge (oracle vs mid) in basis points.
-    pub edge_bps: Option<f64>,
+    /// Buy edge: (oracle - best_ask) / oracle * 10000 bps.
+    /// Positive = ask is cheap vs oracle (buy opportunity).
+    pub buy_edge_bps: Option<f64>,
+    /// Sell edge: (best_bid - oracle) / oracle * 10000 bps.
+    /// Positive = bid is expensive vs oracle (sell opportunity).
+    pub sell_edge_bps: Option<f64>,
     /// BBO age in milliseconds.
     pub bbo_age_ms: Option<i64>,
     /// Oracle age in milliseconds.

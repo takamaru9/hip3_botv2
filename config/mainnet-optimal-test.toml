@@ -21,35 +21,36 @@ private_key = "0xd7fb667b6c9ecea9d66b6acc1f1d7b15c50dbcb93bff0eeff6a42de957fa155
 # High-EV markets with per-market optimal thresholds
 # threshold_bps: total threshold including taker_fee + slippage + min_edge
 
-# GOLD (index 3): EV=37.63bps, win=100%, signals=293/48h @ 30bps
+# TEST: All markets set to 15bps threshold for testing
+# GOLD (index 3)
 [[markets]]
 asset_idx = 110003
 coin = "xyz:GOLD"
-threshold_bps = 30
+threshold_bps = 12
 
-# SILVER (index 26): EV=29.25bps, win=100%, signals=102/48h @ 30bps
+# SILVER (index 26)
 [[markets]]
 asset_idx = 110026
 coin = "xyz:SILVER"
-threshold_bps = 30
+threshold_bps = 12
 
-# GOOGL (index 12): EV=74.22bps, win=100%, signals=165/48h @ 45bps
+# GOOGL (index 12)
 [[markets]]
 asset_idx = 110012
 coin = "xyz:GOOGL"
-threshold_bps = 45
+threshold_bps = 12
 
-# TSLA (index 1): EV=35.68bps, win=100%, signals=220/48h @ 40bps
+# TSLA (index 1)
 [[markets]]
 asset_idx = 110001
 coin = "xyz:TSLA"
-threshold_bps = 40
+threshold_bps = 12
 
-# NVDA (index 2): EV=21.87bps, win=100%, signals=237/48h @ 25bps
+# NVDA (index 2)
 [[markets]]
 asset_idx = 110002
 coin = "xyz:NVDA"
-threshold_bps = 25
+threshold_bps = 12
 
 [websocket]
 max_reconnect_attempts = 0
@@ -71,7 +72,7 @@ slippage_bps = 2
 min_edge_bps = 29  # Fallback for markets without threshold_bps
 sizing_alpha = 0.10
 max_notional = 11  # $11 limit for micro test
-min_book_notional = 500
+min_book_notional = 50
 normal_book_notional = 5000
 
 [persistence]
@@ -80,7 +81,7 @@ buffer_size = 100
 
 [telemetry]
 metrics_port = 9090
-log_level = "info"
+log_level = "debug"
 
 [time_stop]
 threshold_ms = 30000
@@ -93,3 +94,11 @@ max_consecutive_failures = 5
 max_loss_usd = 20.0
 max_flatten_failed = 3
 window_seconds = 3600
+
+[dashboard]
+enabled = true
+port = 8080
+update_interval_ms = 100
+max_connections = 10
+username = ""
+password = ""

@@ -16,6 +16,7 @@ use chrono::Utc;
 use hip3_core::{
     AssetId, ClientOrderId, DexId, MarketKey, OrderSide, OrderState, PendingOrder, Price, Size,
 };
+use hip3_dashboard::DashboardState;
 use hip3_detector::{CrossDurationTracker, DislocationDetector, DislocationSignal};
 use hip3_executor::{
     ActionBudget, BatchConfig, BatchScheduler, DynWsSender, ExecutionEvent, ExecutorConfig,
@@ -38,8 +39,9 @@ use hip3_ws::{
     is_order_updates_channel, ConnectionConfig, ConnectionManager, FillPayload, OrderUpdatePayload,
     PostResponseBody, WsMessage,
 };
+use parking_lot::RwLock;
 use rust_decimal::Decimal;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -110,6 +112,8 @@ pub struct Application {
     connection_manager: Option<Arc<ConnectionManager>>,
     /// Risk event sender for RiskMonitor.
     risk_event_tx: Option<mpsc::Sender<ExecutionEvent>>,
+    /// Recent signals buffer for dashboard display (last 50).
+    recent_signals: Arc<RwLock<VecDeque<SignalRecord>>>,
 }
 
 impl Application {
@@ -171,6 +175,8 @@ impl Application {
             position_tracker_handle: None,
             connection_manager: None,
             risk_event_tx: None,
+            // Dashboard: Recent signals buffer
+            recent_signals: Arc::new(RwLock::new(VecDeque::with_capacity(50))),
         })
     }
 
@@ -853,8 +859,51 @@ impl Application {
             }
 
             info!("Trading mode initialized with ExecutorLoop, PositionTracker, TimeStopMonitor, RiskMonitor, and HardStop Flatten");
+
+            // 16. Dashboard server (if enabled)
+            if self.config.dashboard.enabled {
+                let dashboard_state = DashboardState::new(
+                    self.market_state.clone(),
+                    position_tracker.clone(),
+                    hard_stop_latch.clone(),
+                    self.recent_signals.clone(),
+                );
+                let dashboard_config = self.config.dashboard.clone();
+                tokio::spawn(async move {
+                    if let Err(e) =
+                        hip3_dashboard::run_server(dashboard_state, dashboard_config).await
+                    {
+                        error!(error = %e, "Dashboard server failed");
+                    }
+                });
+                info!(
+                    port = self.config.dashboard.port,
+                    "Dashboard server started"
+                );
+            }
+
             Some(tick_handle)
         } else {
+            // Observation mode: Dashboard with limited components (if enabled)
+            if self.config.dashboard.enabled {
+                info!("Starting dashboard in Observation mode - limited functionality (market data only)");
+                let dashboard_state = DashboardState::new_observation_mode(
+                    self.market_state.clone(),
+                    self.recent_signals.clone(),
+                );
+                let dashboard_config = self.config.dashboard.clone();
+                tokio::spawn(async move {
+                    if let Err(e) =
+                        hip3_dashboard::run_server(dashboard_state, dashboard_config).await
+                    {
+                        error!(error = %e, "Dashboard server failed");
+                    }
+                });
+                info!(
+                    port = self.config.dashboard.port,
+                    "Dashboard server started (Observation mode - market data only)"
+                );
+            }
             None
         };
 
@@ -1438,7 +1487,7 @@ impl Application {
         }
     }
 
-    /// Persist signal to JSON Lines.
+    /// Persist signal to JSON Lines and add to recent signals buffer.
     fn persist_signal(&mut self, signal: &DislocationSignal) -> AppResult<()> {
         let record = SignalRecord {
             timestamp_ms: signal.detected_at.timestamp_millis(),
@@ -1457,6 +1506,16 @@ impl Application {
                 .unwrap_or(0.0),
             signal_id: signal.signal_id.clone(),
         };
+
+        // Add to recent signals buffer (for dashboard)
+        {
+            let mut signals = self.recent_signals.write();
+            signals.push_back(record.clone());
+            // Keep only last 50 signals
+            while signals.len() > 50 {
+                signals.pop_front();
+            }
+        }
 
         self.writer
             .add_record(record)

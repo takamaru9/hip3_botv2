@@ -26,8 +26,10 @@ hip3-executor = { workspace = true }
 hip3-position = { workspace = true }
 hip3-telemetry = { workspace = true }
 hip3-persistence = { workspace = true }
+hip3-dashboard = { workspace = true }
 
 tokio = { workspace = true }
+parking_lot = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 config = { workspace = true }

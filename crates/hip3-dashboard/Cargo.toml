@@ -1,0 +1,44 @@
+[package]
+name = "hip3-dashboard"
+version.workspace = true
+edition = "2021"
+authors.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+# HTTP server
+axum = { workspace = true }
+tower-http = { workspace = true }
+tower = { workspace = true }
+
+# Async runtime
+tokio = { workspace = true }
+futures-util = { workspace = true }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Numeric
+rust_decimal = { workspace = true }
+
+# Logging
+tracing = { workspace = true }
+
+# Concurrency
+parking_lot = { workspace = true }
+
+# Time
+chrono = { workspace = true }
+
+# Internal dependencies
+hip3-core = { workspace = true }
+hip3-feed = { workspace = true }
+hip3-position = { workspace = true }
+hip3-executor = { workspace = true }
+hip3-persistence = { workspace = true }
+hip3-risk = { workspace = true }
+
+[dev-dependencies]
+tokio-test = { workspace = true }

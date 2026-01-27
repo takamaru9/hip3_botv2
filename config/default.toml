@@ -56,6 +56,11 @@ min_edge_bps = 5
 sizing_alpha = 0.10
 # Maximum notional per trade
 max_notional = 1000
+# Minimum book notional - signals below this are skipped ($)
+min_book_notional = 500
+# Normal book notional - 100% sizing above this ($)
+# Between min and normal, sizing is linearly interpolated
+normal_book_notional = 5000
 
 [persistence]
 # Directory for Parquet output files
@@ -68,3 +73,36 @@ buffer_size = 100
 metrics_port = 9090
 # Log level
 log_level = "info"
+
+[time_stop]
+# Position holding threshold (ms) - positions held longer are auto-flattened
+threshold_ms = 30000
+# Reduce-only order timeout before retry (ms)
+reduce_only_timeout_ms = 60000
+# Check interval (ms)
+check_interval_ms = 1000
+# Slippage tolerance for flatten orders (bps)
+slippage_bps = 50
+
+[risk_monitor]
+# Maximum consecutive order failures before HardStop
+max_consecutive_failures = 5
+# Maximum cumulative loss (USD) before HardStop
+max_loss_usd = 1000.0
+# Maximum flatten failures before critical alert
+max_flatten_failed = 3
+# Monitoring window (seconds)
+window_seconds = 3600
+
+[dashboard]
+# Enable real-time web dashboard (port 8080)
+enabled = true
+# HTTP server port
+port = 8080
+# WebSocket update interval (ms)
+update_interval_ms = 100
+# Maximum concurrent WebSocket connections
+max_connections = 10
+# Basic auth (empty = disabled)
+username = ""
+password = ""

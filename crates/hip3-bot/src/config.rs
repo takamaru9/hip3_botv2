@@ -1,6 +1,7 @@
 //! Application configuration.
 
 use crate::error::{AppError, AppResult};
+use hip3_dashboard::DashboardConfig;
 use hip3_detector::DetectorConfig;
 use hip3_risk::RiskGateConfig;
 use hip3_ws::{ConnectionConfig, SubscriptionTarget};
@@ -160,6 +161,9 @@ pub struct AppConfig {
     /// Risk monitor configuration (Trading mode only).
     #[serde(default)]
     pub risk_monitor: RiskMonitorConfig,
+    /// Dashboard configuration.
+    #[serde(default)]
+    pub dashboard: DashboardConfig,
     /// User address for trading subscriptions (required for Trading mode).
     /// Format: "0x..." Ethereum address.
     #[serde(default)]
@@ -353,6 +357,7 @@ impl Default for AppConfig {
             telemetry: TelemetryConfig::default(),
             time_stop: TimeStopConfig::default(),
             risk_monitor: RiskMonitorConfig::default(),
+            dashboard: DashboardConfig::default(),
             user_address: None,
             signer_address: None,
             is_mainnet: None,

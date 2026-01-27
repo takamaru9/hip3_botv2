@@ -11,6 +11,7 @@ members = [
     "crates/hip3-position",
     "crates/hip3-telemetry",
     "crates/hip3-persistence",
+    "crates/hip3-dashboard",
     "crates/hip3-bot",
 ]
 
@@ -67,6 +68,11 @@ tokio-util = { version = "0.7", features = ["time"] }
 # HTTP client (for REST API fallback)
 reqwest = { version = "0.12", features = ["json", "rustls-tls"] }
 
+# HTTP server (for dashboard)
+axum = { version = "0.8", features = ["ws"] }
+tower-http = { version = "0.6", features = ["fs", "cors"] }
+tower = "0.5"
+
 # Utilities
 uuid = { version = "1", features = ["v4", "serde"] }
 parking_lot = "0.12"
@@ -96,6 +102,7 @@ hip3-executor = { path = "crates/hip3-executor" }
 hip3-position = { path = "crates/hip3-position" }
 hip3-telemetry = { path = "crates/hip3-telemetry" }
 hip3-persistence = { path = "crates/hip3-persistence" }
+hip3-dashboard = { path = "crates/hip3-dashboard" }
 
 [profile.release]
 lto = "thin"

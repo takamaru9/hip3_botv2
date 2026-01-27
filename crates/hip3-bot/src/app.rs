@@ -907,14 +907,17 @@ impl Application {
             None
         };
 
-        // Create message parser with coin mappings
+        // Create message parser with coin mappings and correct DEX ID
         let mut parser = MessageParser::new();
+        // Set the discovered DEX ID so market keys match between parser and check_dislocations
+        parser.set_dex_id(self.get_dex_id());
         for market in self.config.get_markets() {
             parser.add_coin_mapping(market.coin.clone(), market.asset_idx);
         }
         info!(
+            dex_id = %self.get_dex_id(),
             coin_mappings = ?self.config.get_markets().iter().map(|m| (&m.coin, m.asset_idx)).collect::<Vec<_>>(),
-            "Parser configured with coin mappings"
+            "Parser configured with coin mappings and DEX ID"
         );
 
         // Main event loop

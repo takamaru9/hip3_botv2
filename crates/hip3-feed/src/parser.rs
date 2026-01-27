@@ -168,6 +168,14 @@ impl MessageParser {
         self.coin_to_idx.insert(coin.to_uppercase(), asset_idx);
     }
 
+    /// Set the DEX ID for market keys.
+    ///
+    /// This should be called after discovering the actual xyz DEX index
+    /// from the exchange (e.g., via perpDexs API).
+    pub fn set_dex_id(&mut self, dex_id: DexId) {
+        self.dex_id = dex_id;
+    }
+
     /// Get spot rejection statistics.
     pub fn spot_stats(&self) -> &SpotRejectionStats {
         &self.spot_stats

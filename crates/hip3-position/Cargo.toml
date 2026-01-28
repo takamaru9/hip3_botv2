@@ -9,6 +9,7 @@ description = "Position management for HIP-3 (Phase B)"
 
 [dependencies]
 hip3-core = { workspace = true }
+hip3-feed = { workspace = true }
 tokio = { workspace = true }
 serde = { workspace = true }
 tracing = { workspace = true }

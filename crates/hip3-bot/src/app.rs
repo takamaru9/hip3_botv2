@@ -27,7 +27,8 @@ use hip3_executor::{
 use hip3_feed::{MarketEvent, MarketState, MessageParser};
 use hip3_persistence::{FollowupRecord, FollowupWriter, ParquetWriter, SignalRecord};
 use hip3_position::{
-    flatten_all_positions, spawn_position_tracker, FlattenReason, Position, PositionTrackerHandle,
+    flatten_all_positions, spawn_position_tracker, FlattenReason, MarkRegressionConfig,
+    MarkRegressionMonitor, Position, PositionTrackerHandle,
     TimeStopConfig as PositionTimeStopConfig, TimeStopMonitor,
 };
 use hip3_registry::{
@@ -798,6 +799,9 @@ impl Application {
                     self.config.time_stop.reduce_only_timeout_ms,
                 );
 
+                // Clone flatten_tx for MarkRegressionMonitor
+                let mark_regression_flatten_tx = flatten_tx.clone();
+
                 // Create TimeStopMonitor
                 let time_stop_monitor = TimeStopMonitor::new(
                     time_stop_config,
@@ -818,6 +822,37 @@ impl Application {
                     slippage_bps = self.config.time_stop.slippage_bps,
                     "TimeStopMonitor started"
                 );
+
+                // 13b. MarkRegressionMonitor for profit-taking exit
+                if self.config.mark_regression.enabled {
+                    let mark_regression_config = MarkRegressionConfig {
+                        enabled: true,
+                        exit_threshold_bps: rust_decimal::Decimal::from(
+                            self.config.mark_regression.exit_threshold_bps,
+                        ),
+                        check_interval_ms: self.config.mark_regression.check_interval_ms,
+                        min_holding_time_ms: self.config.mark_regression.min_holding_time_ms,
+                        slippage_bps: self.config.mark_regression.slippage_bps,
+                    };
+
+                    let mark_regression_monitor = MarkRegressionMonitor::new(
+                        mark_regression_config,
+                        position_tracker.clone(),
+                        mark_regression_flatten_tx,
+                        self.market_state.clone(),
+                    );
+
+                    tokio::spawn(async move {
+                        mark_regression_monitor.run().await;
+                    });
+
+                    info!(
+                        exit_threshold_bps = self.config.mark_regression.exit_threshold_bps,
+                        check_interval_ms = self.config.mark_regression.check_interval_ms,
+                        min_holding_time_ms = self.config.mark_regression.min_holding_time_ms,
+                        "MarkRegressionMonitor spawned"
+                    );
+                }
             }
 
             // 14. RiskMonitor for risk condition monitoring
@@ -998,7 +1033,7 @@ impl Application {
                 info!("HardStop flatten watcher started");
             }
 
-            info!("Trading mode initialized with ExecutorLoop, PositionTracker, TimeStopMonitor, RiskMonitor, and HardStop Flatten");
+            info!("Trading mode initialized with ExecutorLoop, PositionTracker, TimeStopMonitor, MarkRegressionMonitor, RiskMonitor, and HardStop Flatten");
 
             // 16. Dashboard server (if enabled)
             if self.config.dashboard.enabled {

@@ -2115,6 +2115,7 @@ dependencies = [
  "chrono",
  "dashmap",
  "hip3-core",
+ "hip3-feed",
  "rust_decimal",
  "rust_decimal_macros",
  "serde",

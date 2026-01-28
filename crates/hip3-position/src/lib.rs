@@ -1,7 +1,7 @@
 //! Position management for HIP-3 (Phase B).
 //!
 //! Tracks open positions, calculates PnL, manages position limits.
-//! Includes TimeStop (time-based exit) and Flattener (position closing).
+//! Includes TimeStop (time-based exit), MarkRegression (profit-taking), and Flattener (position closing).
 //!
 //! # Key Components
 //!
@@ -15,10 +15,12 @@
 //! - [`FlattenRequest`]: Request to close a position
 //! - [`FlattenReason`]: Why a position is being flattened
 //! - [`PriceProvider`]: Trait for providing current market prices
-//! - [`TimeStopMonitor`]: Background task for monitoring and triggering flattens
+//! - [`TimeStopMonitor`]: Background task for monitoring and triggering time-based flattens
+//! - [`MarkRegressionMonitor`]: Background task for profit-taking when BBO returns to Oracle
 
 pub mod error;
 pub mod flatten;
+pub mod mark_regression;
 pub mod time_stop;
 pub mod tracker;
 
@@ -27,6 +29,7 @@ pub use flatten::{
     flatten_all_positions, FlattenReason, FlattenRequest, FlattenState, Flattener,
     REDUCE_ONLY_TIMEOUT_MS,
 };
+pub use mark_regression::{MarkRegressionConfig, MarkRegressionMonitor};
 pub use time_stop::{
     FlattenOrderBuilder, PriceProvider, TimeStop, TimeStopConfig, TimeStopManager, TimeStopMonitor,
     TIME_STOP_MS,

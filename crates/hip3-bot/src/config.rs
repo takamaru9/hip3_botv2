@@ -95,6 +95,59 @@ pub struct RiskMonitorConfig {
     pub window_seconds: u64,
 }
 
+/// Mark regression exit configuration for profit-taking.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MarkRegressionConfig {
+    /// Whether mark regression exit is enabled. Default: true.
+    #[serde(default = "default_mark_regression_enabled")]
+    pub enabled: bool,
+    /// Exit threshold (bps). When BBO is within this distance from Oracle, exit is triggered.
+    /// Default: 5 bps.
+    #[serde(default = "default_mark_regression_exit_threshold_bps")]
+    pub exit_threshold_bps: u32,
+    /// Check interval (ms). Default: 200ms.
+    #[serde(default = "default_mark_regression_check_interval_ms")]
+    pub check_interval_ms: u64,
+    /// Minimum holding time before exit can trigger (ms). Default: 1000ms.
+    #[serde(default = "default_mark_regression_min_holding_time_ms")]
+    pub min_holding_time_ms: u64,
+    /// Slippage tolerance for flatten orders (bps). Default: 50 bps.
+    #[serde(default = "default_mark_regression_slippage_bps")]
+    pub slippage_bps: u64,
+}
+
+fn default_mark_regression_enabled() -> bool {
+    true
+}
+
+fn default_mark_regression_exit_threshold_bps() -> u32 {
+    5
+}
+
+fn default_mark_regression_check_interval_ms() -> u64 {
+    200
+}
+
+fn default_mark_regression_min_holding_time_ms() -> u64 {
+    1000
+}
+
+fn default_mark_regression_slippage_bps() -> u64 {
+    50
+}
+
+impl Default for MarkRegressionConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_mark_regression_enabled(),
+            exit_threshold_bps: default_mark_regression_exit_threshold_bps(),
+            check_interval_ms: default_mark_regression_check_interval_ms(),
+            min_holding_time_ms: default_mark_regression_min_holding_time_ms(),
+            slippage_bps: default_mark_regression_slippage_bps(),
+        }
+    }
+}
+
 fn default_max_consecutive_failures() -> u32 {
     5
 }
@@ -158,6 +211,9 @@ pub struct AppConfig {
     /// Time stop configuration (Trading mode only).
     #[serde(default)]
     pub time_stop: TimeStopConfig,
+    /// Mark regression exit configuration (Trading mode only).
+    #[serde(default)]
+    pub mark_regression: MarkRegressionConfig,
     /// Risk monitor configuration (Trading mode only).
     #[serde(default)]
     pub risk_monitor: RiskMonitorConfig,
@@ -356,6 +412,7 @@ impl Default for AppConfig {
             persistence: PersistenceConfig::default(),
             telemetry: TelemetryConfig::default(),
             time_stop: TimeStopConfig::default(),
+            mark_regression: MarkRegressionConfig::default(),
             risk_monitor: RiskMonitorConfig::default(),
             dashboard: DashboardConfig::default(),
             user_address: None,

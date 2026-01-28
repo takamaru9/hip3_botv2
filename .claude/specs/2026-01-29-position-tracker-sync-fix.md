@@ -184,3 +184,69 @@ fn on_sync_positions(&mut self, new_positions: Vec<Position>) {
 ### Commit
 
 `00f0522` - fix(position): Fix race condition in sync_positions causing position limit bypass (BUG-002)
+
+---
+
+## BUG-003: Zero-Size Orders on Low-Liquidity Markets
+
+**発見日**: 2026-01-29
+**重大度**: Medium (取引所エラーが繰り返し発生、注文は実行されず)
+
+### 問題
+
+PLATINUM市場で "Order has zero size" エラーが繰り返し発生。シグナルは検出されるが、取引所で拒否される。
+
+### 根本原因
+
+`suggested_size` が `lot_size` より小さい場合、`round_to_lot()` で0に丸められる：
+
+```
+PLATINUM: sz_decimals=4 → lot_size=0.0001
+
+1. Detector: suggested_size = 0.00005 (流動性が低い)
+2. Signer: round_to_lot(0.00005, 0.0001)
+   = floor(0.00005 / 0.0001) * 0.0001
+   = floor(0.5) * 0.0001
+   = 0 * 0.0001 = 0
+3. 取引所: "Order has zero size" エラー
+```
+
+Detectorは `is_zero()` チェックをしているが、`lot_size` での丸め前の値をチェックしているため、丸め後に0になるケースを検出できなかった。
+
+### 修正
+
+App側で `on_signal()` を呼ぶ前にサイズをlot_sizeで丸め、0ならスキップするゲートを追加：
+
+```rust
+// Gate: Check if size rounds to zero after lot_size truncation
+let lot_size = self.spec_cache.get(&signal.market_key)
+    .map(|spec| spec.lot_size)
+    .unwrap_or(Size::new(Decimal::new(1, 4)));
+let rounded_size = signal.suggested_size.round_to_lot(lot_size);
+if rounded_size.is_zero() {
+    debug!(
+        market = %signal.market_key,
+        suggested_size = %signal.suggested_size,
+        lot_size = %lot_size,
+        "Signal dropped: size rounds to zero after lot_size truncation"
+    );
+    continue;
+}
+
+// Use rounded_size instead of suggested_size for execution
+let result = executor_loop.executor().on_signal(
+    &signal.market_key, signal.side, signal.best_px,
+    rounded_size, // Rounded size
+    current_time_ms(),
+);
+```
+
+### 修正ファイル
+
+| File | Changes |
+|------|---------|
+| `crates/hip3-bot/src/app.rs` | on_signal()呼び出し前にlot_sizeでの丸めチェック追加、丸めたサイズで注文実行 |
+
+### Commit
+
+`5770b24` - fix: Add lot_size truncation check to prevent zero-size orders

@@ -321,6 +321,9 @@ pub async fn run_server(
     // Buffer for slow clients: 32 messages (3.2 sec worth)
     let (broadcast_tx, _) = broadcast::channel::<String>(32);
 
+    // Take signal receiver for real-time signal push
+    let signal_rx = dashboard_state.take_signal_receiver().await;
+
     // Create app state
     let state = AppState::new(
         dashboard_state.clone(),
@@ -337,8 +340,13 @@ pub async fn run_server(
     let update_interval_ms = config.update_interval_ms;
 
     tokio::spawn(async move {
-        crate::broadcast::run_broadcaster(broadcaster_state, broadcaster_tx, update_interval_ms)
-            .await;
+        crate::broadcast::run_broadcaster(
+            broadcaster_state,
+            broadcaster_tx,
+            update_interval_ms,
+            signal_rx,
+        )
+        .await;
     });
 
     // Bind and serve

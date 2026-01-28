@@ -9,6 +9,7 @@ use std::sync::Arc;
 use chrono::Utc;
 use parking_lot::RwLock;
 use rust_decimal::Decimal;
+use tokio::sync::mpsc;
 
 use hip3_core::types::MarketSnapshot;
 use hip3_core::{MarketKey, OrderSide};
@@ -20,6 +21,12 @@ use hip3_position::PositionTrackerHandle;
 use crate::types::{
     DashboardSnapshot, MarketDataSnapshot, PositionSnapshot, RiskStatus, SignalSnapshot,
 };
+
+/// Sender type for pushing signals in real-time to the dashboard.
+pub type SignalSender = mpsc::Sender<SignalSnapshot>;
+
+/// Receiver type for the broadcaster to receive signals.
+pub type SignalReceiver = mpsc::Receiver<SignalSnapshot>;
 
 /// Dashboard state that aggregates data from multiple sources.
 ///
@@ -40,6 +47,10 @@ pub struct DashboardState {
     gate_block_state: Arc<RwLock<HashMap<(MarketKey, String), bool>>>,
     /// Whether running in observation mode (limited features).
     observation_mode: bool,
+    /// Signal sender for real-time signal push (cloneable for external use).
+    signal_tx: SignalSender,
+    /// Signal receiver wrapped in Arc<Mutex> for one-time extraction by broadcaster.
+    signal_rx: Arc<tokio::sync::Mutex<Option<SignalReceiver>>>,
 }
 
 impl DashboardState {
@@ -50,6 +61,8 @@ impl DashboardState {
         hard_stop_latch: Arc<HardStopLatch>,
         recent_signals: Arc<RwLock<VecDeque<SignalRecord>>>,
     ) -> Self {
+        // Create signal channel with buffer for burst handling
+        let (signal_tx, signal_rx) = mpsc::channel::<SignalSnapshot>(64);
         Self {
             market_state,
             position_tracker: Some(position_tracker),
@@ -57,6 +70,8 @@ impl DashboardState {
             recent_signals,
             gate_block_state: Arc::new(RwLock::new(HashMap::new())),
             observation_mode: false,
+            signal_tx,
+            signal_rx: Arc::new(tokio::sync::Mutex::new(Some(signal_rx))),
         }
     }
 
@@ -70,6 +85,8 @@ impl DashboardState {
         market_state: Arc<MarketState>,
         recent_signals: Arc<RwLock<VecDeque<SignalRecord>>>,
     ) -> Self {
+        // Create signal channel with buffer for burst handling
+        let (signal_tx, signal_rx) = mpsc::channel::<SignalSnapshot>(64);
         Self {
             market_state,
             position_tracker: None,
@@ -77,7 +94,24 @@ impl DashboardState {
             recent_signals,
             gate_block_state: Arc::new(RwLock::new(HashMap::new())),
             observation_mode: true,
+            signal_tx,
+            signal_rx: Arc::new(tokio::sync::Mutex::new(Some(signal_rx))),
         }
+    }
+
+    /// Get a clone of the signal sender for external use.
+    ///
+    /// Use this to send signals in real-time to the dashboard.
+    /// The signal will be immediately broadcast to all connected WebSocket clients.
+    pub fn signal_sender(&self) -> SignalSender {
+        self.signal_tx.clone()
+    }
+
+    /// Take the signal receiver (can only be called once).
+    ///
+    /// This is used internally by run_server to pass the receiver to the broadcaster.
+    pub async fn take_signal_receiver(&self) -> Option<SignalReceiver> {
+        self.signal_rx.lock().await.take()
     }
 
     /// Update gate block state (called from main bot loop).

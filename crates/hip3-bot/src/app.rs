@@ -16,7 +16,7 @@ use chrono::Utc;
 use hip3_core::{
     AssetId, ClientOrderId, DexId, MarketKey, OrderSide, OrderState, PendingOrder, Price, Size,
 };
-use hip3_dashboard::DashboardState;
+use hip3_dashboard::{DashboardState, SignalSender, SignalSnapshot};
 use hip3_detector::{CrossDurationTracker, DislocationDetector, DislocationSignal};
 use hip3_executor::{
     ActionBudget, BatchConfig, BatchScheduler, DynWsSender, ExecutionEvent, ExecutorConfig,
@@ -114,6 +114,8 @@ pub struct Application {
     risk_event_tx: Option<mpsc::Sender<ExecutionEvent>>,
     /// Recent signals buffer for dashboard display (last 50).
     recent_signals: Arc<RwLock<VecDeque<SignalRecord>>>,
+    /// Signal sender for real-time dashboard updates.
+    dashboard_signal_tx: Option<SignalSender>,
 }
 
 impl Application {
@@ -177,6 +179,8 @@ impl Application {
             risk_event_tx: None,
             // Dashboard: Recent signals buffer
             recent_signals: Arc::new(RwLock::new(VecDeque::with_capacity(50))),
+            // Dashboard: Signal sender (set when dashboard is enabled)
+            dashboard_signal_tx: None,
         })
     }
 
@@ -1004,6 +1008,8 @@ impl Application {
                     hard_stop_latch.clone(),
                     self.recent_signals.clone(),
                 );
+                // Store signal sender for real-time signal push
+                self.dashboard_signal_tx = Some(dashboard_state.signal_sender());
                 let dashboard_config = self.config.dashboard.clone();
                 tokio::spawn(async move {
                     if let Err(e) =
@@ -1027,6 +1033,8 @@ impl Application {
                     self.market_state.clone(),
                     self.recent_signals.clone(),
                 );
+                // Store signal sender for real-time signal push
+                self.dashboard_signal_tx = Some(dashboard_state.signal_sender());
                 let dashboard_config = self.config.dashboard.clone();
                 tokio::spawn(async move {
                     if let Err(e) =
@@ -1647,21 +1655,31 @@ impl Application {
 
     /// Persist signal to JSON Lines and add to recent signals buffer.
     fn persist_signal(&mut self, signal: &DislocationSignal) -> AppResult<()> {
+        let timestamp_ms = signal.detected_at.timestamp_millis();
+        let market_key = signal.market_key.to_string();
+        let side = signal.side.to_string();
+        let raw_edge_bps = signal.raw_edge_bps.to_string().parse().unwrap_or(0.0);
+        let net_edge_bps = signal.net_edge_bps.to_string().parse().unwrap_or(0.0);
+        let oracle_px = signal.oracle_px.inner().to_string().parse().unwrap_or(0.0);
+        let best_px = signal.best_px.inner().to_string().parse().unwrap_or(0.0);
+        let best_size = signal.book_size.inner().to_string().parse().unwrap_or(0.0);
+        let suggested_size = signal
+            .suggested_size
+            .inner()
+            .to_string()
+            .parse()
+            .unwrap_or(0.0);
+
         let record = SignalRecord {
-            timestamp_ms: signal.detected_at.timestamp_millis(),
-            market_key: signal.market_key.to_string(),
-            side: signal.side.to_string(),
-            raw_edge_bps: signal.raw_edge_bps.to_string().parse().unwrap_or(0.0),
-            net_edge_bps: signal.net_edge_bps.to_string().parse().unwrap_or(0.0),
-            oracle_px: signal.oracle_px.inner().to_string().parse().unwrap_or(0.0),
-            best_px: signal.best_px.inner().to_string().parse().unwrap_or(0.0),
-            best_size: signal.book_size.inner().to_string().parse().unwrap_or(0.0),
-            suggested_size: signal
-                .suggested_size
-                .inner()
-                .to_string()
-                .parse()
-                .unwrap_or(0.0),
+            timestamp_ms,
+            market_key: market_key.clone(),
+            side: side.clone(),
+            raw_edge_bps,
+            net_edge_bps,
+            oracle_px,
+            best_px,
+            best_size,
+            suggested_size,
             signal_id: signal.signal_id.clone(),
         };
 
@@ -1672,6 +1690,26 @@ impl Application {
             // Keep only last 50 signals
             while signals.len() > 50 {
                 signals.pop_front();
+            }
+        }
+
+        // Send real-time signal to dashboard (non-blocking)
+        if let Some(tx) = &self.dashboard_signal_tx {
+            let snapshot = SignalSnapshot {
+                timestamp_ms,
+                market_key,
+                side,
+                raw_edge_bps,
+                net_edge_bps,
+                oracle_price: oracle_px,
+                best_price: best_px,
+                best_size,
+                suggested_size,
+                signal_id: signal.signal_id.clone(),
+            };
+            // Use try_send to avoid blocking on full channel
+            if let Err(e) = tx.try_send(snapshot) {
+                debug!(error = %e, "Failed to send signal to dashboard (channel full or closed)");
             }
         }
 

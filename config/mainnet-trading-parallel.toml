@@ -69,7 +69,7 @@ max_oi_fraction = 0.01
 [detector]
 taker_fee_bps = 4
 slippage_bps = 2
-min_edge_bps = 29
+min_edge_bps = 10  # Same as Observation for signal detection (per-market threshold_bps determines actionability)
 sizing_alpha = 0.10
 max_notional = 50
 min_book_notional = 50

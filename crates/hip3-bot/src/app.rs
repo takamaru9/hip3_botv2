@@ -1789,6 +1789,12 @@ impl Application {
         // Update deduplication map before writing
         self.last_persisted_signals.insert(dedup_key, timestamp_ms);
 
+        debug!(
+            market = %record.market_key,
+            side = %record.side,
+            "Signal persisted (not deduplicated)"
+        );
+
         self.writer
             .add_record(record)
             .map_err(AppError::Persistence)?;

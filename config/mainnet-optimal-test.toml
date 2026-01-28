@@ -71,7 +71,7 @@ taker_fee_bps = 4
 slippage_bps = 2
 min_edge_bps = 29  # Fallback for markets without threshold_bps
 sizing_alpha = 0.10
-max_notional = 11  # $11 limit for micro test
+max_notional = 50
 min_book_notional = 50
 normal_book_notional = 5000
 

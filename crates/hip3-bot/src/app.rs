@@ -1267,17 +1267,22 @@ impl Application {
                 if channel == "userFills" {
                     if let Some(user_fills) = msg.as_user_fills() {
                         if user_fills.is_snapshot {
-                            debug!(
+                            // IMPORTANT: Skip processing snapshot fills for position tracking.
+                            // Snapshot contains historical fills that would incorrectly rebuild
+                            // positions that were already closed. The correct position state
+                            // comes from sync_positions_from_api() (clearinghouseState API).
+                            info!(
                                 fills_count = user_fills.fills.len(),
-                                "Received userFills snapshot"
+                                "Received userFills snapshot (skipping for position tracking)"
                             );
-                        }
-                        // Process each fill in the array
-                        for fill in &user_fills.fills {
-                            self.handle_user_fill(fill);
-                        }
-                        if user_fills.fills.is_empty() && !user_fills.is_snapshot {
-                            debug!("userFills update with empty fills array");
+                        } else {
+                            // Process only streaming updates (non-snapshot)
+                            for fill in &user_fills.fills {
+                                self.handle_user_fill(fill);
+                            }
+                            if user_fills.fills.is_empty() {
+                                debug!("userFills update with empty fills array");
+                            }
                         }
                     } else {
                         // Failed to parse userFills - log the raw data for debugging

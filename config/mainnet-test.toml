@@ -1,0 +1,84 @@
+# HIP-3 Bot Configuration - Mainnet Micro Test
+# Purpose: $20 limit test on mainnet
+# Assets: xyz:SILVER (asset_idx=110026), xyz:CL (asset_idx=110029)
+# Asset ID formula: 100000 + perpDexId * 10000 + index_in_meta (xyz is perpDexId 1)
+# IMPORTANT: index_in_meta comes from meta(dex=xyz) API, NOT perpDexs API
+# Auto-exit: TimeStopMonitor (30s), RiskMonitor, HardStop Flatten 実装済み
+
+mode = "trading"
+ws_url = "wss://api.hyperliquid.xyz/ws"
+info_url = "https://api.hyperliquid.xyz/info"
+xyz_pattern = "xyz"
+is_mainnet = true
+
+# Account configuration (API wallet setup)
+# user_address: Account address for subscriptions/info queries (master or subaccount)
+user_address = "0x0116A3D95994BcC7D6A84380ED6256FBb32cD25D"
+
+# signer_address: RECOMMENDED. Set to HIP3_TRADING_KEY derived address
+# Bot will error on startup if this doesn't match the key
+signer_address = "0xbf8e23f88aead1a3b17d1ad39ef766e9f77de281"
+
+# vault_address: Only needed if trading via subaccount/vault
+# vault_address = "0x..."
+
+# Private key is read from env var HIP3_TRADING_KEY (do not put a raw key here).
+private_key = "0xd7fb667b6c9ecea9d66b6acc1f1d7b15c50dbcb93bff0eeff6a42de957fa155f"
+
+# Multi-market micro test: SILVER and CL
+# Asset ID formula for xyz markets: 100000 + perpDexId(1) * 10000 + index_in_meta
+# Verified from API: curl -X POST https://api.hyperliquid.xyz/info -d '{"type":"meta","dex":"xyz"}'
+[[markets]]
+asset_idx = 110026  # xyz:SILVER = 100000 + 10000 + 26 (index 26 in meta)
+coin = "xyz:SILVER"
+
+[[markets]]
+asset_idx = 110029  # xyz:CL = 100000 + 10000 + 29 (index 29 in meta)
+coin = "xyz:CL"
+
+[websocket]
+max_reconnect_attempts = 0
+reconnect_base_delay_ms = 1000
+heartbeat_interval_ms = 45000
+
+[risk]
+max_oracle_age_ms = 8000
+max_mark_mid_divergence_bps = 50
+spread_shock_multiplier = 3
+min_buffer_ratio = 0.15
+max_oi_fraction = 0.01
+
+[detector]
+taker_fee_bps = 4
+slippage_bps = 2
+min_edge_bps = 1
+sizing_alpha = 0.10
+max_notional = 11  # $11 limit for Phase A test (minimum order $10)
+
+[persistence]
+data_dir = "./data/signals"
+buffer_size = 100
+
+[telemetry]
+metrics_port = 9090
+log_level = "info"
+
+[time_stop]
+# Position holding threshold (ms) - positions held longer are auto-flattened
+threshold_ms = 30000
+# Reduce-only order timeout before retry (ms)
+reduce_only_timeout_ms = 60000
+# Check interval (ms)
+check_interval_ms = 1000
+# Slippage tolerance for flatten orders (bps)
+slippage_bps = 50
+
+[risk_monitor]
+# Maximum consecutive order failures before HardStop
+max_consecutive_failures = 5
+# Maximum cumulative loss (USD) before HardStop
+max_loss_usd = 20.0
+# Maximum flatten failures before critical alert
+max_flatten_failed = 3
+# Monitoring window (seconds)
+window_seconds = 3600

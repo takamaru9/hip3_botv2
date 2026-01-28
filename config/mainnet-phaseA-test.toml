@@ -1,0 +1,92 @@
+# HIP-3 Bot Configuration - Phase A Optimal Test
+# Purpose: Test trading with Phase A optimal thresholds
+# Based on: analysis/optimal_thresholds_complete.json
+#
+# Top expected EV tickers:
+#   GOOGL (12): threshold=45bps, EV=74.22bps, win=100%
+#   NFLX  (19): threshold=45bps, EV=42.84bps, win=97.2%
+#   LLY   (21): threshold=40bps, EV=42.41bps, win=71.8%
+#   GOLD  (3):  threshold=30bps, EV=37.63bps, win=100%
+#   TSLA  (1):  threshold=40bps, EV=35.68bps, win=100%
+#
+# Asset ID formula for xyz: 100000 + perpDexId(1) * 10000 + index_in_meta
+# Example: GOOGL index=12 -> 110012
+
+mode = "trading"
+ws_url = "wss://api.hyperliquid.xyz/ws"
+info_url = "https://api.hyperliquid.xyz/info"
+xyz_pattern = "xyz"
+is_mainnet = true
+
+# Account configuration (API wallet setup)
+user_address = "0x0116A3D95994BcC7D6A84380ED6256FBb32cD25D"
+signer_address = "0xbf8e23f88aead1a3b17d1ad39ef766e9f77de281"
+private_key = "0xd7fb667b6c9ecea9d66b6acc1f1d7b15c50dbcb93bff0eeff6a42de957fa155f"
+
+# Top 5 high-EV markets from Phase A analysis
+# Using common threshold of 40bps (compromise for multi-market)
+# threshold_bps = taker_fee_bps(4) + slippage_bps(2) + min_edge_bps
+# For 40bps threshold: min_edge_bps = 40 - 4 - 2 = 34
+
+[[markets]]
+asset_idx = 110012  # xyz:GOOGL (index 12) - EV=74.22bps @45bps
+coin = "xyz:GOOGL"
+
+[[markets]]
+asset_idx = 110019  # xyz:NFLX (index 19) - EV=42.84bps @45bps
+coin = "xyz:NFLX"
+
+[[markets]]
+asset_idx = 110021  # xyz:LLY (index 21) - EV=42.41bps @40bps
+coin = "xyz:LLY"
+
+[[markets]]
+asset_idx = 110003  # xyz:GOLD (index 3) - EV=37.63bps @30bps
+coin = "xyz:GOLD"
+
+[[markets]]
+asset_idx = 110001  # xyz:TSLA (index 1) - EV=35.68bps @40bps
+coin = "xyz:TSLA"
+
+[websocket]
+max_reconnect_attempts = 0
+reconnect_base_delay_ms = 1000
+heartbeat_interval_ms = 45000
+
+[risk]
+max_oracle_age_ms = 8000
+max_mark_mid_divergence_bps = 50
+spread_shock_multiplier = 3
+min_buffer_ratio = 0.15
+max_oi_fraction = 0.01
+
+[detector]
+# threshold = taker_fee + slippage + min_edge
+# Using 40bps as compromise: 4 + 2 + 34 = 40bps
+taker_fee_bps = 4
+slippage_bps = 2
+min_edge_bps = 34  # Adjusted for 40bps total threshold
+sizing_alpha = 0.10
+max_notional = 11  # $11 limit for micro test (minimum order ~$10)
+min_book_notional = 500
+normal_book_notional = 5000
+
+[persistence]
+data_dir = "./data/signals"
+buffer_size = 100
+
+[telemetry]
+metrics_port = 9090
+log_level = "info"
+
+[time_stop]
+threshold_ms = 30000
+reduce_only_timeout_ms = 60000
+check_interval_ms = 1000
+slippage_bps = 50
+
+[risk_monitor]
+max_consecutive_failures = 5
+max_loss_usd = 20.0
+max_flatten_failed = 3
+window_seconds = 3600

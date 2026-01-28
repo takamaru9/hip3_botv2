@@ -1,0 +1,702 @@
+{
+  "metadata": {
+    "analysis_date": "2026-01-22",
+    "data_period_hours": 48.4,
+    "total_signals": 4402100,
+    "total_followups": 12973800,
+    "fee_bps": 10,
+    "data_complete": true
+  },
+  "summary": {
+    "profitable_markets_raw": 4,
+    "profitable_markets_optimal": 22,
+    "total_markets": 28
+  },
+  "markets": [
+    {
+      "market_key": "xyz:12",
+      "ticker": "KO",
+      "raw": {
+        "signal_count": 142099,
+        "matched_count": 141907,
+        "avg_edge_bps": 5.4898163780273865,
+        "shrink_rate": 0.8069157969656183,
+        "win_rate": 0.37616889934957404,
+        "net_ev_bps": -1.9209344989834456,
+        "buy_ratio": 0.463162493745904
+      },
+      "optimal": {
+        "threshold_bps": 45,
+        "signal_count": 165,
+        "win_rate": 1.0,
+        "net_ev_bps": 74.22419437368237
+      },
+      "recommendation": "tier2"
+    },
+    {
+      "market_key": "xyz:19",
+      "ticker": "DIS",
+      "raw": {
+        "signal_count": 286526,
+        "matched_count": 286526,
+        "avg_edge_bps": 7.160869005740879,
+        "shrink_rate": 0.6840705555516777,
+        "win_rate": 0.27516525550909865,
+        "net_ev_bps": -4.272126695817539,
+        "buy_ratio": 0.0784605934539972
+      },
+      "optimal": {
+        "threshold_bps": 45,
+        "signal_count": 143,
+        "win_rate": 0.972027972027972,
+        "net_ev_bps": 42.835662108928084
+      },
+      "recommendation": "tier2"
+    },
+    {
+      "market_key": "xyz:21",
+      "ticker": "TLT",
+      "raw": {
+        "signal_count": 126229,
+        "matched_count": 125497,
+        "avg_edge_bps": 6.587623293186894,
+        "shrink_rate": 0.8340518100034264,
+        "win_rate": 0.4841948413109477,
+        "net_ev_bps": 1.2917410157505174,
+        "buy_ratio": 0.4388391754384567
+      },
+      "optimal": {
+        "threshold_bps": 40,
+        "signal_count": 390,
+        "win_rate": 0.717948717948718,
+        "net_ev_bps": 42.4089841479563
+      },
+      "recommendation": "tier1"
+    },
+    {
+      "market_key": "xyz:3",
+      "ticker": "TSLA",
+      "raw": {
+        "signal_count": 34002,
+        "matched_count": 33641,
+        "avg_edge_bps": 5.548103523325226,
+        "shrink_rate": 0.7887993817068458,
+        "win_rate": 0.37906126452840283,
+        "net_ev_bps": -1.1093651208503577,
+        "buy_ratio": 0.42460093338485777
+      },
+      "optimal": {
+        "threshold_bps": 30,
+        "signal_count": 293,
+        "win_rate": 1.0,
+        "net_ev_bps": 37.62677571148334
+      },
+      "recommendation": "tier1"
+    },
+    {
+      "market_key": "xyz:1",
+      "ticker": "AMD",
+      "raw": {
+        "signal_count": 135583,
+        "matched_count": 135583,
+        "avg_edge_bps": 5.937507401096844,
+        "shrink_rate": 0.8537796036376242,
+        "win_rate": 0.45872270122360476,
+        "net_ev_bps": 0.08539220214797183,
+        "buy_ratio": 0.2631303334488837
+      },
+      "optimal": {
+        "threshold_bps": 40,
+        "signal_count": 220,
+        "win_rate": 1.0,
+        "net_ev_bps": 35.68138159580108
+      },
+      "recommendation": "tier1"
+    },
+    {
+      "market_key": "xyz:24",
+      "ticker": "QQQ",
+      "raw": {
+        "signal_count": 96776,
+        "matched_count": 96776,
+        "avg_edge_bps": 4.679234338011209,
+        "shrink_rate": 0.8350727453087542,
+        "win_rate": 0.37521699594940894,
+        "net_ev_bps": -2.184427580704156,
+        "buy_ratio": 0.39300033066049433
+      },
+      "optimal": {
+        "threshold_bps": 35,
+        "signal_count": 156,
+        "win_rate": 0.9230769230769231,
+        "net_ev_bps": 34.24725438123602
+      },
+      "recommendation": "tier2"
+    },
+    {
+      "market_key": "xyz:29",
+      "ticker": "VZ",
+      "raw": {
+        "signal_count": 43343,
+        "matched_count": 43343,
+        "avg_edge_bps": 4.196545985738643,
+        "shrink_rate": 0.8444270124356874,
+        "win_rate": 0.33666335971206424,
+        "net_ev_bps": -2.0603313337636964,
+        "buy_ratio": 0.40421752070691924
+      },
+      "optimal": {
+        "threshold_bps": 35,
+        "signal_count": 208,
+        "win_rate": 1.0,
+        "net_ev_bps": 33.890305818915024
+      },
+      "recommendation": "tier1"
+    },
+    {
+      "market_key": "xyz:0",
+      "ticker": "AAPL",
+      "raw": {
+        "signal_count": 20508,
+        "matched_count": 20508,
+        "avg_edge_bps": 4.554113702646943,
+        "shrink_rate": 0.9038911644236396,
+        "win_rate": 0.40018529354398286,
+        "net_ev_bps": -0.6659576952940771,
+        "buy_ratio": 0.3801930953774137
+      },
+      "optimal": {
+        "threshold_bps": 35,
+        "signal_count": 149,
+        "win_rate": 1.0,
+        "net_ev_bps": 33.73123507783867
+      },
+      "recommendation": "tier2"
+    },
+    {
+      "market_key": "xyz:4",
+      "ticker": "GOOGL",
+      "raw": {
+        "signal_count": 35404,
+        "matched_count": 35257,
+        "avg_edge_bps": 2.908405862169923,
+        "shrink_rate": 0.6055251439430468,
+        "win_rate": 0.0625407720452676,
+        "net_ev_bps": -8.35818067166649,
+        "buy_ratio": 0.013954675667243384
+      },
+      "optimal": {
+        "threshold_bps": 15,
+        "signal_count": 54,
+        "win_rate": 1.0,
+        "net_ev_bps": 32.96243102142457
+      },
+      "recommendation": "tier2"
+    },
+    {
+      "market_key": "xyz:26",
+      "ticker": "IWM",
+      "raw": {
+        "signal_count": 188610,
+        "matched_count": 187053,
+        "avg_edge_bps": 6.409686991657597,
+        "shrink_rate": 0.7812277803617157,
+        "win_rate": 0.24110813512747725,
+        "net_ev_bps": -4.830448214499601,
+        "buy_ratio": 0.3811112358529401
+      },
+      "optimal": {
+        "threshold_bps": 30,
+        "signal_count": 102,
+        "win_rate": 1.0,
+        "net_ev_bps": 29.253759311649837
+      },
+      "recommendation": "tier2"
+    },
+    {
+      "market_key": "xyz:18",
+      "ticker": "NFLX",
+      "raw": {
+        "signal_count": 194431,
+        "matched_count": 194311,
+        "avg_edge_bps": 4.621341332379135,
+        "shrink_rate": 0.8652212175327182,
+        "win_rate": 0.4375717277971911,
+        "net_ev_bps": -0.7173433757678804,
+        "buy_ratio": 0.3562948057495458
+      },
+      "optimal": {
+        "threshold_bps": 35,
+        "signal_count": 328,
+        "win_rate": 0.6951219512195121,
+        "net_ev_bps": 28.742889116043102
+      },
+      "recommendation": "tier1"
+    },
+    {
+      "market_key": "xyz:13",
+      "ticker": "INTC",
+      "raw": {
+        "signal_count": 342247,
+        "matched_count": 342247,
+        "avg_edge_bps": 6.1281751471589665,
+        "shrink_rate": 0.7266827758899275,
+        "win_rate": 0.32559817909287736,
+        "net_ev_bps": -3.0460617446665417,
+        "buy_ratio": 0.44250497447749726
+      },
+      "optimal": {
+        "threshold_bps": 35,
+        "signal_count": 777,
+        "win_rate": 0.7773487773487774,
+        "net_ev_bps": 25.754356752318152
+      },
+      "recommendation": "tier1"
+    },
+    {
+      "market_key": "xyz:23",
+      "ticker": "XOM",
+      "raw": {
+        "signal_count": 39632,
+        "matched_count": 39632,
+        "avg_edge_bps": 4.627718357567191,
+        "shrink_rate": 0.8832004440855874,
+        "win_rate": 0.4460789261203068,
+        "net_ev_bps": -0.3715813368247236,
+        "buy_ratio": 0.3382367783609205
+      },
+      "optimal": {
+        "threshold_bps": 30,
+        "signal_count": 748,
+        "win_rate": 0.9866310160427807,
+        "net_ev_bps": 23.4493687399802
+      },
+      "recommendation": "tier1"
+    },
+    {
+      "market_key": "xyz:8",
+      "ticker": "META",
+      "raw": {
+        "signal_count": 215264,
+        "matched_count": 202239,
+        "avg_edge_bps": 4.582611106128286,
+        "shrink_rate": 0.8169986995584432,
+        "win_rate": 0.31496892290804446,
+        "net_ev_bps": -2.8213542436351755,
+        "buy_ratio": 0.23246258140121343
+      },
+      "optimal": {
+        "threshold_bps": 35,
+        "signal_count": 480,
+        "win_rate": 1.0,
+        "net_ev_bps": 23.060344802976672
+      },
+      "recommendation": "tier1"
+    },
+    {
+      "market_key": "xyz:17",
+      "ticker": "PFE",
+      "raw": {
+        "signal_count": 8842,
+        "matched_count": 8842,
+        "avg_edge_bps": 5.100846564874096,
+        "shrink_rate": 0.8137299253562542,
+        "win_rate": 0.3997964261479303,
+        "net_ev_bps": -0.18979949666322327,
+        "buy_ratio": 0.10325718163311468
+      },
+      "optimal": {
+        "threshold_bps": 15,
+        "signal_count": 776,
+        "win_rate": 0.9780927835051546,
+        "net_ev_bps": 22.120971818458678
+      },
+      "recommendation": "tier1"
+    },
+    {
+      "market_key": "xyz:2",
+      "ticker": "NVDA",
+      "raw": {
+        "signal_count": 20716,
+        "matched_count": 20716,
+        "avg_edge_bps": 5.3084645708558735,
+        "shrink_rate": 0.8748793203321105,
+        "win_rate": 0.42942653021818883,
+        "net_ev_bps": -0.17878481885724007,
+        "buy_ratio": 0.37391388298899403
+      },
+      "optimal": {
+        "threshold_bps": 25,
+        "signal_count": 237,
+        "win_rate": 1.0,
+        "net_ev_bps": 21.869598048730165
+      },
+      "recommendation": "tier1"
+    },
+    {
+      "market_key": "xyz:11",
+      "ticker": "JPM",
+      "raw": {
+        "signal_count": 26340,
+        "matched_count": 26340,
+        "avg_edge_bps": 6.180708623230669,
+        "shrink_rate": 0.8240698557327258,
+        "win_rate": 0.40827638572513286,
+        "net_ev_bps": -1.2568974372180985,
+        "buy_ratio": 0.2558086560364465
+      },
+      "optimal": {
+        "threshold_bps": 25,
+        "signal_count": 1060,
+        "win_rate": 0.9283018867924528,
+        "net_ev_bps": 17.88946818532307
+      },
+      "recommendation": "tier1"
+    },
+    {
+      "market_key": "xyz:22",
+      "ticker": "GLD",
+      "raw": {
+        "signal_count": 30877,
+        "matched_count": 30877,
+        "avg_edge_bps": 4.808460557982005,
+        "shrink_rate": 0.8626809599378178,
+        "win_rate": 0.40599799203290476,
+        "net_ev_bps": -0.6741109731235326,
+        "buy_ratio": 0.45694206043333224
+      },
+      "optimal": {
+        "threshold_bps": 35,
+        "signal_count": 340,
+        "win_rate": 0.6264705882352941,
+        "net_ev_bps": 17.69333542797904
+      },
+      "recommendation": "tier1"
+    },
+    {
+      "market_key": "xyz:5",
+      "ticker": "AMZN",
+      "raw": {
+        "signal_count": 93016,
+        "matched_count": 93016,
+        "avg_edge_bps": 5.228843066314503,
+        "shrink_rate": 0.8423282015997248,
+        "win_rate": 0.42121785499268943,
+        "net_ev_bps": -1.536131713366693,
+        "buy_ratio": 0.5584415584415584
+      },
+      "optimal": {
+        "threshold_bps": 25,
+        "signal_count": 1655,
+        "win_rate": 0.7867069486404834,
+        "net_ev_bps": 17.58862457244869
+      },
+      "recommendation": "tier1"
+    },
+    {
+      "market_key": "xyz:28",
+      "ticker": "SNDK",
+      "raw": {
+        "signal_count": 205361,
+        "matched_count": 192554,
+        "avg_edge_bps": 7.024328563280497,
+        "shrink_rate": 0.7934397623523791,
+        "win_rate": 0.4352285592612981,
+        "net_ev_bps": 0.8865337417153185,
+        "buy_ratio": 0.1245001402204057
+      },
+      "optimal": {
+        "threshold_bps": 35,
+        "signal_count": 1207,
+        "win_rate": 0.7158243579121789,
+        "net_ev_bps": 16.886206940076942
+      },
+      "recommendation": "tier1"
+    },
+    {
+      "market_key": "xyz:16",
+      "ticker": "MSFT",
+      "raw": {
+        "signal_count": 21528,
+        "matched_count": 21528,
+        "avg_edge_bps": 6.530297482458543,
+        "shrink_rate": 0.8522853957636566,
+        "win_rate": 0.41253251579338535,
+        "net_ev_bps": -1.042480520942025,
+        "buy_ratio": 0.5704199182460052
+      },
+      "optimal": {
+        "threshold_bps": 30,
+        "signal_count": 747,
+        "win_rate": 0.8527443105756358,
+        "net_ev_bps": 9.559091945293158
+      },
+      "recommendation": "tier2"
+    },
+    {
+      "market_key": "xyz:25",
+      "ticker": "SPY",
+      "raw": {
+        "signal_count": 78976,
+        "matched_count": 78976,
+        "avg_edge_bps": 7.2783119141625345,
+        "shrink_rate": 0.8393942463533225,
+        "win_rate": 0.5082809967585089,
+        "net_ev_bps": 0.9443306582126834,
+        "buy_ratio": 0.2756913492706645
+      },
+      "optimal": {
+        "threshold_bps": 15,
+        "signal_count": 10813,
+        "win_rate": 0.553962822528438,
+        "net_ev_bps": 5.7972419312196255
+      },
+      "recommendation": "tier2"
+    },
+    {
+      "market_key": "xyz:10",
+      "ticker": "UNKNOWN10",
+      "raw": {
+        "signal_count": 6484,
+        "matched_count": 6484,
+        "avg_edge_bps": 1.4806762428739217,
+        "shrink_rate": 0.7388957433682912,
+        "win_rate": 0.2552436767427514,
+        "net_ev_bps": -4.676972436807016,
+        "buy_ratio": 0.10101789019123998
+      },
+      "optimal": {
+        "threshold_bps": 5,
+        "signal_count": 456,
+        "win_rate": 0.44956140350877194,
+        "net_ev_bps": -1.5248270353706577
+      },
+      "recommendation": "exclude"
+    },
+    {
+      "market_key": "xyz:20",
+      "ticker": "SLV",
+      "raw": {
+        "signal_count": 234734,
+        "matched_count": 234734,
+        "avg_edge_bps": 21.31155279287087,
+        "shrink_rate": 0.5660833113226035,
+        "win_rate": 0.17086148576686802,
+        "net_ev_bps": -7.11631599525131,
+        "buy_ratio": 0.130969522949381
+      },
+      "optimal": {
+        "threshold_bps": 45,
+        "signal_count": 15014,
+        "win_rate": 0.158252297855335,
+        "net_ev_bps": -5.8756209858755595
+      },
+      "recommendation": "exclude"
+    },
+    {
+      "market_key": "xyz:6",
+      "ticker": "COPPER",
+      "raw": {
+        "signal_count": 1578700,
+        "matched_count": 1553114,
+        "avg_edge_bps": 10.70097629368361,
+        "shrink_rate": 0.5130756660489829,
+        "win_rate": 0.0136371187176215,
+        "net_ev_bps": -9.741647418122055,
+        "buy_ratio": 0.0
+      },
+      "optimal": {
+        "threshold_bps": 50,
+        "signal_count": 2213,
+        "win_rate": 0.17849073655671036,
+        "net_ev_bps": -5.967196576073372
+      },
+      "recommendation": "exclude"
+    },
+    {
+      "market_key": "xyz:14",
+      "ticker": "WFC",
+      "raw": {
+        "signal_count": 69222,
+        "matched_count": 69222,
+        "avg_edge_bps": 5.851229725561805,
+        "shrink_rate": 0.5074831700904336,
+        "win_rate": 0.002687007020889313,
+        "net_ev_bps": -9.916722997356485,
+        "buy_ratio": 0.523460749472711
+      },
+      "optimal": {
+        "threshold_bps": 20,
+        "signal_count": 1207,
+        "win_rate": 0.0687655343827672,
+        "net_ev_bps": -7.340046915810583
+      },
+      "recommendation": "exclude"
+    },
+    {
+      "market_key": "xyz:31",
+      "ticker": "USO",
+      "raw": {
+        "signal_count": 93529,
+        "matched_count": 70192,
+        "avg_edge_bps": 8.506693274166528,
+        "shrink_rate": 0.27128447686346024,
+        "win_rate": 0.013220879872350126,
+        "net_ev_bps": -9.67563191548306,
+        "buy_ratio": 0.13532881240027353
+      },
+      "optimal": {
+        "threshold_bps": 20,
+        "signal_count": 3233,
+        "win_rate": 0.01824930405196412,
+        "net_ev_bps": -9.339716285917973
+      },
+      "recommendation": "exclude"
+    },
+    {
+      "market_key": "xyz:9",
+      "ticker": "UNKNOWN9",
+      "raw": {
+        "signal_count": 33121,
+        "matched_count": 33121,
+        "avg_edge_bps": 0.7229523200875638,
+        "shrink_rate": 0.14724796956613628,
+        "win_rate": 0.0014190392802149693,
+        "net_ev_bps": -9.84922174167813,
+        "buy_ratio": 0.9905498022402706
+      },
+      "optimal": {
+        "threshold_bps": 0,
+        "signal_count": 33121,
+        "win_rate": 0.0014190392802149693,
+        "net_ev_bps": -9.84922174167813
+      },
+      "recommendation": "exclude"
+    }
+  ],
+  "recommended_config": {
+    "tier1": [
+      {
+        "market": "xyz:21",
+        "ticker": "TLT",
+        "threshold": 40
+      },
+      {
+        "market": "xyz:3",
+        "ticker": "TSLA",
+        "threshold": 30
+      },
+      {
+        "market": "xyz:1",
+        "ticker": "AMD",
+        "threshold": 40
+      },
+      {
+        "market": "xyz:29",
+        "ticker": "VZ",
+        "threshold": 35
+      },
+      {
+        "market": "xyz:18",
+        "ticker": "NFLX",
+        "threshold": 35
+      },
+      {
+        "market": "xyz:13",
+        "ticker": "INTC",
+        "threshold": 35
+      },
+      {
+        "market": "xyz:23",
+        "ticker": "XOM",
+        "threshold": 30
+      },
+      {
+        "market": "xyz:8",
+        "ticker": "META",
+        "threshold": 35
+      },
+      {
+        "market": "xyz:17",
+        "ticker": "PFE",
+        "threshold": 15
+      },
+      {
+        "market": "xyz:2",
+        "ticker": "NVDA",
+        "threshold": 25
+      },
+      {
+        "market": "xyz:11",
+        "ticker": "JPM",
+        "threshold": 25
+      },
+      {
+        "market": "xyz:22",
+        "ticker": "GLD",
+        "threshold": 35
+      },
+      {
+        "market": "xyz:5",
+        "ticker": "AMZN",
+        "threshold": 25
+      },
+      {
+        "market": "xyz:28",
+        "ticker": "SNDK",
+        "threshold": 35
+      }
+    ],
+    "tier2": [
+      {
+        "market": "xyz:12",
+        "ticker": "KO",
+        "threshold": 45
+      },
+      {
+        "market": "xyz:19",
+        "ticker": "DIS",
+        "threshold": 45
+      },
+      {
+        "market": "xyz:24",
+        "ticker": "QQQ",
+        "threshold": 35
+      },
+      {
+        "market": "xyz:0",
+        "ticker": "AAPL",
+        "threshold": 35
+      },
+      {
+        "market": "xyz:4",
+        "ticker": "GOOGL",
+        "threshold": 15
+      },
+      {
+        "market": "xyz:26",
+        "ticker": "IWM",
+        "threshold": 30
+      },
+      {
+        "market": "xyz:16",
+        "ticker": "MSFT",
+        "threshold": 30
+      },
+      {
+        "market": "xyz:25",
+        "ticker": "SPY",
+        "threshold": 15
+      }
+    ],
+    "tier3": [],
+    "exclude": [
+      "xyz:10",
+      "xyz:20",
+      "xyz:6",
+      "xyz:14",
+      "xyz:31",
+      "xyz:9"
+    ]
+  }
+}

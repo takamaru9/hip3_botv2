@@ -1,0 +1,71 @@
+# HIP-3 Bot Configuration - Execution Path Test
+# Purpose: Verify signal→trade execution flow works correctly
+# Note: Lower threshold (11bps) to match current market conditions (~11bps dislocations)
+#
+# SILVER (26): Currently showing ~11bps dislocations
+# GOLD (3): 24h market for weekend testing
+#
+# Asset ID formula for xyz: 100000 + perpDexId(1) * 10000 + index_in_meta
+
+mode = "trading"
+ws_url = "wss://api.hyperliquid.xyz/ws"
+info_url = "https://api.hyperliquid.xyz/info"
+xyz_pattern = "xyz"
+is_mainnet = true
+
+# Account configuration
+user_address = "0x0116A3D95994BcC7D6A84380ED6256FBb32cD25D"
+signer_address = "0xbf8e23f88aead1a3b17d1ad39ef766e9f77de281"
+private_key = "0xd7fb667b6c9ecea9d66b6acc1f1d7b15c50dbcb93bff0eeff6a42de957fa155f"
+
+# SILVER and GOLD - both trade 24h
+[[markets]]
+asset_idx = 110026  # xyz:SILVER (index 26)
+coin = "xyz:SILVER"
+
+[[markets]]
+asset_idx = 110003  # xyz:GOLD (index 3)
+coin = "xyz:GOLD"
+
+[websocket]
+max_reconnect_attempts = 0
+reconnect_base_delay_ms = 1000
+heartbeat_interval_ms = 45000
+
+[risk]
+max_oracle_age_ms = 8000
+max_mark_mid_divergence_bps = 50
+spread_shock_multiplier = 3
+min_buffer_ratio = 0.15
+max_oi_fraction = 0.01
+
+[detector]
+# Lower threshold to match current market conditions
+# threshold = taker_fee + slippage + min_edge = 4 + 2 + 5 = 11bps
+taker_fee_bps = 4
+slippage_bps = 2
+min_edge_bps = 5  # Low for testing execution path
+sizing_alpha = 0.10
+max_notional = 11  # $11 limit for micro test
+min_book_notional = 500
+normal_book_notional = 5000
+
+[persistence]
+data_dir = "./data/signals"
+buffer_size = 100
+
+[telemetry]
+metrics_port = 9090
+log_level = "info"
+
+[time_stop]
+threshold_ms = 30000
+reduce_only_timeout_ms = 60000
+check_interval_ms = 1000
+slippage_bps = 50
+
+[risk_monitor]
+max_consecutive_failures = 5
+max_loss_usd = 20.0
+max_flatten_failed = 3
+window_seconds = 3600

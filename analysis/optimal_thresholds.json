@@ -1,0 +1,129 @@
+{
+  "_note": "Ticker names corrected 2026-01-26 based on meta(dex=xyz) API",
+  "xyz:21": {
+    "ticker": "LLY",
+    "threshold_bps": 40,
+    "expected_ev_bps": 123.36504390651922,
+    "expected_win_rate": 1.0
+  },
+  "xyz:28": {
+    "ticker": "BABA",
+    "threshold_bps": 35,
+    "expected_ev_bps": 62.544010826047725,
+    "expected_win_rate": 0.9633507853403142
+  },
+  "xyz:19": {
+    "ticker": "NFLX",
+    "threshold_bps": 45,
+    "expected_ev_bps": 42.835662108928084,
+    "expected_win_rate": 0.972027972027972
+  },
+  "xyz:8": {
+    "ticker": "META",
+    "threshold_bps": 25,
+    "expected_ev_bps": 40.20545082779927,
+    "expected_win_rate": 1.0
+  },
+  "xyz:3": {
+    "ticker": "GOLD",
+    "threshold_bps": 30,
+    "expected_ev_bps": 37.62677571148334,
+    "expected_win_rate": 1.0
+  },
+  "xyz:12": {
+    "ticker": "GOOGL",
+    "threshold_bps": 40,
+    "expected_ev_bps": 36.950702453194886,
+    "expected_win_rate": 1.0
+  },
+  "xyz:1": {
+    "ticker": "TSLA",
+    "threshold_bps": 40,
+    "expected_ev_bps": 35.68138159580108,
+    "expected_win_rate": 1.0
+  },
+  "xyz:24": {
+    "ticker": "JPY",
+    "threshold_bps": 35,
+    "expected_ev_bps": 34.24725438123602,
+    "expected_win_rate": 0.9230769230769231
+  },
+  "xyz:29": {
+    "ticker": "CL",
+    "threshold_bps": 35,
+    "expected_ev_bps": 33.890305818915024,
+    "expected_win_rate": 1.0
+  },
+  "xyz:0": {
+    "ticker": "XYZ100",
+    "threshold_bps": 35,
+    "expected_ev_bps": 33.73123507783867,
+    "expected_win_rate": 1.0
+  },
+  "xyz:4": {
+    "ticker": "HOOD",
+    "threshold_bps": 15,
+    "expected_ev_bps": 32.96243102142457,
+    "expected_win_rate": 1.0
+  },
+  "xyz:13": {
+    "ticker": "AMZN",
+    "threshold_bps": 35,
+    "expected_ev_bps": 25.653370287323092,
+    "expected_win_rate": 0.8283261802575107
+  },
+  "xyz:11": {
+    "ticker": "ORCL",
+    "threshold_bps": 25,
+    "expected_ev_bps": 24.437049587653554,
+    "expected_win_rate": 0.9393139841688655
+  },
+  "xyz:5": {
+    "ticker": "INTC",
+    "threshold_bps": 25,
+    "expected_ev_bps": 24.346624045226356,
+    "expected_win_rate": 0.8630490956072352
+  },
+  "xyz:23": {
+    "ticker": "TSM",
+    "threshold_bps": 25,
+    "expected_ev_bps": 23.057421169289718,
+    "expected_win_rate": 0.9824253075571178
+  },
+  "xyz:2": {
+    "ticker": "NVDA",
+    "threshold_bps": 25,
+    "expected_ev_bps": 22.03380299409389,
+    "expected_win_rate": 1.0
+  },
+  "xyz:17": {
+    "ticker": "MSTR",
+    "threshold_bps": 15,
+    "expected_ev_bps": 19.18010248269124,
+    "expected_win_rate": 0.935361216730038
+  },
+  "xyz:18": {
+    "ticker": "CRCL",
+    "threshold_bps": 25,
+    "expected_ev_bps": 17.947837693809365,
+    "expected_win_rate": 0.9878048780487805
+  },
+  "xyz:22": {
+    "ticker": "SKHX",
+    "threshold_bps": 20,
+    "expected_ev_bps": 10.716222973440672,
+    "expected_win_rate": 1.0
+  },
+  "xyz:16": {
+    "ticker": "SNDK",
+    "threshold_bps": 15,
+    "expected_ev_bps": 7.842468184331825,
+    "expected_win_rate": 0.7418673426277989
+  },
+  "xyz:25": {
+    "ticker": "EUR",
+    "threshold_bps": 10,
+    "expected_ev_bps": 6.4681577294385875,
+    "expected_win_rate": 0.5530873044309089
+  }
+}

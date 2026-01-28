@@ -251,4 +251,177 @@ signals_2026-01-20.jsonl   # 141KB, 600+ records
 | 再開日時 | 2026-01-20 07:13 UTC |
 | データ形式 | JSON Lines (.jsonl) |
 | 予定完了 | 2026-01-21 07:13 UTC |
-| 次回米国市場 | 2026-01-20 14:30 UTC (JST 23:30)
+| 次回米国市場 | 2026-01-20 14:30 UTC (JST 23:30) |
+
+---
+
+## 機能追加: best_size フィールド (2026-01-20 08:09 UTC)
+
+### 背景
+
+シグナル分析時に、提案されたサイズ（`suggested_size`）と実際に利用可能な流動性（オーダーブックのトップレベルサイズ）を比較できるようにする。
+
+### 変更内容
+
+| 項目 | 変更 |
+|------|------|
+| フィールド追加 | `best_size: f64` を `SignalRecord` に追加 |
+| データソース | `DislocationSignal.book_size` から取得 |
+| 意味 | ベストプライスで利用可能なサイズ（トップオブブック深度） |
+
+### 変更ファイル
+
+1. `crates/hip3-persistence/src/writer.rs`
+   - `SignalRecord` に `best_size` フィールド追加
+   - テストヘルパー関数更新
+
+2. `crates/hip3-bot/src/app.rs`
+   - `persist_signal()` で `best_size` を設定
+
+### デプロイ
+
+| 項目 | 結果 |
+|------|------|
+| Commit | `51908f8` |
+| GitHub push | ✅ 成功 |
+| VPS更新 | ✅ `git pull` + rebuild + restart |
+| コンテナ状態 | ✅ healthy |
+
+### 新しいJSONフォーマット
+
+```json
+{
+  "timestamp_ms": 1768893220122,
+  "market_key": "xyz:23",
+  "side": "buy",
+  "raw_edge_bps": 17.15,
+  "net_edge_bps": 6.15,
+  "oracle_px": 186.55,
+  "best_px": 186.23,
+  "best_size": 1.5,      // ← NEW
+  "suggested_size": 0.3,
+  "signal_id": "sig_xyz:23_buy_..."
+}
+```
+
+### 分析での活用
+
+- `suggested_size / best_size` 比率で流動性消費率を確認
+- 比率 > 1 の場合、スリッページリスクが高い
+- 市場別の流動性特性を把握可能
+
+---
+
+## L2データ購読の検討 (2026-01-20)
+
+### 調査結果
+
+| 項目 | 状況 |
+|------|------|
+| Hyperliquid `l2Book` API | ✅ 利用可能 |
+| 現在の購読 | BBO のみ |
+| レート制限 | 2000 msg/min (L2追加で消費増) |
+
+### 判断
+
+**Phase Aデータを待つ**
+- まず `best_size` 付きの24時間データを収集
+- `suggested_size / best_size` 比率を分析
+- 流動性が不足している市場が多ければL2購読を検討
+
+### 次回判断タイミング
+
+Phase A 24時間テスト完了後（2026-01-21 07:13 UTC 以降）
+
+---
+
+## 機能追加: Followup Snapshot (2026-01-20)
+
+### 背景
+
+シグナル発生後の収束状況を記録し、シグナルの有効性を検証するためのデータを収集する。
+
+- Oracle は約3秒ごとにデプロイヤーが更新
+- Market Price が先行する場合と、Oracle が先行する場合がある
+- T+1s, T+3s, T+5s にマーケット状態をキャプチャ
+
+### 変更内容
+
+| 項目 | 詳細 |
+|------|------|
+| 新規Struct | `FollowupRecord` - フォローアップデータ |
+| 新規Class | `FollowupWriter` - JSON Lines書き込み |
+| 新規Method | `schedule_followups()` - 3タスクをspawn |
+| 新規Function | `capture_followup()` - 遅延キャプチャ |
+| オフセット | `[1000, 3000, 5000]` ms |
+
+### 変更ファイル
+
+1. `crates/hip3-persistence/src/writer.rs`
+   - `FollowupRecord` struct追加
+   - `FollowupWriter` class追加
+
+2. `crates/hip3-persistence/src/lib.rs`
+   - 新しい型をエクスポート
+
+3. `crates/hip3-bot/src/app.rs`
+   - `FollowupContext` struct
+   - `schedule_followups()` method
+   - `capture_followup()` async function
+
+### デプロイ
+
+| 項目 | 結果 |
+|------|------|
+| Tests | ✅ 4 tests passed |
+| Clippy | ✅ No warnings |
+| VPS Deploy | ✅ Rebuild + restart |
+| Followup生成 | ✅ `followups_2026-01-20.jsonl` |
+
+### 検証結果
+
+| Offset | Records | Status |
+|--------|---------|--------|
+| T+1s | 11,088 | ✓ Working |
+| T+3s | 11,040 | ✓ Working |
+| T+5s | 10,972 | ✓ Working |
+
+### 銘柄カバレッジ
+
+- 全xyz銘柄: 32
+- シグナル/フォローアップあり: 25
+- カバー率: 78%
+
+### 出力ファイル
+
+```
+data/mainnet/signals/
+├── signals_2026-01-20.jsonl       # シグナル
+└── followups_2026-01-20.jsonl     # フォローアップ
+```
+
+### データクリーンアップ
+
+| 項目 | 詳細 |
+|------|------|
+| 削除対象 | フォローアップ機能追加前のデータ |
+| 削除ファイル数 | 3ファイル (古いsignals) |
+| 理由 | フォローアップなしのデータは分析対象外 |
+
+### 詳細Spec
+
+`.claude/specs/2026-01-20-followup-snapshot-feature.md` を参照
+
+---
+
+## 次のステップ（更新）
+
+1. [x] ~~24時間経過を待つ~~ → データ破損のためリセット
+2. [x] データ破損原因調査・修正完了
+3. [x] JSON Lines形式で新規24時間テスト実行中
+4. [x] best_size フィールド追加
+5. [x] Followup Snapshot機能追加
+6. [ ] 米国市場時間帯のシグナルデータを分析
+7. [ ] フォローアップデータでシグナル有効性を検証
+8. [ ] Phase A DoD最終判定
+9. [ ] Phase B準備開始（条件達成の場合）

@@ -120,3 +120,9 @@
 3) **RateLimiter との inflight 会計を実装タスクとして明示する**  
 計画では `InflightTracker` を唯一の inflight ソースにしていますが、現状の `crates/hip3-ws/src/rate_limiter.rs` は inflight を会計しています。  
 → 実装で「RateLimiter の inflight 会計を外す/統合する/参照に置き換える」のどれを採るかを確定し、P0タスクとして追記してください（ドリフトするとデバッグ不能になります）。
+
+---
+
+## 再レビュー（2026-01-20, 追補3）
+このラウンドの3点（InflightTrackerのunderflow防止、`DashMap::drain()`の修正、RateLimiterとの統合タスク追加）は反映されています。  
+**3.1 は承諾**します（この内容で実装に進めます）。

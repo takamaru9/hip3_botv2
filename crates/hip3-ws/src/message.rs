@@ -215,6 +215,7 @@ pub struct OrderUpdatesResult {
 // ============================================================================
 
 /// Fill notification from userFills subscription.
+/// Note: Uses deny_unknown_fields=false to allow additional fields from API.
 #[derive(Debug, Clone, Deserialize)]
 pub struct FillPayload {
     /// Coin symbol.
@@ -237,6 +238,23 @@ pub struct FillPayload {
     pub start_position: String,
     /// Direction indicator.
     pub dir: String,
+    /// Closed PnL (optional, present in streaming updates).
+    #[serde(rename = "closedPnl")]
+    pub closed_pnl: Option<String>,
+    /// Order ID on exchange.
+    pub oid: Option<u64>,
+    /// Client order ID.
+    pub cloid: Option<String>,
+    /// Transaction hash.
+    pub hash: Option<String>,
+    /// Whether order crossed the spread.
+    pub crossed: Option<bool>,
+    /// Fee token (e.g., "USDC").
+    #[serde(rename = "feeToken")]
+    pub fee_token: Option<String>,
+    /// TWAP order ID if applicable.
+    #[serde(rename = "twapId")]
+    pub twap_id: Option<serde_json::Value>,
 }
 
 impl FillPayload {
@@ -252,11 +270,12 @@ impl FillPayload {
 }
 
 /// userFills subscription response from Hyperliquid.
-/// Format: { "isSnapshot": bool, "user": string, "fills": [FillPayload, ...] }
+/// Format: { "isSnapshot"?: bool, "user": string, "fills": [FillPayload, ...] }
+/// Note: isSnapshot is only present in the initial snapshot message.
 #[derive(Debug, Clone, Deserialize)]
 pub struct UserFillsPayload {
-    /// True for initial snapshot, false for streaming updates.
-    #[serde(rename = "isSnapshot")]
+    /// True for initial snapshot. Missing (defaults to false) for streaming updates.
+    #[serde(rename = "isSnapshot", default)]
     pub is_snapshot: bool,
     /// User address.
     pub user: String,
@@ -1059,6 +1078,55 @@ mod tests {
 
         assert!(user_fills.is_snapshot);
         assert!(user_fills.fills.is_empty());
+    }
+
+    #[test]
+    fn test_ws_message_user_fills_streaming_update() {
+        // Test streaming update format (no isSnapshot field, with additional fields)
+        // This is the actual format received from Hyperliquid
+        let json = json!({
+            "channel": "userFills",
+            "data": {
+                "user": "0x0116a3d95994bcc7d6a84380ed6256fbb32cd25d",
+                "fills": [{
+                    "coin": "xyz:SILVER",
+                    "px": "112.89",
+                    "sz": "2.7",
+                    "side": "B",
+                    "time": 1769594065851_u64,
+                    "startPosition": "-6.66",
+                    "dir": "Close Short",
+                    "closedPnl": "-0.02673",
+                    "hash": "0x403b2645eccc82d441b4043434c1a3020115002b87cfa1a6e403d198abc05cbe",
+                    "oid": 304587174168_u64,
+                    "crossed": true,
+                    "fee": "0.023317",
+                    "tid": 694586448408875_u64,
+                    "cloid": "0xd2ed5e997c5a4cb9946d84c35f0b737c",
+                    "feeToken": "USDC",
+                    "twapId": null
+                }]
+            }
+        });
+
+        let msg: WsMessage = serde_json::from_value(json).unwrap();
+        assert!(msg.is_user_fills());
+
+        let user_fills = msg.as_user_fills().unwrap();
+        // isSnapshot defaults to false when not present
+        assert!(!user_fills.is_snapshot);
+        assert_eq!(user_fills.fills.len(), 1);
+
+        let fill = &user_fills.fills[0];
+        assert_eq!(fill.coin, "xyz:SILVER");
+        assert_eq!(fill.px, "112.89");
+        assert_eq!(fill.sz, "2.7");
+        assert!(fill.is_buy());
+        assert_eq!(fill.closed_pnl, Some("-0.02673".to_string()));
+        assert_eq!(fill.oid, Some(304587174168));
+        assert_eq!(fill.cloid, Some("0xd2ed5e997c5a4cb9946d84c35f0b737c".to_string()));
+        assert_eq!(fill.crossed, Some(true));
+        assert_eq!(fill.fee_token, Some("USDC".to_string()));
     }
 
     #[test]

@@ -372,8 +372,10 @@ impl RiskMonitor {
                 // - iocCancelRejected: IOC order couldn't match (normal for thin orderbooks)
                 // - reduceOnlyRejected: Position already closed (race condition, not a problem)
                 // - Order has zero size: Rounding to zero (edge case, not a problem)
+                // - minTradeNtlRejected: Order below minimum trade notional (sizing issue, not critical)
                 let is_benign_rejection = reason == "iocCancelRejected"
                     || reason == "reduceOnlyRejected"
+                    || reason == "minTradeNtlRejected"
                     || reason.contains("Order could not immediately match")
                     || reason.contains("Reduce only order would increase position")
                     || reason.contains("Order has zero size");

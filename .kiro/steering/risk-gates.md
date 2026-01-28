@@ -88,12 +88,18 @@ These gates operate at the Executor level, not the RiskGate module:
 
 ### MaxPositionPerMarket
 **Purpose**: Limit position size per market
-**Formula**: `current_notional + pending_notional + order_notional <= max_notional_usd`
+**Formula**: `current_notional + pending_notional + order_notional <= max_notional_per_market`
 **Note**: Excludes reduce-only orders from pending calculation
 
 ### MaxPositionTotal
 **Purpose**: Limit total portfolio exposure across all markets
-**Formula**: `sum(all_position_notionals) + order_notional <= max_total_notional_usd`
+**Formula**: `sum(all_position_notionals) + order_notional <= max_total_notional`
+
+### MaxConcurrentPositions
+**Purpose**: Limit number of simultaneous open positions
+**Threshold**: `max_concurrent_positions` (default: 5)
+**Trigger**: Current position count >= limit
+**Note**: Checked before has_position gate (only blocks NEW market entries)
 
 ## Configuration (TOML)
 

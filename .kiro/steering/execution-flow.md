@@ -147,17 +147,28 @@ Signal arrives at Executor
 4. MaxPositionTotal   → Rejected::MaxPositionTotal
       │
       ▼
-5. has_position       → Skipped::AlreadyHasPosition
+5. MaxConcurrentPositions → Rejected::MaxConcurrentPositions
       │
       ▼
-6. PendingOrder       → Skipped::PendingOrderExists
+6. has_position       → Skipped::AlreadyHasPosition
       │
       ▼
-7. ActionBudget       → Skipped::BudgetExhausted
+7. PendingOrder       → Skipped::PendingOrderExists
       │
       ▼
-8. ALL PASSED         → try_mark_pending_market + enqueue
+8. ActionBudget       → Skipped::BudgetExhausted
+      │
+      ▼
+9. ALL PASSED         → try_mark_pending_market + enqueue
 ```
+
+### Position Limits (Config)
+
+| Parameter | Default | Purpose |
+|-----------|---------|---------|
+| max_concurrent_positions | 5 | Max simultaneous open positions |
+| max_total_notional | $100 | Max total exposure across all positions |
+| max_notional_per_market | $50 | Max exposure per single market |
 
 ### Order Lifecycle
 

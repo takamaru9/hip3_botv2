@@ -106,6 +106,14 @@ max_flatten_failed = 3
 # Monitoring window (seconds)
 window_seconds = 3600
 
+[position]
+# Maximum number of concurrent positions across all markets
+max_concurrent_positions = 5
+# Maximum total notional exposure (USD)
+max_total_notional = 100
+# Maximum notional per market (USD)
+max_notional_per_market = 50
+
 [dashboard]
 # Enable real-time web dashboard (port 8080)
 enabled = true

@@ -95,6 +95,12 @@ max_loss_usd = 20.0
 max_flatten_failed = 3
 window_seconds = 3600
 
+[position]
+# Micro test limits
+max_concurrent_positions = 3
+max_total_notional = 50
+max_notional_per_market = 20
+
 [dashboard]
 enabled = true
 port = 8080

@@ -8,13 +8,15 @@
 //!
 //! # Gate Check Order (Strict)
 //!
-//! 1. HardStop        → Rejected(HardStop)
-//! 2. READY-TRADING   → Rejected(NotReady)
-//! 3. MaxPosition     → Rejected(MaxPositionPerMarket / MaxPositionTotal)
-//! 4. has_position    → Skipped(AlreadyHasPosition)
-//! 5. PendingOrder    → Skipped(PendingOrderExists)
-//! 6. ActionBudget    → Skipped(BudgetExhausted)
-//! 7. (all passed)    → try_mark_pending_market + enqueue
+//! 1. HardStop               → Rejected(HardStop)
+//! 2. READY-TRADING          → Rejected(NotReady)
+//! 3. MaxPositionPerMarket   → Rejected(MaxPositionPerMarket)
+//! 4. MaxPositionTotal       → Rejected(MaxPositionTotal)
+//! 5. MaxConcurrentPositions → Rejected(MaxConcurrentPositions)
+//! 6. has_position           → Skipped(AlreadyHasPosition)
+//! 7. PendingOrder           → Skipped(PendingOrderExists)
+//! 8. ActionBudget           → Skipped(BudgetExhausted)
+//! 9. (all passed)           → try_mark_pending_market + enqueue
 
 use std::cell::Cell;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
@@ -225,6 +227,8 @@ pub struct ExecutorConfig {
     /// Maximum total notional value across all markets (USD).
     /// Uses Decimal for precision in financial calculations.
     pub max_notional_total: Decimal,
+    /// Maximum number of concurrent positions across all markets.
+    pub max_concurrent_positions: usize,
 }
 
 impl Default for ExecutorConfig {
@@ -232,6 +236,7 @@ impl Default for ExecutorConfig {
         Self {
             max_notional_per_market: Decimal::from(50),
             max_notional_total: Decimal::from(100),
+            max_concurrent_positions: 5,
         }
     }
 }
@@ -322,14 +327,15 @@ impl MarketStateCache {
 ///
 /// # Gate Check Order (Strict)
 ///
-/// 1. HardStop        → Rejected(HardStop)
-/// 2. (READY-TRADING) → Handled by bot via `connection_manager.is_ready()`
-/// 3. MaxPositionPerMarket → Rejected(MaxPositionPerMarket)
-/// 4. MaxPositionTotal → Rejected(MaxPositionTotal)
-/// 5. has_position    → Skipped(AlreadyHasPosition)
-/// 6. PendingOrder    → Skipped(PendingOrderExists)
-/// 7. ActionBudget    → Skipped(BudgetExhausted)
-/// 8. (all passed)    → try_mark_pending_market + enqueue
+/// 1. HardStop               → Rejected(HardStop)
+/// 2. (READY-TRADING)        → Handled by bot via `connection_manager.is_ready()`
+/// 3. MaxPositionPerMarket   → Rejected(MaxPositionPerMarket)
+/// 4. MaxPositionTotal       → Rejected(MaxPositionTotal)
+/// 5. MaxConcurrentPositions → Rejected(MaxConcurrentPositions)
+/// 6. has_position           → Skipped(AlreadyHasPosition)
+/// 7. PendingOrder           → Skipped(PendingOrderExists)
+/// 8. ActionBudget           → Skipped(BudgetExhausted)
+/// 9. (all passed)           → try_mark_pending_market + enqueue
 ///
 /// Note: Gate 2 (READY-TRADING) is not checked here. The bot is responsible
 /// for verifying WebSocket READY-TRADING state before calling `on_signal`.
@@ -381,14 +387,15 @@ impl Executor {
     ///
     /// # Gate Order (Strict)
     ///
-    /// 1. HardStop -> Rejected::HardStop
-    /// 2. (READY-TRADING) -> Handled by bot, not checked here
-    /// 3. MaxPositionPerMarket -> Rejected::MaxPositionPerMarket
-    /// 4. MaxPositionTotal -> Rejected::MaxPositionTotal
-    /// 5. has_position -> Skipped::AlreadyHasPosition
-    /// 6. PendingOrder -> Skipped::PendingOrderExists
-    /// 7. ActionBudget -> Skipped::BudgetExhausted
-    /// 8. (all passed) -> try_mark_pending_market + enqueue
+    /// 1. HardStop               → Rejected::HardStop
+    /// 2. (READY-TRADING)        → Handled by bot, not checked here
+    /// 3. MaxPositionPerMarket   → Rejected::MaxPositionPerMarket
+    /// 4. MaxPositionTotal       → Rejected::MaxPositionTotal
+    /// 5. MaxConcurrentPositions → Rejected::MaxConcurrentPositions
+    /// 6. has_position           → Skipped::AlreadyHasPosition
+    /// 7. PendingOrder           → Skipped::PendingOrderExists
+    /// 8. ActionBudget           → Skipped::BudgetExhausted
+    /// 9. (all passed)           → try_mark_pending_market + enqueue
     ///
     /// # Precondition
     ///
@@ -482,19 +489,34 @@ impl Executor {
             return ExecutionResult::rejected(RejectReason::MaxPositionTotal);
         }
 
-        // Gate 5: has_position
+        // Gate 5: MaxConcurrentPositions
+        // Block new positions if already at max concurrent positions limit.
+        // Note: This check is before has_position so it only blocks NEW market entries.
+        // Existing positions are handled by Gate 6 (AlreadyHasPosition skip).
+        let current_position_count = self.position_tracker.position_count();
+        if current_position_count >= self.config.max_concurrent_positions {
+            debug!(
+                market = %market,
+                current = current_position_count,
+                max = self.config.max_concurrent_positions,
+                "Signal rejected: Max concurrent positions reached"
+            );
+            return ExecutionResult::rejected(RejectReason::MaxConcurrentPositions);
+        }
+
+        // Gate 6: has_position
         if self.position_tracker.has_position(market) {
             trace!(market = %market, "Signal skipped: Already has position");
             return ExecutionResult::skipped(SkipReason::AlreadyHasPosition);
         }
 
-        // Gate 6: PendingOrder (atomic mark)
+        // Gate 7: PendingOrder (atomic mark)
         if !self.position_tracker.try_mark_pending_market(market) {
             trace!(market = %market, "Signal skipped: Pending order exists");
             return ExecutionResult::skipped(SkipReason::PendingOrderExists);
         }
 
-        // Gate 7: ActionBudget
+        // Gate 8: ActionBudget
         if !self.action_budget.can_send_new_order() {
             // Rollback: unmark pending market since we won't queue the order
             self.position_tracker.unmark_pending_market(market);

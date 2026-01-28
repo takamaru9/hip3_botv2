@@ -253,6 +253,8 @@ pub enum RejectReason {
     MaxPositionPerMarket,
     /// Would exceed total portfolio position limit.
     MaxPositionTotal,
+    /// Would exceed maximum concurrent positions limit.
+    MaxConcurrentPositions,
     /// Hard stop triggered (circuit breaker).
     HardStop,
     /// Order queue is full.

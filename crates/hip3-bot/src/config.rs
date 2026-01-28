@@ -5,6 +5,7 @@ use hip3_dashboard::DashboardConfig;
 use hip3_detector::DetectorConfig;
 use hip3_risk::RiskGateConfig;
 use hip3_ws::{ConnectionConfig, SubscriptionTarget};
+use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
@@ -175,6 +176,47 @@ impl Default for RiskMonitorConfig {
     }
 }
 
+/// Position management configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PositionConfig {
+    /// Maximum number of concurrent positions across all markets.
+    /// Default: 5
+    #[serde(default = "default_max_concurrent_positions")]
+    pub max_concurrent_positions: usize,
+
+    /// Maximum total notional exposure across all positions (USD).
+    /// Default: 100
+    #[serde(default = "default_max_total_notional")]
+    pub max_total_notional: Decimal,
+
+    /// Maximum notional per market (USD).
+    /// Default: 50
+    #[serde(default = "default_max_notional_per_market")]
+    pub max_notional_per_market: Decimal,
+}
+
+fn default_max_concurrent_positions() -> usize {
+    5
+}
+
+fn default_max_total_notional() -> Decimal {
+    Decimal::from(100)
+}
+
+fn default_max_notional_per_market() -> Decimal {
+    Decimal::from(50)
+}
+
+impl Default for PositionConfig {
+    fn default() -> Self {
+        Self {
+            max_concurrent_positions: default_max_concurrent_positions(),
+            max_total_notional: default_max_total_notional(),
+            max_notional_per_market: default_max_notional_per_market(),
+        }
+    }
+}
+
 /// Application configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
@@ -220,6 +262,9 @@ pub struct AppConfig {
     /// Dashboard configuration.
     #[serde(default)]
     pub dashboard: DashboardConfig,
+    /// Position limit configuration.
+    #[serde(default)]
+    pub position: PositionConfig,
     /// User address for trading subscriptions (required for Trading mode).
     /// Format: "0x..." Ethereum address.
     #[serde(default)]
@@ -415,6 +460,7 @@ impl Default for AppConfig {
             mark_regression: MarkRegressionConfig::default(),
             risk_monitor: RiskMonitorConfig::default(),
             dashboard: DashboardConfig::default(),
+            position: PositionConfig::default(),
             user_address: None,
             signer_address: None,
             is_mainnet: None,

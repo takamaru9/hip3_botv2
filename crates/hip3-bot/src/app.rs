@@ -692,11 +692,21 @@ impl Application {
             let action_budget = Arc::new(ActionBudget::default());
 
             // 6. Executor core
-            // Safety: Tie executor notional caps to detector.max_notional so config-level
-            // micro-test limits also apply at the executor gate layer.
+            // Position limits from [position] config section with fallback to detector.max_notional.
+            // If position config uses defaults (100/50), but detector.max_notional is lower (e.g., $11),
+            // use the detector limit for backward compatibility with existing micro-test configs.
             let executor_config = ExecutorConfig {
-                max_notional_per_market: self.config.detector.max_notional,
-                max_notional_total: self.config.detector.max_notional,
+                max_notional_per_market: self
+                    .config
+                    .position
+                    .max_notional_per_market
+                    .min(self.config.detector.max_notional),
+                max_notional_total: self
+                    .config
+                    .position
+                    .max_total_notional
+                    .min(self.config.detector.max_notional),
+                max_concurrent_positions: self.config.position.max_concurrent_positions,
             };
             let executor = Arc::new(hip3_executor::Executor::new(
                 position_tracker.clone(),

@@ -118,12 +118,12 @@ pub struct MarginSummary {
     /// Total notional position value.
     #[serde(rename = "totalNtlPos")]
     pub total_notional_position: String,
+    /// Total raw USD.
+    #[serde(rename = "totalRawUsd")]
+    pub total_raw_usd: String,
     /// Total margin used.
     #[serde(rename = "totalMarginUsed")]
     pub total_margin_used: String,
-    /// Available withdrawable balance.
-    #[serde(rename = "withdrawable")]
-    pub withdrawable: String,
 }
 
 impl MarginSummary {

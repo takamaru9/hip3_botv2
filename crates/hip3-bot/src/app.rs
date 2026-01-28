@@ -1173,13 +1173,32 @@ impl Application {
                                     }
                                 }
 
+                                // Gate: Check if size rounds to zero after lot_size truncation
+                                // This prevents "Order has zero size" errors from the exchange
+                                // when suggested_size is smaller than lot_size (e.g., 0.00005 with lot_size=0.0001)
+                                let lot_size = self
+                                    .spec_cache
+                                    .get(&signal.market_key)
+                                    .map(|spec| spec.lot_size)
+                                    .unwrap_or(Size::new(Decimal::new(1, 4))); // Default 0.0001
+                                let rounded_size = signal.suggested_size.round_to_lot(lot_size);
+                                if rounded_size.is_zero() {
+                                    debug!(
+                                        market = %signal.market_key,
+                                        suggested_size = %signal.suggested_size,
+                                        lot_size = %lot_size,
+                                        "Signal dropped: size rounds to zero after lot_size truncation"
+                                    );
+                                    continue;
+                                }
+
                                 // Execute signal via Executor
                                 if let Some(ref executor_loop) = self.executor_loop {
                                     let result = executor_loop.executor().on_signal(
                                         &signal.market_key,
                                         signal.side,
                                         signal.best_px,
-                                        signal.suggested_size,
+                                        rounded_size, // Use rounded size instead of suggested_size
                                         current_time_ms(),
                                     );
                                     debug!(

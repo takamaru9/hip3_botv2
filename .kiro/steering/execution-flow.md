@@ -125,7 +125,9 @@ Persistence (Parquet)
 - Signer (request authentication)
 - Rate limiter (ActionBudget)
 - Risk monitor (HardStop triggers)
-- TimeStop monitor (auto-flatten)
+- Exit monitors:
+  - **TimeStop**: Auto-flatten after threshold_ms (default 30s)
+  - **MarkRegressionMonitor**: Profit-taking when BBO returns to Oracle
 
 ### Executor Gate Checks (in order)
 
@@ -213,6 +215,33 @@ Trading is blocked until ALL conditions are met. Managed by `TradingReadyChecker
 6. HardStop RELEASED (resume trading)
 ```
 
+## Exit Strategies
+
+### TimeStop (Failsafe)
+Auto-flatten positions held beyond threshold.
+
+| Parameter | Default | Purpose |
+|-----------|---------|---------|
+| threshold_ms | 30000 | Max holding time before forced exit |
+| reduce_only_timeout_ms | 60000 | Timeout for reduce-only order retry |
+| slippage_bps | 50 | Price tolerance for flatten |
+
+### MarkRegressionMonitor (Profit-taking)
+Exit when Oracle-BBO divergence resolves (BBO returns to Oracle).
+
+| Parameter | Default | Purpose |
+|-----------|---------|---------|
+| exit_threshold_bps | 5 | Exit when BBO within N bps of Oracle |
+| check_interval_ms | 200 | Monitor frequency |
+| min_holding_time_ms | 1000 | Minimum hold before exit can trigger |
+| slippage_bps | 50 | Price tolerance for flatten |
+
+**Exit Logic:**
+```
+Long:  Exit when best_bid >= oracle * (1 - threshold_bps/10000)
+Short: Exit when best_ask <= oracle * (1 + threshold_bps/10000)
+```
+
 ## Key Timing Parameters
 
 | Parameter | Default | Purpose |
@@ -221,6 +250,7 @@ Trading is blocked until ALL conditions are met. Managed by `TradingReadyChecker
 | Heartbeat interval | 45s | WS keep-alive ping |
 | Max BBO age | 2000ms | Freshness threshold |
 | Max Ctx age | 8000ms | Oracle freshness |
+| MarkRegression check | 200ms | Profit-taking exit check |
 | TimeStop threshold | 30000ms | Position hold limit |
 | Reconnect base delay | 1000ms | Exponential backoff base |
 

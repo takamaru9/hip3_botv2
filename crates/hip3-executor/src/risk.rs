@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 use parking_lot::Mutex;
 use rust_decimal::Decimal;
 use tokio::sync::mpsc;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 use hip3_core::{ClientOrderId, MarketKey, Price, Size};
 
@@ -368,6 +368,24 @@ impl RiskMonitor {
             }
 
             ExecutionEvent::Rejected { cloid, reason } => {
+                // Skip counting for expected/benign rejection types:
+                // - iocCancelRejected: IOC order couldn't match (normal for thin orderbooks)
+                // - reduceOnlyRejected: Position already closed (race condition, not a problem)
+                // - Order has zero size: Rounding to zero (edge case, not a problem)
+                let is_benign_rejection = reason == "iocCancelRejected"
+                    || reason == "reduceOnlyRejected"
+                    || reason.contains("Order could not immediately match")
+                    || reason.contains("Reduce only order would increase position")
+                    || reason.contains("Order has zero size");
+
+                if is_benign_rejection {
+                    debug!(
+                        ?cloid,
+                        reason, "Order rejected (benign, not counted toward HardStop)"
+                    );
+                    return None;
+                }
+
                 // Reset hourly counter if hour has passed
                 if self.rejected_reset_time.elapsed() > Duration::from_secs(3600) {
                     self.rejected_count_hourly = 0;

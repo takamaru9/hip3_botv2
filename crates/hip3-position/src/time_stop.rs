@@ -392,6 +392,16 @@ impl<P: PriceProvider + 'static> TimeStopMonitor<P> {
             let expired_markets = self.time_stop.check(&positions, now_ms);
 
             for market in expired_markets {
+                // Re-check position exists before creating flatten order
+                // This reduces race conditions where position was closed between snapshot and now
+                if !self.position_handle.has_position(&market) {
+                    debug!(
+                        "TimeStop: position for market {} no longer exists, skipping flatten",
+                        market
+                    );
+                    continue;
+                }
+
                 // Find the position for this market
                 let Some(position) = positions.iter().find(|p| p.market == market) else {
                     continue;

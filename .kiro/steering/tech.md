@@ -11,9 +11,11 @@ Modular crate-based design with clear separation of concerns:
 
 ## Core Technologies
 
-- **Language**: Rust (Edition 2021, MSRV 1.75+)
+- **Language**: Rust (Edition 2024, MSRV 1.85+)
 - **Runtime**: Tokio async runtime with full features
-- **WebSocket**: tokio-tungstenite with native-tls
+- **WebSocket**: tokio-tungstenite with rustls (ring crypto provider)
+
+**Note**: TLS requires `hip3_ws::init_crypto()` call before WebSocket connections.
 
 ## Key Libraries
 
@@ -48,7 +50,7 @@ cargo check      # Type verification
 ## Development Environment
 
 ### Required Tools
-- Rust 1.85+ (Edition 2024 support)
+- Rust 1.85+ (Edition 2024)
 - Python 3.11+ (for analysis scripts)
 - Docker (for deployment)
 

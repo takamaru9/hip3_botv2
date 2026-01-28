@@ -339,8 +339,10 @@ impl DislocationDetector {
         // Alpha-scaled book size
         let alpha_size = Size::new(book_size.inner() * adjusted_alpha);
 
-        // Max notional size
-        let max_size = Size::new(self.config.max_notional / mid.inner());
+        // Max notional size with 1% buffer to avoid boundary rejection at executor
+        // (executor uses mark_px which may differ slightly from mid_price)
+        let buffer_factor = Decimal::new(99, 2); // 0.99
+        let max_size = Size::new((self.config.max_notional * buffer_factor) / mid.inner());
 
         // Take minimum
         if alpha_size.inner() < max_size.inner() {

@@ -447,6 +447,11 @@ impl Executor {
         if total_notional >= self.config.max_notional_per_market {
             debug!(
                 market = %market,
+                position_notional = %position_notional,
+                pending_notional = %pending_notional,
+                new_order_notional = %new_order_notional,
+                size = %size,
+                mark_px = %mark_px,
                 total_notional = %total_notional,
                 max = %self.config.max_notional_per_market,
                 "Signal rejected: Would exceed max position per market"

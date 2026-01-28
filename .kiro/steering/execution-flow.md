@@ -90,6 +90,30 @@ data/signals/
 - No position tracking
 - No executor loop
 
+## Dashboard Integration
+
+The `hip3-dashboard` crate provides real-time monitoring:
+
+### Capabilities
+- REST API (`GET /api/snapshot`) for current state
+- WebSocket (`/ws`) for real-time updates (100ms interval)
+- Signal push: Detected signals are broadcast to connected clients
+
+### Signal Broadcasting
+When a `DislocationSignal` is detected, it is pushed to the dashboard via `SignalSender`:
+```
+Detector generates signal
+      │
+      ▼
+SignalSender.send(signal) ──► Dashboard WebSocket broadcast
+      │
+      ▼
+Persistence (Parquet)
+      │
+      ▼
+[Trading mode] Executor
+```
+
 ## Phase B: Trading Mode
 
 **Purpose**: Execute on detected dislocations
@@ -148,16 +172,35 @@ SIGNAL ──► PENDING ──► SUBMITTED ──► FILLED/REJECTED/EXPIRED
 
 ## READY Conditions
 
-Trading is blocked until ALL conditions are met:
+Trading is blocked until ALL conditions are met. Managed by `TradingReadyChecker` with 4 atomic flags:
 
+| Flag | Source | Criteria |
+|------|--------|----------|
+| `md_ready` | Market State | BBO + AssetCtx received for all markets |
+| `order_snapshot` | orderUpdates channel | Subscription ACKed |
+| `fills_snapshot` | userFills channel | Subscription ACKed (snapshot skipped for stability) |
+| `position_synced` | PositionTracker | Startup sync from Hyperliquid API complete |
+
+**Additional Prerequisites** (checked separately):
 | Condition | Source | Criteria |
 |-----------|--------|----------|
 | WS Connected | ConnectionManager | `state == OPEN` |
-| Subscriptions Ready | SubscriptionManager | All required channels ACKed |
-| BBO Fresh | Market State | Per-market BBO received |
-| AssetCtx Fresh | Market State | Per-market ctx received |
-| UserFills Snapshot | Subscription | `isSnapshot: true` received |
 | HardStop Clear | HardStopLatch | No emergency stop active |
+
+### Startup Sync Flow
+
+```
+1. WS connects
+2. Subscribe to orderUpdates, userFills
+3. TradingReadyChecker.reset() clears all flags
+4. POST /info clearinghouse to fetch open positions
+5. set_position_synced(true) on success
+6. MarketData starts flowing → set_md_ready(true)
+7. Channel ACKs received → set_order_snapshot(true), set_fills_snapshot(true)
+8. All 4 flags true → READY-TRADING
+```
+
+**Note**: `userFills` snapshot (`isSnapshot: true`) was previously required but is now skipped to prevent stale position reconstruction. Positions are synced via REST API instead.
 
 ## Reconnection Recovery
 

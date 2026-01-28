@@ -1230,9 +1230,24 @@ impl Application {
                     if let Some(resp) = msg.as_post_response() {
                         if let Some(ref executor_loop) = self.executor_loop {
                             match resp.response {
-                                PostResponseBody::Action { .. } => {
-                                    executor_loop.on_response_ok(resp.id);
-                                    debug!(post_id = resp.id, "Post response OK");
+                                PostResponseBody::Action { ref payload } => {
+                                    // Parse statuses from response to handle immediate fills
+                                    let statuses = payload.parse_statuses();
+                                    if statuses.is_empty() {
+                                        // No statuses (e.g., cancel response) - use simple OK
+                                        executor_loop.on_response_ok(resp.id);
+                                        debug!(post_id = resp.id, "Post response OK (no statuses)");
+                                    } else {
+                                        // Process statuses to handle immediate fills/rejects
+                                        debug!(
+                                            post_id = resp.id,
+                                            statuses_count = statuses.len(),
+                                            "Post response OK with statuses"
+                                        );
+                                        executor_loop
+                                            .on_response_with_statuses(resp.id, statuses)
+                                            .await;
+                                    }
                                 }
                                 PostResponseBody::Error { ref payload } => {
                                     executor_loop.on_response_rejected(resp.id, payload.clone());

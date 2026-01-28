@@ -20,10 +20,10 @@
 | `hip3-risk` | Risk gates (8 checks), HardStop latch |
 | `hip3-detector` | Dislocation detection, signal generation |
 | `hip3-executor` | Order submission, signing, rate limiting |
-| `hip3-position` | Position tracking, TimeStop auto-exit |
+| `hip3-position` | Position tracking, TimeStop auto-exit, API sync |
 | `hip3-persistence` | Parquet signal recording |
 | `hip3-telemetry` | Logging, Prometheus metrics |
-| `hip3-dashboard` | Real-time web dashboard (REST API + WebSocket, port 8080) |
+| `hip3-dashboard` | Real-time monitoring: REST API, WebSocket push, signal broadcast |
 | `hip3-bot` | Application orchestration, config loading |
 
 ### Configuration (`/config/`)

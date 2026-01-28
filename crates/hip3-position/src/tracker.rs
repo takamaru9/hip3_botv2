@@ -571,6 +571,24 @@ impl PositionTrackerHandle {
         let _ = self.tx.send(PositionTrackerMsg::RemoveOrder(cloid)).await;
     }
 
+    /// Record oid to cloid mapping.
+    ///
+    /// This is used when we receive oid from post response and need to
+    /// track the mapping for potential orderUpdate messages that might
+    /// only contain oid (without cloid).
+    ///
+    /// Currently this is a no-op as our implementation relies on cloid.
+    /// The mapping is recorded via logging for debugging purposes.
+    pub async fn record_oid_mapping(&self, cloid: ClientOrderId, oid: u64) {
+        // For now, just log the mapping. In the future, we could store this
+        // in a HashMap to support orderUpdates without cloid.
+        tracing::debug!(
+            cloid = %cloid,
+            oid = oid,
+            "Recording oid mapping"
+        );
+    }
+
     /// Send an order update.
     pub async fn order_update(
         &self,

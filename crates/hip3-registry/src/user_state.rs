@@ -326,8 +326,8 @@ mod tests {
         let summary = MarginSummary {
             account_value: "10000.50".to_string(),
             total_notional_position: "5000.00".to_string(),
+            total_raw_usd: "9000.50".to_string(),
             total_margin_used: "1000.00".to_string(),
-            withdrawable: "9000.50".to_string(),
         };
 
         assert_eq!(summary.account_value_decimal().unwrap(), dec!(10000.50));

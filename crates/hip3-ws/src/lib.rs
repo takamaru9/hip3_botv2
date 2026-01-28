@@ -19,9 +19,9 @@ pub use connection::{ConnectionConfig, ConnectionManager, ConnectionState, Subsc
 pub use error::{WsError, WsResult};
 pub use message::{
     extract_subscription_type, is_order_updates_channel, ActionResponseDetails,
-    ActionResponsePayload, ChannelMessage, FillPayload, OrderInfo, OrderUpdatePayload,
-    OrderUpdatesResult, PongMessage, PostPayload, PostRequest, PostRequestBody, PostResponseBody,
-    PostResponseData, SignaturePayload, WsMessage, WsRequest,
+    ActionResponsePayload, ChannelMessage, FillPayload, OrderInfo, OrderResponseStatus,
+    OrderUpdatePayload, OrderUpdatesResult, PongMessage, PostPayload, PostRequest,
+    PostRequestBody, PostResponseBody, PostResponseData, SignaturePayload, WsMessage, WsRequest,
 };
 pub use subscription::{ReadyState, SubscriptionManager};
 pub use ws_write_handle::{PostError, WsOutbound, WsWriteHandle};

@@ -20,8 +20,9 @@ use crate::executor::Executor;
 use crate::nonce::{NonceManager, SystemClock};
 use crate::signer::{Action, CancelWire, OrderWire, Signer, SigningInput};
 use crate::ws_sender::{ActionSignature, DynWsSender, SendResult, SignedAction};
-use hip3_core::{ActionBatch, ClientOrderId, MarketKey, PendingOrder};
+use hip3_core::{ActionBatch, ClientOrderId, MarketKey, OrderState, PendingOrder};
 use hip3_registry::SpecCache;
+use hip3_ws::OrderResponseStatus;
 
 // ============================================================================
 // PostResult
@@ -626,6 +627,81 @@ impl ExecutorLoop {
 
     /// Complete a request with success.
     pub fn on_response_ok(&self, post_id: u64) {
+        self.post_request_manager.complete_ok(post_id);
+        self.executor.batch_scheduler().on_batch_complete();
+    }
+
+    /// Complete a request with success and process order statuses.
+    ///
+    /// This processes the statuses array from the post response to:
+    /// - Mark immediately filled orders as complete
+    /// - Mark rejected orders as failed
+    /// - Record oid mappings for resting orders
+    ///
+    /// This is critical for IOC orders that may fill immediately without
+    /// a subsequent orderUpdate message from WebSocket.
+    pub async fn on_response_with_statuses(
+        &self,
+        post_id: u64,
+        statuses: Vec<OrderResponseStatus>,
+    ) {
+        // Get the batch for this post_id to map statuses to orders
+        let batch = self.post_request_manager.get(post_id);
+
+        if let Some(ActionBatch::Orders(orders)) = batch {
+            // Process each status in order (1:1 mapping with orders)
+            for (status, order) in statuses.iter().zip(orders.iter()) {
+                let cloid = &order.cloid;
+
+                match status {
+                    OrderResponseStatus::Filled {
+                        oid,
+                        total_sz,
+                        avg_px,
+                    } => {
+                        // Order was immediately filled - update tracker
+                        debug!(
+                            cloid = %cloid,
+                            oid = oid,
+                            total_sz = %total_sz,
+                            avg_px = %avg_px,
+                            "Order immediately filled (from post response)"
+                        );
+                        self.executor
+                            .position_tracker()
+                            .order_update(cloid.clone(), OrderState::Filled, order.size, Some(*oid))
+                            .await;
+                    }
+                    OrderResponseStatus::Error { message } => {
+                        // Order was rejected - release pending
+                        warn!(
+                            cloid = %cloid,
+                            error = %message,
+                            "Order rejected (from post response)"
+                        );
+                        self.executor
+                            .position_tracker()
+                            .order_update(cloid.clone(), OrderState::Rejected, order.size, None)
+                            .await;
+                    }
+                    OrderResponseStatus::Resting { oid } => {
+                        // Order is on order book - wait for orderUpdate
+                        debug!(
+                            cloid = %cloid,
+                            oid = oid,
+                            "Order resting on book (from post response)"
+                        );
+                        // Record oid mapping for later use
+                        self.executor
+                            .position_tracker()
+                            .record_oid_mapping(cloid.clone(), *oid)
+                            .await;
+                    }
+                }
+            }
+        }
+
+        // Complete the request as normal
         self.post_request_manager.complete_ok(post_id);
         self.executor.batch_scheduler().on_batch_complete();
     }

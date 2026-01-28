@@ -138,6 +138,97 @@ pub struct ActionResponseDetails {
     pub data: serde_json::Value,
 }
 
+/// Order status from post response statuses array.
+///
+/// Hyperliquid returns one of three status types:
+/// - `resting`: Order is on the order book
+/// - `filled`: Order was immediately filled
+/// - `error`: Order was rejected
+#[derive(Debug, Clone)]
+pub enum OrderResponseStatus {
+    /// Order is resting on order book.
+    Resting {
+        /// Exchange order ID.
+        oid: u64,
+    },
+    /// Order was immediately filled.
+    Filled {
+        /// Exchange order ID.
+        oid: u64,
+        /// Total filled size as string.
+        total_sz: String,
+        /// Average fill price as string.
+        avg_px: String,
+    },
+    /// Order was rejected.
+    Error {
+        /// Error message.
+        message: String,
+    },
+}
+
+impl ActionResponsePayload {
+    /// Parse statuses array from response.
+    ///
+    /// The data field contains: `{"statuses": [...]}`
+    /// Each status is one of:
+    /// - `{"resting": {"oid": 12345}}`
+    /// - `{"filled": {"totalSz": "0.02", "avgPx": "1891.4", "oid": 12345}}`
+    /// - `{"error": "Error message"}`
+    pub fn parse_statuses(&self) -> Vec<OrderResponseStatus> {
+        let mut results = Vec::new();
+
+        // Get statuses array from data
+        let statuses = match self.response.data.get("statuses") {
+            Some(serde_json::Value::Array(arr)) => arr,
+            _ => return results,
+        };
+
+        for status in statuses {
+            // Try parsing as resting
+            if let Some(resting) = status.get("resting") {
+                if let Some(oid) = resting.get("oid").and_then(|v| v.as_u64()) {
+                    results.push(OrderResponseStatus::Resting { oid });
+                    continue;
+                }
+            }
+
+            // Try parsing as filled
+            if let Some(filled) = status.get("filled") {
+                let oid = filled.get("oid").and_then(|v| v.as_u64()).unwrap_or(0);
+                let total_sz = filled
+                    .get("totalSz")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("0")
+                    .to_string();
+                let avg_px = filled
+                    .get("avgPx")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("0")
+                    .to_string();
+                results.push(OrderResponseStatus::Filled {
+                    oid,
+                    total_sz,
+                    avg_px,
+                });
+                continue;
+            }
+
+            // Try parsing as error
+            if let Some(error) = status.get("error") {
+                let message = error.as_str().unwrap_or("Unknown error").to_string();
+                results.push(OrderResponseStatus::Error { message });
+                continue;
+            }
+
+            // Unknown status format - log and skip
+            tracing::warn!(status = ?status, "Unknown order status format in post response");
+        }
+
+        results
+    }
+}
+
 // ============================================================================
 // Order Updates (Incoming) - order state changes
 // ============================================================================
@@ -675,6 +766,84 @@ mod tests {
             response.response.error_message(),
             Some("Order rejected: insufficient margin")
         );
+    }
+
+    #[test]
+    fn test_parse_statuses_resting() {
+        let payload = ActionResponsePayload {
+            status: "ok".to_string(),
+            response: ActionResponseDetails {
+                response_type: "order".to_string(),
+                data: json!({"statuses": [{"resting": {"oid": 12345}}]}),
+            },
+        };
+
+        let statuses = payload.parse_statuses();
+        assert_eq!(statuses.len(), 1);
+        match &statuses[0] {
+            OrderResponseStatus::Resting { oid } => assert_eq!(*oid, 12345),
+            _ => panic!("Expected Resting status"),
+        }
+    }
+
+    #[test]
+    fn test_parse_statuses_filled() {
+        let payload = ActionResponsePayload {
+            status: "ok".to_string(),
+            response: ActionResponseDetails {
+                response_type: "order".to_string(),
+                data: json!({"statuses": [{"filled": {"oid": 77747314, "totalSz": "0.02", "avgPx": "1891.4"}}]}),
+            },
+        };
+
+        let statuses = payload.parse_statuses();
+        assert_eq!(statuses.len(), 1);
+        match &statuses[0] {
+            OrderResponseStatus::Filled {
+                oid,
+                total_sz,
+                avg_px,
+            } => {
+                assert_eq!(*oid, 77747314);
+                assert_eq!(total_sz, "0.02");
+                assert_eq!(avg_px, "1891.4");
+            }
+            _ => panic!("Expected Filled status"),
+        }
+    }
+
+    #[test]
+    fn test_parse_statuses_error() {
+        let payload = ActionResponsePayload {
+            status: "ok".to_string(),
+            response: ActionResponseDetails {
+                response_type: "order".to_string(),
+                data: json!({"statuses": [{"error": "Order must have minimum value of $10."}]}),
+            },
+        };
+
+        let statuses = payload.parse_statuses();
+        assert_eq!(statuses.len(), 1);
+        match &statuses[0] {
+            OrderResponseStatus::Error { message } => {
+                assert_eq!(message, "Order must have minimum value of $10.")
+            }
+            _ => panic!("Expected Error status"),
+        }
+    }
+
+    #[test]
+    fn test_parse_statuses_empty() {
+        let payload = ActionResponsePayload {
+            status: "ok".to_string(),
+            response: ActionResponseDetails {
+                response_type: "order".to_string(),
+                data: json!({}),
+            },
+        };
+
+        let statuses = payload.parse_statuses();
+        assert!(statuses.is_empty());
     }
 
     // ========================================================================

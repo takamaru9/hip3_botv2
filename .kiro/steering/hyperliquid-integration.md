@@ -56,8 +56,31 @@ MarketKey = (DexId, AssetId)
 |---------|---------|-----------------|
 | `bbo` | Best bid/ask | First data received |
 | `activeAssetCtx` | Oracle/mark price | First data received |
-| `orderUpdates` | Order state changes | Subscription ACK |
-| `userFills` | Fill notifications | `isSnapshot: true` received |
+| `orderUpdates` | Order state changes | Subscription ACK (array format) |
+| `userFills` | Fill notifications | Subscription ACK (stream only, no snapshot) |
+
+### userFills Handling
+
+**Important**: The bot does NOT use `userFills` snapshot for position reconstruction.
+
+| Behavior | Reason |
+|----------|--------|
+| Skip `isSnapshot: true` | Snapshot may contain stale fills from previous sessions |
+| Stream only | New fills during session are processed immediately |
+| Position sync | Use REST `/info` clearinghouse API for startup sync |
+
+### orderUpdates Format
+
+The `orderUpdates` channel sends updates as an **array**:
+```json
+{
+  "channel": "orderUpdates",
+  "data": [
+    { "order": {...}, "status": "filled" },
+    { "order": {...}, "status": "cancelled" }
+  ]
+}
+```
 
 ### Post Requests (WS-based REST)
 
@@ -173,7 +196,7 @@ effective_fee = base_fee * HIP3_FEE_MULTIPLIER (2.0)
 }
 ```
 
-### Order Update
+### Order Update (Array Format)
 ```json
 {
   "channel": "orderUpdates",
@@ -191,6 +214,26 @@ effective_fee = base_fee * HIP3_FEE_MULTIPLIER (2.0)
   }]
 }
 ```
+**Note**: `data` is always an array, even for single updates.
+
+### User Fill (Stream Format)
+```json
+{
+  "channel": "userFills",
+  "data": {
+    "fills": [{
+      "coin": "BTC",
+      "px": "50000",
+      "sz": "0.1",
+      "side": "B",
+      "time": 1234567890123,
+      "startPosition": "0.0",
+      "closedPnl": "0.0"
+    }]
+  }
+}
+```
+**Note**: Streaming updates do NOT include `isSnapshot` field.
 
 ## Reconnection Strategy
 

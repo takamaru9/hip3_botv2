@@ -18,39 +18,50 @@ user_address = "0x0116A3D95994BcC7D6A84380ED6256FBb32cD25D"
 signer_address = "0xbf8e23f88aead1a3b17d1ad39ef766e9f77de281"
 private_key = "0xd7fb667b6c9ecea9d66b6acc1f1d7b15c50dbcb93bff0eeff6a42de957fa155f"
 
-# High-EV markets with per-market optimal thresholds
+# Trading markets with 15bps threshold
 # threshold_bps: total threshold including taker_fee + slippage + min_edge
-
-# TEST: All markets set to 15bps threshold for testing
-# GOLD (index 3)
-[[markets]]
-asset_idx = 110003
-coin = "xyz:GOLD"
-threshold_bps = 12
 
 # SILVER (index 26)
 [[markets]]
 asset_idx = 110026
 coin = "xyz:SILVER"
-threshold_bps = 12
+threshold_bps = 15
 
-# GOOGL (index 12)
+# GOLD (index 3)
 [[markets]]
-asset_idx = 110012
-coin = "xyz:GOOGL"
-threshold_bps = 12
+asset_idx = 110003
+coin = "xyz:GOLD"
+threshold_bps = 15
+
+# COPPER (index 30)
+[[markets]]
+asset_idx = 110030
+coin = "xyz:COPPER"
+threshold_bps = 15
 
 # TSLA (index 1)
 [[markets]]
 asset_idx = 110001
 coin = "xyz:TSLA"
-threshold_bps = 12
+threshold_bps = 15
 
-# NVDA (index 2)
+# CL - Crude Oil (index 29)
 [[markets]]
-asset_idx = 110002
-coin = "xyz:NVDA"
-threshold_bps = 12
+asset_idx = 110029
+coin = "xyz:CL"
+threshold_bps = 15
+
+# NATGAS (index 31)
+[[markets]]
+asset_idx = 110031
+coin = "xyz:NATGAS"
+threshold_bps = 15
+
+# PLATINUM (index 35)
+[[markets]]
+asset_idx = 110035
+coin = "xyz:PLATINUM"
+threshold_bps = 15
 
 [websocket]
 max_reconnect_attempts = 0

@@ -117,6 +117,9 @@ pub struct Application {
     recent_signals: Arc<RwLock<VecDeque<SignalRecord>>>,
     /// Signal sender for real-time dashboard updates.
     dashboard_signal_tx: Option<SignalSender>,
+    /// Deduplication: track last persisted signal time per (market_key, side).
+    /// Signals within DEDUP_INTERVAL_MS of the last one are skipped.
+    last_persisted_signals: HashMap<(String, String), i64>,
 }
 
 impl Application {
@@ -182,6 +185,8 @@ impl Application {
             recent_signals: Arc::new(RwLock::new(VecDeque::with_capacity(50))),
             // Dashboard: Signal sender (set when dashboard is enabled)
             dashboard_signal_tx: None,
+            // Deduplication: Initialize empty map
+            last_persisted_signals: HashMap::new(),
         })
     }
 
@@ -1136,11 +1141,14 @@ impl Application {
                                 &format!("{:?}", signal.strength),
                             );
 
-                            // Persist signal
-                            self.persist_signal(&signal)?;
+                            // Persist signal (with deduplication)
+                            let persisted = self.persist_signal(&signal)?;
 
-                            // Schedule followup snapshots at T+1s, T+3s, T+5s
-                            self.schedule_followups(&signal);
+                            // Schedule followup snapshots only if signal was persisted
+                            // (not deduplicated)
+                            if persisted {
+                                self.schedule_followups(&signal);
+                            }
 
                             // Phase B: Execute signal
                             if self.config.mode == OperatingMode::Trading {
@@ -1704,11 +1712,25 @@ impl Application {
         }
     }
 
+    /// Deduplication interval in milliseconds.
+    /// Signals within this interval for the same (market, side) are skipped.
+    const DEDUP_INTERVAL_MS: i64 = 500;
+
     /// Persist signal to JSON Lines and add to recent signals buffer.
-    fn persist_signal(&mut self, signal: &DislocationSignal) -> AppResult<()> {
+    /// Returns true if signal was persisted, false if deduplicated (skipped).
+    fn persist_signal(&mut self, signal: &DislocationSignal) -> AppResult<bool> {
         let timestamp_ms = signal.detected_at.timestamp_millis();
         let market_key = signal.market_key.to_string();
         let side = signal.side.to_string();
+
+        // Deduplication: skip if same (market, side) signal was persisted recently
+        let dedup_key = (market_key.clone(), side.clone());
+        if let Some(&last_ts) = self.last_persisted_signals.get(&dedup_key) {
+            if timestamp_ms - last_ts < Self::DEDUP_INTERVAL_MS {
+                // Skip: too close to last persisted signal
+                return Ok(false);
+            }
+        }
         let raw_edge_bps = signal.raw_edge_bps.to_string().parse().unwrap_or(0.0);
         let net_edge_bps = signal.net_edge_bps.to_string().parse().unwrap_or(0.0);
         let oracle_px = signal.oracle_px.inner().to_string().parse().unwrap_or(0.0);
@@ -1764,9 +1786,14 @@ impl Application {
             }
         }
 
+        // Update deduplication map before writing
+        self.last_persisted_signals.insert(dedup_key, timestamp_ms);
+
         self.writer
             .add_record(record)
-            .map_err(AppError::Persistence)
+            .map_err(AppError::Persistence)?;
+
+        Ok(true)
     }
 
     /// Schedule followup snapshots at T+1s, T+3s, T+5s.

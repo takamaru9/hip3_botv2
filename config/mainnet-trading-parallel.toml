@@ -1,0 +1,117 @@
+# HIP-3 Bot Configuration - Trading Mode (Parallel Execution)
+# Purpose: Test Position Tracker Sync fix with live trading
+# Runs alongside Observation container for comparison
+#
+# Key features being tested:
+# - Post response fill -> Position update (P0)
+# - cloid-based fill deduplication (P0)
+# - Periodic position resync (P1, 60s interval)
+
+mode = "trading"
+ws_url = "wss://api.hyperliquid.xyz/ws"
+info_url = "https://api.hyperliquid.xyz/info"
+xyz_pattern = "xyz"
+is_mainnet = true
+
+# Account configuration (API wallet setup)
+user_address = "0x0116A3D95994BcC7D6A84380ED6256FBb32cD25D"
+signer_address = "0xbf8e23f88aead1a3b17d1ad39ef766e9f77de281"
+private_key = "0xd7fb667b6c9ecea9d66b6acc1f1d7b15c50dbcb93bff0eeff6a42de957fa155f"
+
+# Trading markets with 25bps threshold
+[[markets]]
+asset_idx = 110026
+coin = "xyz:SILVER"
+threshold_bps = 25
+
+[[markets]]
+asset_idx = 110003
+coin = "xyz:GOLD"
+threshold_bps = 25
+
+[[markets]]
+asset_idx = 110030
+coin = "xyz:COPPER"
+threshold_bps = 25
+
+[[markets]]
+asset_idx = 110001
+coin = "xyz:TSLA"
+threshold_bps = 25
+
+[[markets]]
+asset_idx = 110029
+coin = "xyz:CL"
+threshold_bps = 25
+
+[[markets]]
+asset_idx = 110031
+coin = "xyz:NATGAS"
+threshold_bps = 25
+
+[[markets]]
+asset_idx = 110035
+coin = "xyz:PLATINUM"
+threshold_bps = 25
+
+[websocket]
+max_reconnect_attempts = 0
+reconnect_base_delay_ms = 1000
+heartbeat_interval_ms = 45000
+
+[risk]
+max_oracle_age_ms = 8000
+max_mark_mid_divergence_bps = 50
+spread_shock_multiplier = 3
+min_buffer_ratio = 0.15
+max_oi_fraction = 0.01
+
+[detector]
+taker_fee_bps = 4
+slippage_bps = 2
+min_edge_bps = 29
+sizing_alpha = 0.10
+max_notional = 50
+min_book_notional = 50
+normal_book_notional = 5000
+
+[persistence]
+data_dir = "./data/signals-trading"
+buffer_size = 10
+
+[telemetry]
+metrics_port = 9091
+log_level = "info"
+
+[time_stop]
+threshold_ms = 30000
+reduce_only_timeout_ms = 60000
+check_interval_ms = 1000
+slippage_bps = 50
+
+[mark_regression]
+enabled = true
+exit_threshold_bps = 2
+check_interval_ms = 200
+min_holding_time_ms = 1000
+slippage_bps = 50
+
+[risk_monitor]
+max_consecutive_failures = 5
+max_loss_usd = 20.0
+max_flatten_failed = 3
+window_seconds = 3600
+
+[position]
+max_concurrent_positions = 10
+max_total_notional = 300
+max_notional_per_market = 50
+position_resync_interval_secs = 60
+
+[dashboard]
+enabled = true
+port = 8081
+update_interval_ms = 100
+max_connections = 10
+username = ""
+password = ""

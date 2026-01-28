@@ -1,0 +1,52 @@
+# HIP-3 Bot Docker Compose - Trading Mode (Parallel)
+# Runs alongside the Observation container
+# Container: hip3-bot-trading, Port: 8081
+
+services:
+  hip3-bot-trading:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: hip3-bot-trading
+    restart: unless-stopped
+    command: ["--config", "/app/config/mainnet-trading-parallel.toml"]
+
+    # Resource limits
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 1G
+        reservations:
+          cpus: '0.5'
+          memory: 512M
+
+    # Expose dashboard port (8081 to avoid conflict with Observation)
+    ports:
+      - "8081:8081"
+
+    # Volumes for data persistence
+    volumes:
+      - ./data:/app/data
+      - ./config:/app/config:ro
+
+    # Logging configuration
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "5"
+
+    # Environment - Enable debug logging for position tracking
+    environment:
+      - RUST_LOG=info,hip3_bot=info,hip3_ws=info,hip3_executor=info,hip3_position=debug
+      - RUST_BACKTRACE=1
+      - HIP3_TRADING_KEY=${HIP3_TRADING_KEY}
+
+    # Network (outbound only for WebSocket)
+    networks:
+      - hip3-network
+
+networks:
+  hip3-network:
+    driver: bridge

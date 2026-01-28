@@ -11,15 +11,19 @@ services:
     container_name: hip3-bot
     restart: unless-stopped
 
-    # Resource limits
+    # Resource limits (increased for all-market observation)
     deploy:
       resources:
         limits:
-          cpus: '1.0'
-          memory: 512M
+          cpus: '2.0'
+          memory: 1G
         reservations:
           cpus: '0.5'
-          memory: 256M
+          memory: 512M
+
+    # Expose dashboard port
+    ports:
+      - "8080:8080"
 
     # Volumes for data persistence
     volumes:

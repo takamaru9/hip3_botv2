@@ -166,6 +166,10 @@ pub enum PositionTrackerMsg {
     /// End snapshot processing (apply buffered messages).
     SnapshotEnd,
 
+    /// Sync positions from external source (e.g., Hyperliquid API).
+    /// Replaces all current positions with the provided list.
+    SyncPositions(Vec<Position>),
+
     /// Graceful shutdown.
     Shutdown,
 }
@@ -263,6 +267,9 @@ impl PositionTrackerTask {
                 for buffered_msg in buffer {
                     self.handle_message(buffered_msg);
                 }
+            }
+            PositionTrackerMsg::SyncPositions(new_positions) => {
+                self.on_sync_positions(new_positions);
             }
             PositionTrackerMsg::Shutdown => unreachable!("Shutdown handled in run()"),
         }
@@ -410,6 +417,38 @@ impl PositionTrackerTask {
                 pos.size = Size::new(current_size - fill_amount);
             }
         }
+    }
+
+    /// Handle SyncPositions message.
+    ///
+    /// Replaces all current positions with the provided list.
+    /// Used for initial sync from Hyperliquid API on startup.
+    fn on_sync_positions(&mut self, new_positions: Vec<Position>) {
+        debug!(
+            "Syncing positions: clearing {} existing, adding {} new",
+            self.positions.len(),
+            new_positions.len()
+        );
+
+        // Clear all existing positions
+        self.positions.clear();
+        self.positions_cache.clear();
+        self.positions_data.clear();
+
+        // Add new positions
+        for pos in new_positions {
+            if !pos.is_empty() {
+                let market = pos.market;
+                self.positions_cache.insert(market, true);
+                self.positions_data.insert(market, pos.clone());
+                self.positions.insert(market, pos);
+            }
+        }
+
+        debug!(
+            "Position sync complete: {} active positions",
+            self.positions.len()
+        );
     }
 }
 
@@ -592,6 +631,22 @@ impl PositionTrackerHandle {
     /// Request graceful shutdown.
     pub async fn shutdown(&self) {
         let _ = self.tx.send(PositionTrackerMsg::Shutdown).await;
+    }
+
+    /// Sync positions from external source (e.g., Hyperliquid API).
+    ///
+    /// Replaces all current positions with the provided list.
+    /// Call this on startup to initialize position state from exchange.
+    pub async fn sync_positions(&self, positions: Vec<Position>) {
+        // Clear caches first (will be rebuilt by Actor)
+        self.positions_cache.clear();
+        self.positions_data.clear();
+
+        // Send to actor
+        let _ = self
+            .tx
+            .send(PositionTrackerMsg::SyncPositions(positions))
+            .await;
     }
 
     // === Sync methods (cache lookups) ===

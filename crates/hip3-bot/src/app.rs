@@ -27,7 +27,7 @@ use hip3_executor::{
 use hip3_feed::{MarketEvent, MarketState, MessageParser};
 use hip3_persistence::{FollowupRecord, FollowupWriter, ParquetWriter, SignalRecord};
 use hip3_position::{
-    flatten_all_positions, spawn_position_tracker, FlattenReason, PositionTrackerHandle,
+    flatten_all_positions, spawn_position_tracker, FlattenReason, Position, PositionTrackerHandle,
     TimeStopConfig as PositionTimeStopConfig, TimeStopMonitor,
 };
 use hip3_registry::{
@@ -413,6 +413,127 @@ impl Application {
         self.xyz_dex_id.unwrap_or(DexId::XYZ)
     }
 
+    /// Sync positions from Hyperliquid clearinghouseState API.
+    ///
+    /// Called at startup to initialize PositionTracker with current positions.
+    /// This prevents stale position state after bot restart.
+    async fn sync_positions_from_api(
+        &self,
+        position_tracker: &PositionTrackerHandle,
+        user_address: &str,
+    ) -> AppResult<()> {
+        info!(user_address = %user_address, "Syncing positions from Hyperliquid API");
+
+        let client = MetaClient::new(&self.config.info_url)
+            .map_err(|e| AppError::Executor(format!("Failed to create HTTP client: {e}")))?;
+
+        let state = client
+            .fetch_clearinghouse_state(user_address)
+            .await
+            .map_err(|e| AppError::Executor(format!("Failed to fetch clearinghouseState: {e}")))?;
+
+        let now_ms = current_time_ms();
+        let dex_id = self.get_dex_id();
+        let mut positions_to_sync = Vec::new();
+
+        for entry in &state.asset_positions {
+            let pos_data = &entry.position;
+
+            // Skip empty positions
+            if pos_data.is_empty() {
+                continue;
+            }
+
+            // Parse coin name (e.g., "xyz:SILVER" -> MarketKey)
+            let coin = &pos_data.coin;
+
+            // Find matching market in spec_cache
+            let market_key = self.coin_to_market_key(coin, dex_id);
+            let market_key = match market_key {
+                Some(key) => key,
+                None => {
+                    warn!(coin = %coin, "Could not find market key for position, skipping");
+                    continue;
+                }
+            };
+
+            // Parse size and entry price
+            let size = match pos_data.size_decimal() {
+                Ok(sz) => sz,
+                Err(e) => {
+                    warn!(coin = %coin, ?e, "Failed to parse position size");
+                    continue;
+                }
+            };
+
+            let entry_price = match pos_data.entry_price_decimal() {
+                Ok(px) => px,
+                Err(e) => {
+                    warn!(coin = %coin, ?e, "Failed to parse entry price");
+                    continue;
+                }
+            };
+
+            // Determine side from signed size
+            let (side, abs_size) = if size > Decimal::ZERO {
+                (OrderSide::Buy, size)
+            } else {
+                (OrderSide::Sell, size.abs())
+            };
+
+            let position = Position::new(
+                market_key,
+                side,
+                Size::new(abs_size),
+                Price::new(entry_price),
+                now_ms, // Use current time as entry time (actual time not available from API)
+            );
+
+            info!(
+                market = %market_key,
+                side = ?side,
+                size = %abs_size,
+                entry_price = %entry_price,
+                "Found existing position from API"
+            );
+
+            positions_to_sync.push(position);
+        }
+
+        info!(
+            position_count = positions_to_sync.len(),
+            "Syncing {} positions to PositionTracker",
+            positions_to_sync.len()
+        );
+
+        position_tracker.sync_positions(positions_to_sync).await;
+
+        Ok(())
+    }
+
+    /// Convert coin name (e.g., "xyz:SILVER") to MarketKey.
+    ///
+    /// Searches spec_cache for matching market.
+    fn coin_to_market_key(&self, coin: &str, dex_id: DexId) -> Option<MarketKey> {
+        // Extract asset name from coin (e.g., "xyz:SILVER" -> "SILVER")
+        let asset_name = coin.split(':').next_back().unwrap_or(coin);
+
+        // Search configured markets for matching name
+        for market_config in self.config.get_markets() {
+            // Market config coin is like "xyz:SILVER"
+            if market_config.coin == coin
+                || market_config.coin.ends_with(&format!(":{}", asset_name))
+            {
+                return Some(MarketKey::new(
+                    dex_id,
+                    AssetId::new(market_config.asset_idx),
+                ));
+            }
+        }
+
+        None
+    }
+
     /// Run the application.
     ///
     /// # Panics
@@ -531,6 +652,21 @@ impl Application {
             let (position_tracker, pos_join_handle) = spawn_position_tracker(100);
             self.position_tracker = Some(position_tracker.clone());
             self.position_tracker_handle = Some(pos_join_handle);
+
+            // 1.5. Sync positions from Hyperliquid API (P0-startup-sync)
+            // Prevents stale position state after bot restart
+            // Note: trading_user_address is always Some(...) in Trading mode
+            if let Some(ref user_addr) = trading_user_address {
+                if let Err(e) = self
+                    .sync_positions_from_api(&position_tracker, user_addr)
+                    .await
+                {
+                    warn!(
+                        ?e,
+                        "Failed to sync positions from API, starting with empty state"
+                    );
+                }
+            }
 
             // 2. HardStopLatch and InflightTracker (shared dependencies)
             let hard_stop_latch = Arc::new(HardStopLatch::new());

@@ -133,6 +133,138 @@ impl MarginSummary {
     }
 }
 
+/// clearinghouseState response from Hyperliquid API.
+///
+/// Endpoint: POST /info with `{"type": "clearinghouseState", "user": "<address>"}`
+/// Contains full account state including open positions.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ClearinghouseStateResponse {
+    /// Margin summary.
+    #[serde(rename = "marginSummary")]
+    pub margin_summary: Option<MarginSummary>,
+    /// Cross margin summary.
+    #[serde(rename = "crossMarginSummary")]
+    pub cross_margin_summary: Option<MarginSummary>,
+    /// Cross maintenance margin used.
+    #[serde(rename = "crossMaintenanceMarginUsed")]
+    pub cross_maintenance_margin_used: Option<String>,
+    /// Withdrawable balance.
+    pub withdrawable: Option<String>,
+    /// Open positions.
+    #[serde(rename = "assetPositions", default)]
+    pub asset_positions: Vec<AssetPositionEntry>,
+    /// Timestamp in milliseconds.
+    pub time: Option<u64>,
+}
+
+/// Asset position entry from clearinghouseState.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct AssetPositionEntry {
+    /// Position details.
+    pub position: AssetPositionData,
+    /// Position type ("oneWay" or "twoWay").
+    #[serde(rename = "type")]
+    pub position_type: Option<String>,
+}
+
+/// Position data within AssetPositionEntry.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct AssetPositionData {
+    /// Coin identifier (e.g., "xyz:SILVER").
+    pub coin: String,
+    /// Position size (signed: positive = long, negative = short).
+    pub szi: String,
+    /// Entry price.
+    #[serde(rename = "entryPx")]
+    pub entry_px: Option<String>,
+    /// Liquidation price.
+    #[serde(rename = "liquidationPx")]
+    pub liquidation_px: Option<String>,
+    /// Position value.
+    #[serde(rename = "positionValue")]
+    pub position_value: Option<String>,
+    /// Unrealized PnL.
+    #[serde(rename = "unrealizedPnl")]
+    pub unrealized_pnl: Option<String>,
+    /// Return on position.
+    #[serde(rename = "returnOnEquity")]
+    pub return_on_equity: Option<String>,
+    /// Leverage.
+    pub leverage: Option<LeverageInfo>,
+    /// Cumulative funding.
+    #[serde(rename = "cumFunding")]
+    pub cum_funding: Option<CumFunding>,
+    /// Margin used.
+    #[serde(rename = "marginUsed")]
+    pub margin_used: Option<String>,
+    /// Max trade sizes.
+    #[serde(rename = "maxTradeSzs")]
+    pub max_trade_szs: Option<[String; 2]>,
+}
+
+/// Leverage information.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct LeverageInfo {
+    /// Leverage type.
+    #[serde(rename = "type")]
+    pub leverage_type: Option<String>,
+    /// Leverage value.
+    pub value: Option<u32>,
+    /// Raw USD amount.
+    #[serde(rename = "rawUsd")]
+    pub raw_usd: Option<String>,
+}
+
+/// Cumulative funding information.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct CumFunding {
+    /// All time funding.
+    #[serde(rename = "allTime")]
+    pub all_time: Option<String>,
+    /// Since position open.
+    #[serde(rename = "sinceOpen")]
+    pub since_open: Option<String>,
+    /// Since position change.
+    #[serde(rename = "sinceChange")]
+    pub since_change: Option<String>,
+}
+
+impl AssetPositionData {
+    /// Parse position size to Decimal.
+    pub fn size_decimal(&self) -> Result<Decimal, rust_decimal::Error> {
+        self.szi.parse()
+    }
+
+    /// Parse entry price to Decimal.
+    pub fn entry_price_decimal(&self) -> Result<Decimal, rust_decimal::Error> {
+        self.entry_px
+            .as_ref()
+            .ok_or(rust_decimal::Error::ExceedsMaximumPossibleValue)
+            .and_then(|px| px.parse())
+    }
+
+    /// Check if position is long (positive size).
+    pub fn is_long(&self) -> bool {
+        self.size_decimal()
+            .map(|sz| sz > Decimal::ZERO)
+            .unwrap_or(false)
+    }
+
+    /// Check if position is short (negative size).
+    pub fn is_short(&self) -> bool {
+        self.size_decimal()
+            .map(|sz| sz < Decimal::ZERO)
+            .unwrap_or(false)
+    }
+
+    /// Check if position is empty (zero size).
+    pub fn is_empty(&self) -> bool {
+        self.size_decimal()
+            .map(|sz| sz == Decimal::ZERO)
+            .unwrap_or(true)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

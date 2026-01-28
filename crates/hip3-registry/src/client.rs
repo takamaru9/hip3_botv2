@@ -5,6 +5,7 @@
 
 use crate::error::{RegistryError, RegistryResult};
 use crate::preflight::PerpDexsResponse;
+use crate::user_state::ClearinghouseStateResponse;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -28,6 +29,15 @@ struct InfoRequestWithDex {
     request_type: String,
     /// DEX name for builder-deployed perps (e.g., "xyz").
     dex: String,
+}
+
+/// Request type for info endpoint with user address.
+#[derive(Debug, Serialize)]
+struct InfoRequestWithUser {
+    #[serde(rename = "type")]
+    request_type: String,
+    /// User address (0x...).
+    user: String,
 }
 
 /// Raw perpDex entry from API.
@@ -316,6 +326,56 @@ impl MetaClient {
 
         debug!(spec_count = specs.len(), "Fetched HIP-3 asset specs");
         Ok(specs)
+    }
+
+    /// Fetch clearinghouse state for a user.
+    ///
+    /// Contains account summary and open positions.
+    ///
+    /// # Arguments
+    /// * `user_address` - User's Ethereum address (0x...).
+    ///
+    /// # Returns
+    /// `ClearinghouseStateResponse` containing margin summary and positions.
+    pub async fn fetch_clearinghouse_state(
+        &self,
+        user_address: &str,
+    ) -> RegistryResult<ClearinghouseStateResponse> {
+        info!(
+            url = %self.info_url,
+            user = %user_address,
+            "Fetching clearinghouseState from exchange"
+        );
+
+        let request = InfoRequestWithUser {
+            request_type: "clearinghouseState".to_string(),
+            user: user_address.to_string(),
+        };
+
+        let response = self
+            .client
+            .post(&self.info_url)
+            .json(&request)
+            .send()
+            .await
+            .map_err(|e| RegistryError::HttpClient(format!("HTTP request failed: {e}")))?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            return Err(RegistryError::HttpClient(format!("HTTP {status}: {body}")));
+        }
+
+        let state: ClearinghouseStateResponse = response.json().await.map_err(|e| {
+            RegistryError::HttpClient(format!("Failed to parse clearinghouseState: {e}"))
+        })?;
+
+        info!(
+            positions = state.asset_positions.len(),
+            "Fetched clearinghouseState successfully"
+        );
+
+        Ok(state)
     }
 }
 

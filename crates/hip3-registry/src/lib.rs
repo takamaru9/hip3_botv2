@@ -19,4 +19,7 @@ pub use preflight::{
     PreflightChecker, PreflightResult,
 };
 pub use spec_cache::{RawPerpSpec, SpecCache};
-pub use user_state::{ParsedUserFees, RawUserFeesResponse, RawUserStateResponse};
+pub use user_state::{
+    AssetPositionData, AssetPositionEntry, ClearinghouseStateResponse, ParsedUserFees,
+    RawUserFeesResponse, RawUserStateResponse,
+};

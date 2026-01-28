@@ -1124,7 +1124,10 @@ mod tests {
         assert!(fill.is_buy());
         assert_eq!(fill.closed_pnl, Some("-0.02673".to_string()));
         assert_eq!(fill.oid, Some(304587174168));
-        assert_eq!(fill.cloid, Some("0xd2ed5e997c5a4cb9946d84c35f0b737c".to_string()));
+        assert_eq!(
+            fill.cloid,
+            Some("0xd2ed5e997c5a4cb9946d84c35f0b737c".to_string())
+        );
         assert_eq!(fill.crossed, Some(true));
         assert_eq!(fill.fee_token, Some("USDC".to_string()));
     }

@@ -44,7 +44,7 @@
 //! If order creation fails AFTER cache update (e.g., QueueFull), use
 //! `rollback_order_caches()` to restore consistency.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use dashmap::DashMap;
@@ -158,6 +158,8 @@ pub enum PositionTrackerMsg {
         size: Size,
         /// Fill timestamp (Unix ms).
         timestamp_ms: u64,
+        /// Client order ID for deduplication (optional).
+        cloid: Option<ClientOrderId>,
     },
 
     /// Begin snapshot processing (buffer subsequent messages).
@@ -204,6 +206,10 @@ pub struct PositionTrackerTask {
 
     /// Full position data for notional calculations.
     positions_data: Arc<DashMap<MarketKey, Position>>,
+
+    /// Recent fill cloids for deduplication.
+    /// Clears when size exceeds threshold to prevent memory leak.
+    recent_fill_cloids: HashSet<ClientOrderId>,
 }
 
 impl PositionTrackerTask {
@@ -250,7 +256,8 @@ impl PositionTrackerTask {
                 price,
                 size,
                 timestamp_ms,
-            } => self.on_fill(market, side, price, size, timestamp_ms),
+                cloid,
+            } => self.on_fill(market, side, price, size, timestamp_ms, cloid),
             PositionTrackerMsg::SnapshotStart => {
                 debug!("Snapshot processing started");
                 self.in_snapshot = true;
@@ -335,14 +342,35 @@ impl PositionTrackerTask {
         price: Price,
         size: Size,
         timestamp_ms: u64,
+        cloid: Option<ClientOrderId>,
     ) {
+        // Cloid-based deduplication
+        if let Some(ref id) = cloid {
+            if self.recent_fill_cloids.contains(id) {
+                debug!("Skipping duplicate fill: cloid={}", id);
+                return;
+            }
+            self.recent_fill_cloids.insert(id.clone());
+
+            // Prevent memory leak: clear when size exceeds threshold
+            // 1000 cloids ~= 10 seconds at 100 fills/sec
+            if self.recent_fill_cloids.len() > 1000 {
+                debug!(
+                    "Clearing recent_fill_cloids (size exceeded 1000): {}",
+                    self.recent_fill_cloids.len()
+                );
+                self.recent_fill_cloids.clear();
+            }
+        }
+
         trace!(
-            "Fill: market={}, side={:?}, price={}, size={}, ts={}",
+            "Fill: market={}, side={:?}, price={}, size={}, ts={}, cloid={:?}",
             market,
             side,
             price,
             size,
-            timestamp_ms
+            timestamp_ms,
+            cloid
         );
 
         if let Some(pos) = self.positions.get_mut(&market) {
@@ -613,6 +641,11 @@ impl PositionTrackerHandle {
     }
 
     /// Send a fill update.
+    ///
+    /// # Arguments
+    /// * `cloid` - Optional client order ID for deduplication. If the same cloid
+    ///   is received multiple times (e.g., from both post response and
+    ///   userFills), only the first fill is processed.
     pub async fn fill(
         &self,
         market: MarketKey,
@@ -620,6 +653,7 @@ impl PositionTrackerHandle {
         price: Price,
         size: Size,
         timestamp_ms: u64,
+        cloid: Option<ClientOrderId>,
     ) {
         // NOTE: Position caches are updated by Actor only, not Handle
         // This ensures authoritative state is the single source of truth
@@ -632,6 +666,7 @@ impl PositionTrackerHandle {
                 price,
                 size,
                 timestamp_ms,
+                cloid,
             })
             .await;
     }
@@ -860,6 +895,7 @@ pub fn spawn_position_tracker(capacity: usize) -> (PositionTrackerHandle, JoinHa
         in_snapshot: false,
         positions_cache: positions_cache.clone(),
         positions_data: positions_data.clone(),
+        recent_fill_cloids: HashSet::new(),
     };
 
     let handle = PositionTrackerHandle {
@@ -1004,6 +1040,7 @@ mod tests {
                 Price::new(dec!(50000)),
                 Size::new(dec!(0.1)),
                 1234567890,
+                None, // cloid for deduplication
             )
             .await;
 
@@ -1035,6 +1072,7 @@ mod tests {
                 Price::new(dec!(50000)),
                 Size::new(dec!(0.1)),
                 1234567890,
+                None, // cloid for deduplication
             )
             .await;
 
@@ -1049,6 +1087,7 @@ mod tests {
                 Price::new(dec!(51000)),
                 Size::new(dec!(0.1)),
                 1234567891,
+                None, // cloid for deduplication
             )
             .await;
 

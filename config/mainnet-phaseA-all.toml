@@ -46,7 +46,7 @@ normal_book_notional = 5000
 
 [persistence]
 data_dir = "./data/signals"
-buffer_size = 100
+buffer_size = 10  # Reduced from 100 due to deduplication (fewer signals to buffer)
 
 [telemetry]
 metrics_port = 9090

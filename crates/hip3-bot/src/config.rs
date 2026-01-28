@@ -193,6 +193,11 @@ pub struct PositionConfig {
     /// Default: 50
     #[serde(default = "default_max_notional_per_market")]
     pub max_notional_per_market: Decimal,
+
+    /// Position resync interval (seconds). Set to 0 to disable.
+    /// Default: 60 (1 minute)
+    #[serde(default = "default_position_resync_interval_secs")]
+    pub position_resync_interval_secs: u64,
 }
 
 fn default_max_concurrent_positions() -> usize {
@@ -207,12 +212,17 @@ fn default_max_notional_per_market() -> Decimal {
     Decimal::from(50)
 }
 
+fn default_position_resync_interval_secs() -> u64 {
+    60 // 1 minute
+}
+
 impl Default for PositionConfig {
     fn default() -> Self {
         Self {
             max_concurrent_positions: default_max_concurrent_positions(),
             max_total_notional: default_max_total_notional(),
             max_notional_per_market: default_max_notional_per_market(),
+            position_resync_interval_secs: default_position_resync_interval_secs(),
         }
     }
 }

@@ -1129,6 +1129,7 @@ mod tests {
             hip3_core::Price::new(dec!(3000)),
             hip3_core::Size::new(dec!(0.001)),
             1234567890,
+            None, // cloid for deduplication
         )
         .await;
 

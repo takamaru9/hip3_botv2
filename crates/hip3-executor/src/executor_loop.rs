@@ -13,14 +13,14 @@ use std::time::Duration;
 use alloy::primitives::Address;
 use dashmap::DashMap;
 use tokio::sync::oneshot;
-use tracing::{debug, trace, warn};
+use tracing::{debug, info, trace, warn};
 
 use crate::error::ExecutorError;
 use crate::executor::Executor;
 use crate::nonce::{NonceManager, SystemClock};
 use crate::signer::{Action, CancelWire, OrderWire, Signer, SigningInput};
 use crate::ws_sender::{ActionSignature, DynWsSender, SendResult, SignedAction};
-use hip3_core::{ActionBatch, ClientOrderId, MarketKey, OrderState, PendingOrder};
+use hip3_core::{ActionBatch, ClientOrderId, MarketKey, OrderState, PendingOrder, Price, Size};
 use hip3_registry::SpecCache;
 use hip3_ws::OrderResponseStatus;
 
@@ -667,9 +667,43 @@ impl ExecutorLoop {
                             avg_px = %avg_px,
                             "Order immediately filled (from post response)"
                         );
+
+                        // 1. Update ORDER state (terminal)
                         self.executor
                             .position_tracker()
                             .order_update(cloid.clone(), OrderState::Filled, order.size, Some(*oid))
+                            .await;
+
+                        // 2. Update POSITION state directly (don't rely on userFills)
+                        // Parse fill size and price from response
+                        let fill_price = avg_px
+                            .parse::<rust_decimal::Decimal>()
+                            .map(Price::new)
+                            .unwrap_or(order.price);
+                        let fill_size = total_sz
+                            .parse::<rust_decimal::Decimal>()
+                            .map(Size::new)
+                            .unwrap_or(order.size);
+
+                        info!(
+                            cloid = %cloid,
+                            market = %order.market,
+                            side = ?order.side,
+                            fill_price = %fill_price,
+                            fill_size = %fill_size,
+                            "Position updated from post response fill"
+                        );
+
+                        self.executor
+                            .position_tracker()
+                            .fill(
+                                order.market,
+                                order.side,
+                                fill_price,
+                                fill_size,
+                                chrono::Utc::now().timestamp_millis() as u64,
+                                Some(cloid.clone()), // cloid for deduplication
+                            )
                             .await;
                     }
                     OrderResponseStatus::Error { message } => {

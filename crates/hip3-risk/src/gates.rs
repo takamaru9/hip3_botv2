@@ -1030,6 +1030,7 @@ mod max_position_tests {
                 Price::new(dec!(50000)),
                 Size::new(dec!(0.1)),
                 1234567890,
+                None, // cloid for deduplication
             )
             .await;
 
@@ -1094,6 +1095,7 @@ mod max_position_tests {
                 Price::new(dec!(50000)),
                 Size::new(dec!(0.2)),
                 1234567890,
+                None, // cloid for deduplication
             )
             .await;
 
@@ -1105,6 +1107,7 @@ mod max_position_tests {
                 Price::new(dec!(3000)),
                 Size::new(dec!(0.1)),
                 1234567891,
+                None, // cloid for deduplication
             )
             .await;
 

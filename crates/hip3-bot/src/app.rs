@@ -1114,6 +1114,16 @@ impl Application {
         // This would detect parameter changes (tick_size, lot_size, etc.) from exchange
         // let spec_refresh_interval = tokio::time::interval(Duration::from_secs(300));
 
+        // Periodic position resync (P1 safety net - Trading mode only)
+        let resync_interval_secs = self.config.position.position_resync_interval_secs;
+        let mut resync_interval = if resync_interval_secs > 0 {
+            Some(tokio::time::interval(Duration::from_secs(
+                resync_interval_secs,
+            )))
+        } else {
+            None
+        };
+
         loop {
             tokio::select! {
                 // Handle incoming WebSocket messages
@@ -1190,6 +1200,29 @@ impl Application {
                         stats.output_daily_summary();
                     }
                     self.last_stats_output = Instant::now();
+                }
+
+                // P1: Periodic position resync (safety net, Trading mode only)
+                Some(_) = async {
+                    match &mut resync_interval {
+                        Some(interval) => Some(interval.tick().await),
+                        None => std::future::pending().await,
+                    }
+                } => {
+                    if self.config.mode == OperatingMode::Trading {
+                        if let (Some(ref tracker), Some(ref user_addr)) =
+                            (&self.position_tracker, &trading_user_address)
+                        {
+                            match self.sync_positions_from_api(tracker, user_addr).await {
+                                Ok(()) => {
+                                    debug!("Periodic position resync completed");
+                                }
+                                Err(e) => {
+                                    warn!(?e, "Periodic position resync failed");
+                                }
+                            }
+                        }
+                    }
                 }
 
                 // Handle shutdown signal
@@ -1528,10 +1561,15 @@ impl Application {
         let price = px.parse().map(Price::new).unwrap_or(Price::ZERO);
         let size = sz.parse().map(Size::new).unwrap_or(Size::ZERO);
 
+        // Extract cloid from FillPayload for deduplication
+        let cloid = fill.cloid.as_ref().map(|s| ClientOrderId::from(s.clone()));
+
         let tracker = tracker.clone();
         let timestamp = time;
         tokio::spawn(async move {
-            tracker.fill(market, side, price, size, timestamp).await;
+            tracker
+                .fill(market, side, price, size, timestamp, cloid)
+                .await;
         });
     }
 

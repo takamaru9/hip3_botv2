@@ -251,6 +251,19 @@ impl FillPayload {
     }
 }
 
+/// userFills subscription response from Hyperliquid.
+/// Format: { "isSnapshot": bool, "user": string, "fills": [FillPayload, ...] }
+#[derive(Debug, Clone, Deserialize)]
+pub struct UserFillsPayload {
+    /// True for initial snapshot, false for streaming updates.
+    #[serde(rename = "isSnapshot")]
+    pub is_snapshot: bool,
+    /// User address.
+    pub user: String,
+    /// Array of fill events.
+    pub fills: Vec<FillPayload>,
+}
+
 // ============================================================================
 // Subscription Response Helpers
 // ============================================================================
@@ -424,8 +437,22 @@ impl WsMessage {
         matches!(self, Self::Channel(c) if c.channel == "userFills")
     }
 
-    /// Try to parse as fill payload.
+    /// Try to parse as userFills payload (array of fills).
+    /// Returns the full UserFillsPayload with isSnapshot flag and all fills.
+    pub fn as_user_fills(&self) -> Option<UserFillsPayload> {
+        match self {
+            Self::Channel(c) if c.channel == "userFills" => {
+                serde_json::from_value(c.data.clone()).ok()
+            }
+            _ => None,
+        }
+    }
+
+    /// Try to parse as fill payload (single fill - DEPRECATED).
+    /// Use as_user_fills() instead for correct parsing of Hyperliquid format.
+    #[deprecated(note = "Use as_user_fills() which handles the array format correctly")]
     pub fn as_fill(&self) -> Option<FillPayload> {
+        // Legacy method - try to parse as single fill (will fail with new format)
         match self {
             Self::Channel(c) if c.channel == "userFills" => {
                 serde_json::from_value(c.data.clone()).ok()
@@ -936,27 +963,102 @@ mod tests {
 
     #[test]
     fn test_ws_message_user_fills() {
+        // Test the correct Hyperliquid format: { isSnapshot, user, fills: [] }
         let json = json!({
             "channel": "userFills",
             "data": {
-                "coin": "SOL",
-                "side": "A",
-                "px": "150",
-                "sz": "5",
-                "time": 1700000000000_u64,
-                "tid": 123_u64,
-                "fee": "0.01",
-                "startPosition": "10",
-                "dir": "Close Long"
+                "isSnapshot": false,
+                "user": "0x1234567890abcdef",
+                "fills": [{
+                    "coin": "SOL",
+                    "side": "A",
+                    "px": "150",
+                    "sz": "5",
+                    "time": 1700000000000_u64,
+                    "tid": 123_u64,
+                    "fee": "0.01",
+                    "startPosition": "10",
+                    "dir": "Close Long"
+                }]
             }
         });
 
         let msg: WsMessage = serde_json::from_value(json).unwrap();
         assert!(msg.is_user_fills());
 
-        let fill = msg.as_fill().unwrap();
+        let user_fills = msg.as_user_fills().unwrap();
+        assert!(!user_fills.is_snapshot);
+        assert_eq!(user_fills.user, "0x1234567890abcdef");
+        assert_eq!(user_fills.fills.len(), 1);
+
+        let fill = &user_fills.fills[0];
         assert_eq!(fill.coin, "SOL");
         assert!(fill.is_sell());
+    }
+
+    #[test]
+    fn test_ws_message_user_fills_snapshot() {
+        // Test snapshot with multiple fills
+        let json = json!({
+            "channel": "userFills",
+            "data": {
+                "isSnapshot": true,
+                "user": "0xabcdef",
+                "fills": [
+                    {
+                        "coin": "BTC",
+                        "side": "B",
+                        "px": "50000",
+                        "sz": "0.1",
+                        "time": 1700000000000_u64,
+                        "tid": 100_u64,
+                        "fee": "0.5",
+                        "startPosition": "0",
+                        "dir": "Open Long"
+                    },
+                    {
+                        "coin": "ETH",
+                        "side": "A",
+                        "px": "3000",
+                        "sz": "1.0",
+                        "time": 1700000001000_u64,
+                        "tid": 101_u64,
+                        "fee": "0.3",
+                        "startPosition": "1.0",
+                        "dir": "Close Long"
+                    }
+                ]
+            }
+        });
+
+        let msg: WsMessage = serde_json::from_value(json).unwrap();
+        let user_fills = msg.as_user_fills().unwrap();
+
+        assert!(user_fills.is_snapshot);
+        assert_eq!(user_fills.fills.len(), 2);
+        assert_eq!(user_fills.fills[0].coin, "BTC");
+        assert!(user_fills.fills[0].is_buy());
+        assert_eq!(user_fills.fills[1].coin, "ETH");
+        assert!(user_fills.fills[1].is_sell());
+    }
+
+    #[test]
+    fn test_ws_message_user_fills_empty() {
+        // Test empty fills array (common after subscription)
+        let json = json!({
+            "channel": "userFills",
+            "data": {
+                "isSnapshot": true,
+                "user": "0xabcdef",
+                "fills": []
+            }
+        });
+
+        let msg: WsMessage = serde_json::from_value(json).unwrap();
+        let user_fills = msg.as_user_fills().unwrap();
+
+        assert!(user_fills.is_snapshot);
+        assert!(user_fills.fills.is_empty());
     }
 
     #[test]

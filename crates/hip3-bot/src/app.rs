@@ -1129,12 +1129,26 @@ impl Application {
 
                 // Handle userFills (Trading mode)
                 if channel == "userFills" {
-                    if let Some(fill) = msg.as_fill() {
-                        self.handle_user_fill(&fill);
+                    if let Some(user_fills) = msg.as_user_fills() {
+                        if user_fills.is_snapshot {
+                            debug!(
+                                fills_count = user_fills.fills.len(),
+                                "Received userFills snapshot"
+                            );
+                        }
+                        // Process each fill in the array
+                        for fill in &user_fills.fills {
+                            self.handle_user_fill(fill);
+                        }
+                        if user_fills.fills.is_empty() && !user_fills.is_snapshot {
+                            debug!("userFills update with empty fills array");
+                        }
                     } else {
-                        // Initial subscription may return snapshot/empty format (isSnapshot:true or [])
-                        // This is not an error - just a different format we don't need to process
-                        debug!("userFills message not a fill (possibly initial snapshot or empty)");
+                        // Failed to parse userFills - log the raw data for debugging
+                        warn!(
+                            raw_data = ?channel_msg.data,
+                            "Failed to parse userFills message"
+                        );
                     }
                     return Ok(());
                 }

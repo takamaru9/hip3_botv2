@@ -18,41 +18,26 @@ user_address = "0x0116A3D95994BcC7D6A84380ED6256FBb32cD25D"
 signer_address = "0xbf8e23f88aead1a3b17d1ad39ef766e9f77de281"
 private_key = "0xd7fb667b6c9ecea9d66b6acc1f1d7b15c50dbcb93bff0eeff6a42de957fa155f"
 
-# Trading markets with 16bps threshold (same as Observation: 4 fee + 2 slip + 10 edge)
-[[markets]]
-asset_idx = 110026
-coin = "xyz:SILVER"
-threshold_bps = 16
-
-[[markets]]
-asset_idx = 110003
-coin = "xyz:GOLD"
-threshold_bps = 16
-
-[[markets]]
-asset_idx = 110030
-coin = "xyz:COPPER"
-threshold_bps = 16
-
-[[markets]]
-asset_idx = 110001
-coin = "xyz:TSLA"
-threshold_bps = 16
-
-[[markets]]
-asset_idx = 110029
-coin = "xyz:CL"
-threshold_bps = 16
-
+# Trading markets: NATGAS, SILVER, PLATINUM, COPPER with 20bps threshold
 [[markets]]
 asset_idx = 110031
 coin = "xyz:NATGAS"
-threshold_bps = 16
+threshold_bps = 20
+
+[[markets]]
+asset_idx = 110026
+coin = "xyz:SILVER"
+threshold_bps = 20
 
 [[markets]]
 asset_idx = 110035
 coin = "xyz:PLATINUM"
-threshold_bps = 16
+threshold_bps = 20
+
+[[markets]]
+asset_idx = 110030
+coin = "xyz:COPPER"
+threshold_bps = 20
 
 [websocket]
 max_reconnect_attempts = 0

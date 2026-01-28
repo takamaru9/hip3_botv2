@@ -6,7 +6,7 @@
 |------|-------|
 | Plan Date | 2026-01-29 |
 | Last Updated | 2026-01-29 |
-| Status | `[COMPLETED]` |
+| Status | `[COMPLETED]` + BUG-002 Hotfix |
 | Source Plan | `.claude/plans/2026-01-29-position-tracker-sync-fix.md` |
 
 ## Implementation Status
@@ -116,3 +116,71 @@ Some(_) = async { ... } => {
 - [x] `cargo clippy -- -D warnings` - OK
 - [x] `cargo test` - All passed
 - [ ] VPSデプロイ後のログ確認（運用時）
+
+---
+
+## BUG-002: Race Condition in sync_positions
+
+**発見日**: 2026-01-29
+**重大度**: Critical (本番で $1,607 の意図しないポジションを発生)
+
+### 問題
+
+`max_notional_per_market = 50` の制限が効かず、TSLAポジションが $1,607 まで膨らんだ。
+
+### 根本原因
+
+`PositionTrackerHandle::sync_positions()` に競合状態があった：
+
+```rust
+// BUG: Handle でキャッシュを即座にクリア
+pub async fn sync_positions(&self, positions: Vec<Position>) {
+    self.positions_cache.clear();  // ← 即座にクリア
+    self.positions_data.clear();   // ← 即座にクリア
+
+    // Actor への非同期メッセージ送信
+    let _ = self.tx.send(PositionTrackerMsg::SyncPositions(positions)).await;
+}
+```
+
+**問題の流れ:**
+1. 定期resync（60秒ごと）が実行される
+2. Handle がキャッシュを即座にクリア
+3. Actor がメッセージを処理する前に新しいシグナルが来る
+4. Gate 3: `get_notional()` → キャッシュが空なので `0` を返す
+5. Gate 6: `has_position()` → キャッシュが空なので `false` を返す
+6. すべてのGateを通過し、注文が実行される
+7. これが繰り返され、ポジションが無制限に蓄積
+
+### 修正
+
+1. **Handle からキャッシュクリアを削除** - Actor に任せる
+2. **Actor の処理順序を変更** - clear-then-add から add-then-remove へ
+
+```rust
+// FIX: Handle ではキャッシュをクリアしない
+pub async fn sync_positions(&self, positions: Vec<Position>) {
+    // NOTE: Cache clearing removed to fix race condition (BUG-002)
+    let _ = self.tx.send(PositionTrackerMsg::SyncPositions(positions)).await;
+}
+
+// FIX: Actor は add-then-remove で処理
+fn on_sync_positions(&mut self, new_positions: Vec<Position>) {
+    // Step 1: Add/update all new positions FIRST
+    for pos in new_positions { ... }
+
+    // Step 2: Remove positions that are NOT in the new list
+    // (Only after new positions are added)
+    for market in markets_to_remove { ... }
+}
+```
+
+### 修正ファイル
+
+| File | Changes |
+|------|---------|
+| `crates/hip3-position/src/tracker.rs` | Handle の sync_positions() からキャッシュクリアを削除、Actor の on_sync_positions() を add-then-remove に変更 |
+
+### Commit
+
+`00f0522` - fix(position): Fix race condition in sync_positions causing position limit bypass (BUG-002)

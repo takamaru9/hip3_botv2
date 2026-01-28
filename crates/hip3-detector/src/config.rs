@@ -16,6 +16,11 @@ pub struct DetectorConfig {
     pub sizing_alpha: Decimal,
     /// Maximum notional per trade.
     pub max_notional: Decimal,
+    /// Minimum order notional - orders below this are boosted to this value.
+    /// This prevents `minTradeNtlRejected` errors from the exchange.
+    /// Set to 0 to disable (use calculated size as-is).
+    #[serde(default = "default_min_order_notional")]
+    pub min_order_notional: Decimal,
     /// Minimum book notional - signals below this are skipped.
     /// Book notional = book_size × side_price (buy=ask_price / sell=bid_price).
     #[serde(default = "default_min_book_notional")]
@@ -24,6 +29,10 @@ pub struct DetectorConfig {
     /// Between min and normal, sizing is linearly interpolated.
     #[serde(default = "default_normal_book_notional")]
     pub normal_book_notional: Decimal,
+}
+
+fn default_min_order_notional() -> Decimal {
+    Decimal::from(11) // $11 - Hyperliquid minimum trade notional
 }
 
 fn default_min_book_notional() -> Decimal {
@@ -42,6 +51,7 @@ impl Default for DetectorConfig {
             min_edge_bps: Decimal::from(5),                       // 0.05% minimum edge
             sizing_alpha: Decimal::new(10, 2),                    // 0.10 = 10% of top-of-book
             max_notional: Decimal::from(1000),                    // $1000 max
+            min_order_notional: default_min_order_notional(),     // $11 min order
             min_book_notional: default_min_book_notional(),       // $500 min
             normal_book_notional: default_normal_book_notional(), // $5000 normal
         }

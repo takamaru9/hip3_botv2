@@ -292,7 +292,7 @@ impl DislocationDetector {
 
     /// Calculate suggested trade size with liquidity adjustment.
     ///
-    /// size = min(alpha * liquidity_factor * top_of_book_size, max_notional / mid_price)
+    /// size = clamp(alpha * liquidity_factor * top_of_book_size, min_notional, max_notional) / mid_price
     ///
     /// Returns Size::ZERO if liquidity is below minimum threshold.
     fn calculate_size(&self, snapshot: &MarketSnapshot, side: OrderSide) -> Size {
@@ -344,12 +344,28 @@ impl DislocationDetector {
         let buffer_factor = Decimal::new(99, 2); // 0.99
         let max_size = Size::new((self.config.max_notional * buffer_factor) / mid.inner());
 
-        // Take minimum
-        if alpha_size.inner() < max_size.inner() {
-            alpha_size
+        // Min notional size (to avoid minTradeNtlRejected from exchange)
+        let min_size = if self.config.min_order_notional.is_zero() {
+            Size::ZERO
         } else {
+            Size::new(self.config.min_order_notional / mid.inner())
+        };
+
+        // Clamp: max(min_size, min(alpha_size, max_size))
+        let clamped_size = if alpha_size.inner() > max_size.inner() {
             max_size
-        }
+        } else if alpha_size.inner() < min_size.inner() {
+            tracing::debug!(
+                alpha_notional = %alpha_size.inner() * mid.inner(),
+                min_order_notional = %self.config.min_order_notional,
+                "Boosting size to min_order_notional"
+            );
+            min_size
+        } else {
+            alpha_size
+        };
+
+        clamped_size
     }
 
     /// Get current configuration.
@@ -482,18 +498,19 @@ mod tests {
         let config = DetectorConfig {
             sizing_alpha: dec!(0.10),
             max_notional: dec!(1000),
+            min_order_notional: dec!(0), // Disable min to test alpha/max clamping
             ..Default::default()
         };
         let detector = DislocationDetector::new(config).unwrap();
 
         // Book size = 1 BTC, mid = 50000
         // Alpha size = 0.1 * 1 = 0.1 BTC = $5000
-        // Max size = 1000 / 50000 = 0.02 BTC
-        // Result should be 0.02 (min of the two)
+        // Max size = 1000 * 0.99 / 50000 = 0.0198 BTC (with 1% buffer)
+        // Result should be 0.0198 (clamped to max)
         let snapshot = make_snapshot(dec!(50000), dec!(49990), dec!(50010));
         let size = detector.calculate_size(&snapshot, OrderSide::Buy);
 
-        assert_eq!(size.inner(), dec!(0.02));
+        assert_eq!(size.inner(), dec!(0.0198));
     }
 
     #[test]
@@ -844,6 +861,7 @@ mod tests {
             max_notional: dec!(1000),
             min_book_notional: dec!(100),
             normal_book_notional: dec!(1000),
+            ..Default::default()
         };
         let detector = DislocationDetector::new(config).unwrap();
         let key = MarketKey::from_indices(1, 0);

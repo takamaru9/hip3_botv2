@@ -451,19 +451,28 @@ impl PositionTrackerTask {
     ///
     /// Replaces all current positions with the provided list.
     /// Used for initial sync from Hyperliquid API on startup.
+    ///
+    /// # Safety (BUG-002 fix)
+    ///
+    /// To minimize race condition window, we:
+    /// 1. First add/update all new positions
+    /// 2. Then remove markets that are NOT in the new list
+    ///
+    /// This ensures a position is never "lost" during sync - it's either old or new.
     fn on_sync_positions(&mut self, new_positions: Vec<Position>) {
+        let old_count = self.positions.len();
+        let new_count = new_positions.len();
+
         debug!(
-            "Syncing positions: clearing {} existing, adding {} new",
-            self.positions.len(),
-            new_positions.len()
+            "Syncing positions: {} existing -> {} new",
+            old_count, new_count
         );
 
-        // Clear all existing positions
-        self.positions.clear();
-        self.positions_cache.clear();
-        self.positions_data.clear();
+        // Collect markets from new positions
+        let new_markets: std::collections::HashSet<MarketKey> =
+            new_positions.iter().map(|p| p.market).collect();
 
-        // Add new positions
+        // Step 1: Add/update all new positions FIRST (before removing anything)
         for pos in new_positions {
             if !pos.is_empty() {
                 let market = pos.market;
@@ -471,6 +480,21 @@ impl PositionTrackerTask {
                 self.positions_data.insert(market, pos.clone());
                 self.positions.insert(market, pos);
             }
+        }
+
+        // Step 2: Remove positions that are NOT in the new list
+        // (Only after new positions are added to minimize race window)
+        let markets_to_remove: Vec<MarketKey> = self
+            .positions
+            .keys()
+            .filter(|m| !new_markets.contains(m))
+            .cloned()
+            .collect();
+
+        for market in markets_to_remove {
+            self.positions.remove(&market);
+            self.positions_cache.remove(&market);
+            self.positions_data.remove(&market);
         }
 
         debug!(
@@ -690,12 +714,15 @@ impl PositionTrackerHandle {
     ///
     /// Replaces all current positions with the provided list.
     /// Call this on startup to initialize position state from exchange.
+    ///
+    /// # Safety
+    /// Do NOT clear caches here. The Actor will atomically clear and repopulate
+    /// when it processes the SyncPositions message. Clearing here creates a
+    /// race condition where Gate 3/Gate 6 checks see empty caches before the
+    /// Actor has a chance to populate them with new positions.
     pub async fn sync_positions(&self, positions: Vec<Position>) {
-        // Clear caches first (will be rebuilt by Actor)
-        self.positions_cache.clear();
-        self.positions_data.clear();
-
-        // Send to actor
+        // Send to actor - it will clear old and add new atomically
+        // NOTE: Cache clearing removed to fix race condition (BUG-002)
         let _ = self
             .tx
             .send(PositionTrackerMsg::SyncPositions(positions))

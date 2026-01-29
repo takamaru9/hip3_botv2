@@ -902,6 +902,18 @@ impl PositionTrackerHandle {
         self.pending_orders_data.get(cloid)
     }
 
+    /// Check if a market is currently being flattened (has pending reduce-only orders).
+    ///
+    /// Used by Gate 5.5 to block new entries while a flatten operation is in progress.
+    /// This prevents position accumulation when reduce-only orders are pending.
+    #[must_use]
+    pub fn is_flattening(&self, market: &MarketKey) -> bool {
+        self.pending_orders_snapshot.iter().any(|entry| {
+            let (m, is_reduce_only) = entry.value();
+            m == market && *is_reduce_only
+        })
+    }
+
     // === Balance methods ===
 
     /// Get the cached account balance.

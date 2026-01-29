@@ -274,6 +274,8 @@ pub enum SkipReason {
     PendingOrderExists,
     /// Risk budget exhausted.
     BudgetExhausted,
+    /// Market is currently being flattened (reduce-only order pending).
+    FlattenInProgress,
 }
 
 /// Result of processing a trading signal via `on_signal()`.

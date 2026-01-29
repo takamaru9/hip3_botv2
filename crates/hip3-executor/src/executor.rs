@@ -13,10 +13,11 @@
 //! 3. MaxPositionPerMarket   → Rejected(MaxPositionPerMarket)
 //! 4. MaxPositionTotal       → Rejected(MaxPositionTotal)
 //! 5. MaxConcurrentPositions → Rejected(MaxConcurrentPositions)
-//! 6. has_position           → Skipped(AlreadyHasPosition)
-//! 7. PendingOrder           → Skipped(PendingOrderExists)
-//! 8. ActionBudget           → Skipped(BudgetExhausted)
-//! 9. (all passed)           → try_mark_pending_market + enqueue
+//! 6. FlattenInProgress      → Skipped(FlattenInProgress)
+//! 7. has_position           → Skipped(AlreadyHasPosition)
+//! 8. PendingOrder           → Skipped(PendingOrderExists)
+//! 9. ActionBudget           → Skipped(BudgetExhausted)
+//! 10. (all passed)          → try_mark_pending_market + enqueue
 
 use std::cell::Cell;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
@@ -340,10 +341,11 @@ impl MarketStateCache {
 /// 3. MaxPositionPerMarket   → Rejected(MaxPositionPerMarket)
 /// 4. MaxPositionTotal       → Rejected(MaxPositionTotal)
 /// 5. MaxConcurrentPositions → Rejected(MaxConcurrentPositions)
-/// 6. has_position           → Skipped(AlreadyHasPosition)
-/// 7. PendingOrder           → Skipped(PendingOrderExists)
-/// 8. ActionBudget           → Skipped(BudgetExhausted)
-/// 9. (all passed)           → try_mark_pending_market + enqueue
+/// 6. FlattenInProgress      → Skipped(FlattenInProgress)
+/// 7. has_position           → Skipped(AlreadyHasPosition)
+/// 8. PendingOrder           → Skipped(PendingOrderExists)
+/// 9. ActionBudget           → Skipped(BudgetExhausted)
+/// 10. (all passed)          → try_mark_pending_market + enqueue
 ///
 /// Note: Gate 2 (READY-TRADING) is not checked here. The bot is responsible
 /// for verifying WebSocket READY-TRADING state before calling `on_signal`.
@@ -424,10 +426,11 @@ impl Executor {
     /// 3. MaxPositionPerMarket   → Rejected::MaxPositionPerMarket
     /// 4. MaxPositionTotal       → Rejected::MaxPositionTotal
     /// 5. MaxConcurrentPositions → Rejected::MaxConcurrentPositions
-    /// 6. has_position           → Skipped::AlreadyHasPosition
-    /// 7. PendingOrder           → Skipped::PendingOrderExists
-    /// 8. ActionBudget           → Skipped::BudgetExhausted
-    /// 9. (all passed)           → try_mark_pending_market + enqueue
+    /// 6. FlattenInProgress      → Skipped::FlattenInProgress
+    /// 7. has_position           → Skipped::AlreadyHasPosition
+    /// 8. PendingOrder           → Skipped::PendingOrderExists
+    /// 9. ActionBudget           → Skipped::BudgetExhausted
+    /// 10. (all passed)          → try_mark_pending_market + enqueue
     ///
     /// # Precondition
     ///
@@ -541,19 +544,27 @@ impl Executor {
             return ExecutionResult::rejected(RejectReason::MaxConcurrentPositions);
         }
 
-        // Gate 6: has_position
+        // Gate 6: Flatten in progress
+        // Block new entries if a reduce-only order is pending for this market.
+        // This prevents position accumulation during flatten operations.
+        if self.position_tracker.is_flattening(market) {
+            trace!(market = %market, "Signal skipped: Flatten in progress");
+            return ExecutionResult::skipped(SkipReason::FlattenInProgress);
+        }
+
+        // Gate 7: has_position
         if self.position_tracker.has_position(market) {
             trace!(market = %market, "Signal skipped: Already has position");
             return ExecutionResult::skipped(SkipReason::AlreadyHasPosition);
         }
 
-        // Gate 7: PendingOrder (atomic mark)
+        // Gate 8: PendingOrder (atomic mark)
         if !self.position_tracker.try_mark_pending_market(market) {
             trace!(market = %market, "Signal skipped: Pending order exists");
             return ExecutionResult::skipped(SkipReason::PendingOrderExists);
         }
 
-        // Gate 8: ActionBudget
+        // Gate 9: ActionBudget
         if !self.action_budget.can_send_new_order() {
             // Rollback: unmark pending market since we won't queue the order
             self.position_tracker.unmark_pending_market(market);

@@ -294,11 +294,19 @@ impl BatchScheduler {
     /// positions. They are accepted even when inflight is at limit
     /// (they will be queued and processed when space is available).
     ///
+    /// # Deduplication (BUG-004)
+    ///
+    /// To prevent multiple flatten orders for the same market (which causes
+    /// "Reduce only would increase position" errors), this method checks if
+    /// there's already a pending reduce_only order for the same market.
+    /// If a duplicate is found, the new order is skipped and `Queued` is
+    /// returned (to avoid breaking the caller's expectations).
+    ///
     /// # Panics
     /// Debug assertion fails if `order.reduce_only` is false.
     ///
     /// # Returns
-    /// - `Queued` - Successfully queued for submission
+    /// - `Queued` - Successfully queued for submission (or duplicate skipped)
     /// - `QueueFull` - Queue capacity exceeded (CRITICAL)
     /// - `InflightFull` - At inflight limit (still queued)
     pub fn enqueue_reduce_only(&self, order: PendingOrder) -> EnqueueResult {
@@ -308,6 +316,21 @@ impl BatchScheduler {
         );
 
         let mut queue = self.pending_reduce_only.lock();
+
+        // BUG-004: Check for duplicate reduce_only order for same market
+        // This prevents TimeStop/MarkRegression from sending multiple flatten
+        // orders before the first one is filled or rejected.
+        let has_pending_for_market = queue.iter().any(|o| o.market == order.market);
+        if has_pending_for_market {
+            debug!(
+                cloid = %order.cloid,
+                market = %order.market,
+                "Skipping duplicate reduce_only order (market already has pending flatten)"
+            );
+            // Return Queued to avoid breaking caller expectations
+            // The existing order will handle the flatten
+            return EnqueueResult::Queued;
+        }
 
         // Check queue capacity
         if queue.len() >= self.config.reduce_only_queue_capacity {
@@ -535,6 +558,19 @@ mod tests {
         )
     }
 
+    /// Create a pending order with a specific asset_id for unique market.
+    fn sample_pending_order_with_asset(reduce_only: bool, asset_id: u32) -> PendingOrder {
+        PendingOrder::new(
+            ClientOrderId::new(),
+            MarketKey::new(DexId::XYZ, AssetId::new(asset_id)),
+            OrderSide::Buy,
+            Price::new(dec!(50000)),
+            Size::new(dec!(0.1)),
+            reduce_only,
+            1234567890,
+        )
+    }
+
     fn sample_pending_cancel() -> PendingCancel {
         PendingCancel::new(sample_market(), 123, 1234567890)
     }
@@ -581,18 +617,20 @@ mod tests {
     }
 
     // Test 3: reduce_only queue overflow - 501st item returns QueueFull
+    // Note: Uses unique markets per order to avoid BUG-004 deduplication
     #[test]
     fn test_reduce_only_queue_overflow() {
         let scheduler = default_scheduler();
 
-        // Fill queue to capacity (500)
-        for _ in 0..500 {
-            let result = scheduler.enqueue_reduce_only(sample_pending_order(true));
+        // Fill queue to capacity (500) - use unique markets to avoid deduplication
+        for i in 0..500 {
+            let result =
+                scheduler.enqueue_reduce_only(sample_pending_order_with_asset(true, i as u32));
             assert!(result.is_queued() || result == EnqueueResult::InflightFull);
         }
 
-        // 501st should fail
-        let result = scheduler.enqueue_reduce_only(sample_pending_order(true));
+        // 501st should fail (use a new unique market)
+        let result = scheduler.enqueue_reduce_only(sample_pending_order_with_asset(true, 500));
         assert_eq!(result, EnqueueResult::QueueFull);
     }
 
@@ -686,13 +724,14 @@ mod tests {
     }
 
     // Test 9: requeue_reduce_only - failed orders go to front of queue
+    // Note: Uses unique markets to avoid BUG-004 deduplication
     #[test]
     fn test_requeue_reduce_only() {
         let scheduler = default_scheduler();
 
-        // Add some orders first
-        let order1 = sample_pending_order(true);
-        let order2 = sample_pending_order(true);
+        // Add some orders first - use different markets to avoid deduplication
+        let order1 = sample_pending_order_with_asset(true, 1);
+        let order2 = sample_pending_order_with_asset(true, 2);
         let cloid1 = order1.cloid.clone();
         let cloid2 = order2.cloid.clone();
 
@@ -705,6 +744,9 @@ mod tests {
             ActionBatch::Orders(o) => o,
             _ => panic!("Expected orders batch"),
         };
+
+        // Should have 2 orders (different markets)
+        assert_eq!(orders.len(), 2);
 
         // Requeue the orders
         scheduler.requeue_reduce_only(orders);
@@ -870,5 +912,96 @@ mod tests {
 
         latch.reset();
         assert!(!latch.is_triggered());
+    }
+
+    // BUG-004: Test duplicate reduce_only deduplication
+    #[test]
+    fn test_reduce_only_deduplication_same_market() {
+        let scheduler = default_scheduler();
+
+        // Create two reduce_only orders for the same market
+        let order1 = sample_pending_order(true);
+        let order2 = sample_pending_order(true);
+        let market = order1.market;
+
+        // Ensure they have the same market
+        assert_eq!(order1.market, order2.market);
+
+        // First order should be queued
+        let result1 = scheduler.enqueue_reduce_only(order1);
+        assert!(result1.is_queued());
+
+        // Second order for same market should be "accepted" but not actually queued
+        let result2 = scheduler.enqueue_reduce_only(order2);
+        assert!(result2.is_queued()); // Returns Queued to not break caller
+
+        // Queue should only have 1 order
+        let (_, reduce_only_len, _) = scheduler.queue_lengths();
+        assert_eq!(reduce_only_len, 1, "Duplicate order should be skipped");
+
+        // tick should only return 1 order
+        let batch = scheduler.tick().unwrap();
+        let orders = match batch {
+            ActionBatch::Orders(o) => o,
+            _ => panic!("Expected orders batch"),
+        };
+        assert_eq!(orders.len(), 1, "Only one order should be returned");
+        assert_eq!(orders[0].market, market);
+    }
+
+    // BUG-004: Test different markets are not deduplicated
+    #[test]
+    fn test_reduce_only_different_markets_not_deduplicated() {
+        let scheduler = default_scheduler();
+
+        // Create two reduce_only orders for different markets
+        let mut order1 = sample_pending_order(true);
+        let mut order2 = sample_pending_order(true);
+
+        // Set different markets
+        order1.market = MarketKey::new(DexId::XYZ, AssetId::new(1));
+        order2.market = MarketKey::new(DexId::XYZ, AssetId::new(2));
+
+        // Both should be queued
+        let result1 = scheduler.enqueue_reduce_only(order1);
+        assert!(result1.is_queued());
+
+        let result2 = scheduler.enqueue_reduce_only(order2);
+        assert!(result2.is_queued());
+
+        // Queue should have 2 orders
+        let (_, reduce_only_len, _) = scheduler.queue_lengths();
+        assert_eq!(
+            reduce_only_len, 2,
+            "Different markets should both be queued"
+        );
+    }
+
+    // BUG-004: Test deduplication after queue drain
+    #[test]
+    fn test_reduce_only_dedup_after_drain() {
+        let scheduler = default_scheduler();
+
+        // First order
+        let order1 = sample_pending_order(true);
+        let market = order1.market;
+        scheduler.enqueue_reduce_only(order1);
+
+        // Drain via tick
+        let _ = scheduler.tick();
+
+        // Queue should be empty now
+        let (_, reduce_only_len, _) = scheduler.queue_lengths();
+        assert_eq!(reduce_only_len, 0);
+
+        // Now a new order for the same market should be accepted
+        let order2 = sample_pending_order(true);
+        assert_eq!(order2.market, market);
+
+        let result = scheduler.enqueue_reduce_only(order2);
+        assert!(result.is_queued());
+
+        let (_, reduce_only_len, _) = scheduler.queue_lengths();
+        assert_eq!(reduce_only_len, 1, "New order after drain should be queued");
     }
 }

@@ -438,8 +438,12 @@ impl Application {
         let client = MetaClient::new(&self.config.info_url)
             .map_err(|e| AppError::Executor(format!("Failed to create HTTP client: {e}")))?;
 
+        // BUG-005: Pass dex name to fetch perpDex positions
+        // Without this, only L1 perp positions are returned (not xyz perpDex positions)
+        let dex_name = Some(self.config.xyz_pattern.as_str());
+
         let state = client
-            .fetch_clearinghouse_state(user_address)
+            .fetch_clearinghouse_state(user_address, dex_name)
             .await
             .map_err(|e| AppError::Executor(format!("Failed to fetch clearinghouseState: {e}")))?;
 

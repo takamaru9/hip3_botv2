@@ -31,13 +31,19 @@ struct InfoRequestWithDex {
     dex: String,
 }
 
-/// Request type for info endpoint with user address.
+/// Request type for info endpoint with user address and optional dex.
+///
+/// Used for clearinghouseState to fetch perpDex positions (BUG-005).
 #[derive(Debug, Serialize)]
-struct InfoRequestWithUser {
+struct InfoRequestWithUserAndDex {
     #[serde(rename = "type")]
     request_type: String,
     /// User address (0x...).
     user: String,
+    /// DEX name for builder-deployed perps (e.g., "xyz").
+    /// Required to fetch perpDex positions. Without this, only L1 perp positions are returned.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    dex: Option<String>,
 }
 
 /// Raw perpDex entry from API.
@@ -334,22 +340,28 @@ impl MetaClient {
     ///
     /// # Arguments
     /// * `user_address` - User's Ethereum address (0x...).
+    /// * `dex` - Optional DEX name for perpDex positions (e.g., "xyz").
+    ///   If None, only L1 perp positions are returned.
+    ///   BUG-005: Required for fetching perpDex positions.
     ///
     /// # Returns
     /// `ClearinghouseStateResponse` containing margin summary and positions.
     pub async fn fetch_clearinghouse_state(
         &self,
         user_address: &str,
+        dex: Option<&str>,
     ) -> RegistryResult<ClearinghouseStateResponse> {
         info!(
             url = %self.info_url,
             user = %user_address,
+            dex = ?dex,
             "Fetching clearinghouseState from exchange"
         );
 
-        let request = InfoRequestWithUser {
+        let request = InfoRequestWithUserAndDex {
             request_type: "clearinghouseState".to_string(),
             user: user_address.to_string(),
+            dex: dex.map(|s| s.to_string()),
         };
 
         let response = self

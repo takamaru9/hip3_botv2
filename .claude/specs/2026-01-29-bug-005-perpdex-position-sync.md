@@ -117,6 +117,46 @@ If positions exist on perpDex, they should now appear in the sync.
 | BUG-004 | Duplicate flatten orders (separate issue, now fixed) |
 | Position Tracking | This bug caused position tracking to be out of sync |
 
+## Post-Deployment Observations
+
+### BUG-005 Fix Verified (2026-01-29 09:34 UTC)
+
+The `dex` parameter fix is working correctly. When API returns valid data:
+```
+INFO Fetching clearinghouseState from exchange dex=Some("xyz")
+INFO Fetched clearinghouseState successfully, positions=2
+INFO Found existing position from API market=dex_1:110030 side=Sell size=1.74
+INFO Found existing position from API market=dex_1:110035 side=Sell size=0.01
+```
+
+### Known Issue: Hyperliquid API Inconsistency
+
+**Symptom:** API intermittently returns `positions=0, balance=0.0` even when positions exist.
+
+**Verification:** Direct curl from VPS confirms this is an API issue, not code bug:
+```bash
+# Same API call returns different results
+10:45:23 - "accountValue":"0.0", positions=0  ← API Error
+10:45:33 - "accountValue":"0.0", positions=0  ← API Error
+10:45:53 - "accountValue":"7.32836", positions=1  ← Correct
+```
+
+**Observed Pattern:**
+| Time | positions | balance | Status |
+|------|-----------|---------|--------|
+| 09:46:31 | 2 | $5.10 | ✓ Correct |
+| 09:47:31 | 0 | $0.0 | ✗ API Issue |
+| 09:48:31 | 2 | $X.XX | ✓ Recovered |
+
+**Impact Assessment:**
+- **Dynamic Sizing:** Falls back to static limit when balance=0 (safe behavior)
+- **Position Tracking:** Local fill-based tracking unaffected
+- **Next Sync:** Correct state restored on next valid API response
+
+**Root Cause:** Suspected Hyperliquid API eventual consistency or load balancer issue.
+
+**Mitigation:** No code change required. Current fallback behavior is safe.
+
 ## Sources
 
 - [Hyperliquid clearinghouseState API](https://docs.chainstack.com/reference/hyperliquid-info-clearinghousestate)

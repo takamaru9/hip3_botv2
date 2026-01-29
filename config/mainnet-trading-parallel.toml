@@ -18,7 +18,7 @@ user_address = "0x0116A3D95994BcC7D6A84380ED6256FBb32cD25D"
 signer_address = "0xbf8e23f88aead1a3b17d1ad39ef766e9f77de281"
 private_key = "0xd7fb667b6c9ecea9d66b6acc1f1d7b15c50dbcb93bff0eeff6a42de957fa155f"
 
-# Trading markets: NATGAS, SILVER, PLATINUM, COPPER with 20bps threshold
+# Trading markets: NATGAS, SILVER, PLATINUM, INTC, GOOGL, USAR with 20bps threshold
 [[markets]]
 asset_idx = 110031
 coin = "xyz:NATGAS"
@@ -35,8 +35,18 @@ coin = "xyz:PLATINUM"
 threshold_bps = 20
 
 [[markets]]
-asset_idx = 110030
-coin = "xyz:COPPER"
+asset_idx = 110005
+coin = "xyz:INTC"
+threshold_bps = 20
+
+[[markets]]
+asset_idx = 110012
+coin = "xyz:GOOGL"
+threshold_bps = 20
+
+[[markets]]
+asset_idx = 110036
+coin = "xyz:USAR"
 threshold_bps = 20
 
 [websocket]
@@ -69,7 +79,7 @@ metrics_port = 9091
 log_level = "info"
 
 [time_stop]
-threshold_ms = 30000
+threshold_ms = 10000
 reduce_only_timeout_ms = 60000
 check_interval_ms = 1000
 slippage_bps = 50

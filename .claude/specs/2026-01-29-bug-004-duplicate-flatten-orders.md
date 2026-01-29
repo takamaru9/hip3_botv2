@@ -101,4 +101,15 @@ cargo test -p hip3-executor batch::
 ```
 
 ## Deployment
-Deploy to VPS after this fix to resolve production "Reduce only would increase position" errors.
+
+| Item | Value |
+|------|-------|
+| Commit | `7985415` |
+| Deployed | 2026-01-29 08:50 UTC |
+| Container | `hip3-bot-trading` |
+
+**Post-deployment verification:**
+- Bot startup: OK
+- Balance sync: $107.00
+- Position sync: 0 positions
+- "Reduce only" errors: None observed

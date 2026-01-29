@@ -222,6 +222,7 @@ impl Default for ActionBudget {
 #[derive(Debug, Clone)]
 pub struct ExecutorConfig {
     /// Maximum notional value per market (USD).
+    /// When dynamic sizing is enabled, this acts as a hard cap.
     /// Uses Decimal for precision in financial calculations.
     pub max_notional_per_market: Decimal,
     /// Maximum total notional value across all markets (USD).
@@ -229,6 +230,11 @@ pub struct ExecutorConfig {
     pub max_notional_total: Decimal,
     /// Maximum number of concurrent positions across all markets.
     pub max_concurrent_positions: usize,
+    /// Whether dynamic position sizing is enabled.
+    pub dynamic_sizing_enabled: bool,
+    /// Risk percentage per market for dynamic sizing (0.0 - 1.0).
+    /// Used to calculate: dynamic_max = account_balance * risk_per_market_pct
+    pub risk_per_market_pct: Decimal,
 }
 
 impl Default for ExecutorConfig {
@@ -237,6 +243,8 @@ impl Default for ExecutorConfig {
             max_notional_per_market: Decimal::from(50),
             max_notional_total: Decimal::from(100),
             max_concurrent_positions: 5,
+            dynamic_sizing_enabled: false,
+            risk_per_market_pct: Decimal::new(10, 2), // 0.10 = 10%
         }
     }
 }
@@ -381,6 +389,30 @@ impl Executor {
         }
     }
 
+    /// Calculate the effective maximum notional per market.
+    ///
+    /// When dynamic sizing is enabled:
+    /// - Calculates `dynamic_max = account_balance * risk_per_market_pct`
+    /// - Returns `min(config.max_notional_per_market, dynamic_max)`
+    ///
+    /// When dynamic sizing is disabled or balance is zero:
+    /// - Returns `config.max_notional_per_market` (static limit)
+    #[must_use]
+    fn effective_max_notional_per_market(&self) -> Decimal {
+        if !self.config.dynamic_sizing_enabled {
+            return self.config.max_notional_per_market;
+        }
+
+        let balance = self.position_tracker.get_balance();
+        if balance.is_zero() {
+            warn!("Dynamic sizing enabled but balance is zero, using static limit");
+            return self.config.max_notional_per_market;
+        }
+
+        let dynamic_max = balance * self.config.risk_per_market_pct;
+        std::cmp::min(self.config.max_notional_per_market, dynamic_max)
+    }
+
     /// Process a trading signal.
     ///
     /// Runs through all gate checks and queues the order if all pass.
@@ -450,8 +482,11 @@ impl Executor {
         let total_notional =
             position_notional.inner() + pending_notional.inner() + new_order_notional;
 
+        // Get effective max (dynamic or static depending on config)
+        let effective_max = self.effective_max_notional_per_market();
+
         // Compare using Decimal (no f64 conversion)
-        if total_notional >= self.config.max_notional_per_market {
+        if total_notional >= effective_max {
             debug!(
                 market = %market,
                 position_notional = %position_notional,
@@ -460,7 +495,9 @@ impl Executor {
                 size = %size,
                 mark_px = %mark_px,
                 total_notional = %total_notional,
-                max = %self.config.max_notional_per_market,
+                effective_max = %effective_max,
+                balance = %self.position_tracker.get_balance(),
+                dynamic_sizing = self.config.dynamic_sizing_enabled,
                 "Signal rejected: Would exceed max position per market"
             );
             return ExecutionResult::rejected(RejectReason::MaxPositionPerMarket);

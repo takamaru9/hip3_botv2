@@ -90,8 +90,12 @@ window_seconds = 3600
 [position]
 max_concurrent_positions = 10
 max_total_notional = 300
-max_notional_per_market = 50
+max_notional_per_market = 100  # Hard cap (increased since dynamic sizing takes over)
 position_resync_interval_secs = 60
+
+[position.dynamic_sizing]
+enabled = true
+risk_per_market_pct = 0.10  # 10% of account balance per market
 
 [dashboard]
 enabled = true

@@ -176,6 +176,32 @@ impl Default for RiskMonitorConfig {
     }
 }
 
+/// Dynamic position sizing configuration based on account balance.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DynamicSizingConfig {
+    /// Whether dynamic sizing is enabled. Default: false.
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Risk percentage per market (0.0 - 1.0). Default: 0.10 (10%).
+    /// Used to calculate: dynamic_max = account_balance * risk_per_market_pct
+    #[serde(default = "default_risk_per_market_pct")]
+    pub risk_per_market_pct: f64,
+}
+
+fn default_risk_per_market_pct() -> f64 {
+    0.10
+}
+
+impl Default for DynamicSizingConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            risk_per_market_pct: default_risk_per_market_pct(),
+        }
+    }
+}
+
 /// Position management configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PositionConfig {
@@ -190,6 +216,7 @@ pub struct PositionConfig {
     pub max_total_notional: Decimal,
 
     /// Maximum notional per market (USD).
+    /// When dynamic_sizing is enabled, this acts as a hard cap.
     /// Default: 50
     #[serde(default = "default_max_notional_per_market")]
     pub max_notional_per_market: Decimal,
@@ -198,6 +225,10 @@ pub struct PositionConfig {
     /// Default: 60 (1 minute)
     #[serde(default = "default_position_resync_interval_secs")]
     pub position_resync_interval_secs: u64,
+
+    /// Dynamic sizing configuration based on account balance.
+    #[serde(default)]
+    pub dynamic_sizing: DynamicSizingConfig,
 }
 
 fn default_max_concurrent_positions() -> usize {
@@ -223,6 +254,7 @@ impl Default for PositionConfig {
             max_total_notional: default_max_total_notional(),
             max_notional_per_market: default_max_notional_per_market(),
             position_resync_interval_secs: default_position_resync_interval_secs(),
+            dynamic_sizing: DynamicSizingConfig::default(),
         }
     }
 }

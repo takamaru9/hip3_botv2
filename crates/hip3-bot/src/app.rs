@@ -426,6 +426,7 @@ impl Application {
     /// Sync positions from Hyperliquid clearinghouseState API.
     ///
     /// Called at startup to initialize PositionTracker with current positions.
+    /// Also updates account balance for dynamic position sizing.
     /// This prevents stale position state after bot restart.
     async fn sync_positions_from_api(
         &self,
@@ -441,6 +442,32 @@ impl Application {
             .fetch_clearinghouse_state(user_address)
             .await
             .map_err(|e| AppError::Executor(format!("Failed to fetch clearinghouseState: {e}")))?;
+
+        // Update account balance from margin summary (for dynamic position sizing)
+        if let Some(ref margin_summary) = state.margin_summary {
+            match margin_summary.account_value_decimal() {
+                Ok(balance) => {
+                    info!(account_balance = %balance, "Updating account balance from API");
+                    position_tracker.update_balance(balance);
+                }
+                Err(e) => {
+                    warn!(error = ?e, "Failed to parse account_value from margin_summary");
+                }
+            }
+        } else if let Some(ref cross_margin) = state.cross_margin_summary {
+            // Fallback to cross margin summary if margin summary not available
+            match cross_margin.account_value_decimal() {
+                Ok(balance) => {
+                    info!(account_balance = %balance, "Updating account balance from cross margin API");
+                    position_tracker.update_balance(balance);
+                }
+                Err(e) => {
+                    warn!(error = ?e, "Failed to parse account_value from cross_margin_summary");
+                }
+            }
+        } else {
+            warn!("No margin summary available in clearinghouseState response");
+        }
 
         let now_ms = current_time_ms();
         let dex_id = self.get_dex_id();
@@ -703,6 +730,11 @@ impl Application {
                 max_notional_per_market: self.config.position.max_notional_per_market,
                 max_notional_total: self.config.position.max_total_notional,
                 max_concurrent_positions: self.config.position.max_concurrent_positions,
+                dynamic_sizing_enabled: self.config.position.dynamic_sizing.enabled,
+                risk_per_market_pct: Decimal::try_from(
+                    self.config.position.dynamic_sizing.risk_per_market_pct,
+                )
+                .unwrap_or(Decimal::new(10, 2)), // Default 0.10 (10%)
             };
             let executor = Arc::new(hip3_executor::Executor::new(
                 position_tracker.clone(),

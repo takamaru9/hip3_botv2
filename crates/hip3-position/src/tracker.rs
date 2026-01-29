@@ -45,6 +45,7 @@
 //! `rollback_order_caches()` to restore consistency.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use dashmap::DashMap;
@@ -532,6 +533,11 @@ pub struct PositionTrackerHandle {
 
     /// Authoritative pending orders for notional calculations.
     pending_orders_data: Arc<DashMap<ClientOrderId, TrackedOrder>>,
+
+    /// Account balance in cents (USD * 100) for lock-free access.
+    /// Using AtomicU64 for high-frequency reads without locking.
+    /// Precision: $0.01 (sufficient for position sizing calculations).
+    balance_cache: Arc<AtomicU64>,
 }
 
 impl PositionTrackerHandle {
@@ -895,6 +901,35 @@ impl PositionTrackerHandle {
     ) -> Option<dashmap::mapref::one::Ref<'_, ClientOrderId, TrackedOrder>> {
         self.pending_orders_data.get(cloid)
     }
+
+    // === Balance methods ===
+
+    /// Get the cached account balance.
+    ///
+    /// Returns the balance stored as cents (USD * 100) converted back to Decimal.
+    /// Lock-free read for high-frequency access during gate checks.
+    ///
+    /// Returns `Decimal::ZERO` if balance has not been set (startup or API failure).
+    #[must_use]
+    pub fn get_balance(&self) -> Decimal {
+        let cents = self.balance_cache.load(Ordering::Acquire);
+        Decimal::new(cents as i64, 2)
+    }
+
+    /// Update the cached account balance.
+    ///
+    /// Stores balance as cents (USD * 100) for atomic access.
+    /// Called by app.rs during position sync from API.
+    ///
+    /// # Note
+    /// Precision is $0.01, which is sufficient for position sizing calculations.
+    pub fn update_balance(&self, balance: Decimal) {
+        use rust_decimal::prelude::ToPrimitive;
+        // Convert to cents: balance * 100, truncate to u64
+        let cents = (balance * Decimal::from(100)).trunc().to_u64().unwrap_or(0);
+        self.balance_cache.store(cents, Ordering::Release);
+        debug!(balance = %balance, cents = cents, "Account balance updated");
+    }
 }
 
 // ============================================================================
@@ -913,6 +948,7 @@ pub fn spawn_position_tracker(capacity: usize) -> (PositionTrackerHandle, JoinHa
     let pending_orders_snapshot = Arc::new(DashMap::new());
     let positions_data = Arc::new(DashMap::new());
     let pending_orders_data = Arc::new(DashMap::new());
+    let balance_cache = Arc::new(AtomicU64::new(0));
 
     let task = PositionTrackerTask {
         rx,
@@ -932,6 +968,7 @@ pub fn spawn_position_tracker(capacity: usize) -> (PositionTrackerHandle, JoinHa
         pending_orders_snapshot,
         positions_data,
         pending_orders_data,
+        balance_cache,
     };
 
     let join_handle = tokio::spawn(task.run());
@@ -979,6 +1016,7 @@ mod tests {
         let pending_orders_snapshot = Arc::new(DashMap::new());
         let positions_data = Arc::new(DashMap::new());
         let pending_orders_data = Arc::new(DashMap::new());
+        let balance_cache = Arc::new(AtomicU64::new(0));
 
         let handle = PositionTrackerHandle {
             tx,
@@ -987,6 +1025,7 @@ mod tests {
             pending_orders_snapshot,
             positions_data,
             pending_orders_data,
+            balance_cache,
         };
 
         let err = handle.try_register_order(order.clone()).unwrap_err();
@@ -1233,5 +1272,48 @@ mod tests {
 
         pos.size = Size::ZERO;
         assert!(pos.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_balance_get_and_update() {
+        let (handle, _join) = spawn_position_tracker(100);
+
+        // Initial balance should be zero
+        assert_eq!(handle.get_balance(), Decimal::ZERO);
+
+        // Update balance
+        handle.update_balance(dec!(186.50));
+
+        // Check balance
+        assert_eq!(handle.get_balance(), dec!(186.50));
+
+        // Update to different value
+        handle.update_balance(dec!(500.00));
+        assert_eq!(handle.get_balance(), dec!(500.00));
+
+        // Large balance
+        handle.update_balance(dec!(123456.78));
+        assert_eq!(handle.get_balance(), dec!(123456.78));
+
+        handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn test_balance_precision() {
+        let (handle, _join) = spawn_position_tracker(100);
+
+        // Test $0.01 precision
+        handle.update_balance(dec!(100.01));
+        assert_eq!(handle.get_balance(), dec!(100.01));
+
+        handle.update_balance(dec!(100.99));
+        assert_eq!(handle.get_balance(), dec!(100.99));
+
+        // Sub-cent values are truncated (acceptable for position sizing)
+        handle.update_balance(dec!(100.999));
+        // Gets stored as 10099 cents = $100.99
+        assert_eq!(handle.get_balance(), dec!(100.99));
+
+        handle.shutdown().await;
     }
 }

@@ -18,36 +18,40 @@ user_address = "0x0116A3D95994BcC7D6A84380ED6256FBb32cD25D"
 signer_address = "0xbf8e23f88aead1a3b17d1ad39ef766e9f77de281"
 private_key = "0xd7fb667b6c9ecea9d66b6acc1f1d7b15c50dbcb93bff0eeff6a42de957fa155f"
 
-# Trading markets: NATGAS, SILVER, PLATINUM, INTC, GOOGL, USAR with 20bps threshold
-[[markets]]
-asset_idx = 110031
-coin = "xyz:NATGAS"
-threshold_bps = 20
+# Trading markets: Selected based on data-driven analysis (2026-01-30)
+# Removed: NATGAS, PLATINUM, GOOGL, USAR (win rate < 15%)
+# Threshold: 30 bps (raised from 20 bps based on edge erosion analysis)
+#
+# Analysis summary:
+#   - Edge erosion: ~22.6 bps (signal to execution)
+#   - Break-even threshold: ~30 bps
+#   - At 30 bps: 21.3% of signals pass (vs 54.7% at 20 bps)
 
 [[markets]]
 asset_idx = 110026
 coin = "xyz:SILVER"
-threshold_bps = 20
-
-[[markets]]
-asset_idx = 110035
-coin = "xyz:PLATINUM"
-threshold_bps = 20
+threshold_bps = 30
 
 [[markets]]
 asset_idx = 110005
 coin = "xyz:INTC"
-threshold_bps = 20
+threshold_bps = 35  # Higher threshold due to marginal performance
+
+# Good performers from trade history analysis
+[[markets]]
+asset_idx = 110007
+coin = "xyz:COIN"
+threshold_bps = 30
 
 [[markets]]
-asset_idx = 110012
-coin = "xyz:GOOGL"
-threshold_bps = 20
+asset_idx = 110004
+coin = "xyz:HOOD"
+threshold_bps = 30
 
 [[markets]]
-asset_idx = 110036
-coin = "xyz:USAR"
-threshold_bps = 20
+asset_idx = 110017
+coin = "xyz:MSTR"
+threshold_bps = 30
 
 [websocket]
 max_reconnect_attempts = 0
@@ -62,9 +66,9 @@ min_buffer_ratio = 0.15
 max_oi_fraction = 0.01
 
 [detector]
-taker_fee_bps = 4
-slippage_bps = 10              # 2 → 10 bps: More realistic slippage to filter low-quality signals
-min_edge_bps = 10  # Same as Observation for signal detection (per-market threshold_bps determines actionability)
+taker_fee_bps = 2              # Actual fee ~0.79 bps, but 2 bps for safety (HIP-3 multiplier applied: 2×2=4)
+slippage_bps = 10              # Conservative slippage estimate
+min_edge_bps = 15              # 10 → 15 bps: Increased based on edge erosion analysis (~22.6 bps)
 sizing_alpha = 0.10
 max_notional = 50
 min_book_notional = 50
@@ -86,7 +90,7 @@ slippage_bps = 50
 
 [mark_regression]
 enabled = true
-exit_threshold_bps = 10         # 3 → 10 bps: Symmetric with 20 bps entry threshold
+exit_threshold_bps = 10         # Keep conservative (entry now 30 bps, exit 10 bps = 3:1 ratio)
 check_interval_ms = 200
 min_holding_time_ms = 1000
 slippage_bps = 50

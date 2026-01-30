@@ -713,9 +713,17 @@ impl Application {
             let hard_stop_latch = Arc::new(HardStopLatch::new());
             let inflight_tracker = Arc::new(InflightTracker::new(10)); // max 10 inflight
 
-            // 3. BatchScheduler
+            // 3. BatchScheduler (with configurable interval for latency optimization)
+            let batch_config = BatchConfig {
+                interval_ms: self.config.executor.batch_interval_ms,
+                ..BatchConfig::default()
+            };
+            info!(
+                interval_ms = batch_config.interval_ms,
+                "Batch scheduler initialized"
+            );
             let batch_scheduler = Arc::new(BatchScheduler::new(
-                BatchConfig::default(),
+                batch_config,
                 inflight_tracker.clone(),
                 hard_stop_latch.clone(),
             ));

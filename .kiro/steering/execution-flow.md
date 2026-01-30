@@ -168,7 +168,24 @@ Signal arrives at Executor
 |-----------|---------|---------|
 | max_concurrent_positions | 5 | Max simultaneous open positions |
 | max_total_notional | $100 | Max total exposure across all positions |
-| max_notional_per_market | $50 | Max exposure per single market |
+| max_notional_per_market | $50 | Max exposure per single market (hard cap) |
+
+### Dynamic Position Sizing
+
+When enabled, position size is dynamically calculated based on account balance:
+
+```
+effective_max = min(max_notional_per_market, balance × risk_per_market_pct)
+```
+
+| Parameter | Default | Purpose |
+|-----------|---------|---------|
+| dynamic_sizing.enabled | false | Enable balance-based sizing |
+| dynamic_sizing.risk_per_market_pct | 0.10 | % of balance per market (10%) |
+
+**Example**: Balance $186 × 10% = $18.60 effective max per market
+
+**Balance Sync**: Account balance is fetched from `clearinghouseState` API at startup and periodically refreshed. Stored in `balance_cache` (AtomicU64) for lock-free reads.
 
 ### Order Lifecycle
 
@@ -206,7 +223,9 @@ Trading is blocked until ALL conditions are met. Managed by `TradingReadyChecker
 1. WS connects
 2. Subscribe to orderUpdates, userFills
 3. TradingReadyChecker.reset() clears all flags
-4. POST /info clearinghouse to fetch open positions
+4. POST /info clearinghouseState (with dex param for HIP-3) to:
+   a. Fetch open positions → PositionTracker
+   b. Fetch account balance → balance_cache (for dynamic sizing)
 5. set_position_synced(true) on success
 6. MarketData starts flowing → set_md_ready(true)
 7. Channel ACKs received → set_order_snapshot(true), set_fills_snapshot(true)

@@ -25,6 +25,20 @@ MarketKey = (DexId, AssetId)
 - Auto-discovered via `/info` API with `xyz_pattern` config
 - Each asset has `assetIdx` (numeric) and `coin` (display name)
 
+### clearinghouseState API (Position Sync)
+
+**Critical**: For HIP-3 perpDex positions, you **MUST** include the `dex` parameter:
+
+```json
+{
+  "type": "clearinghouseState",
+  "user": "0x...",
+  "dex": "xyz"
+}
+```
+
+Without `dex`, the API only returns L1 perp positions, not perpDex positions (BUG-005 fix).
+
 ## WebSocket Protocol
 
 ### Heartbeat (Keep-alive)

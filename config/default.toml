@@ -96,6 +96,11 @@ min_holding_time_ms = 1000
 # Slippage tolerance for flatten orders (bps)
 slippage_bps = 50
 
+[executor]
+# Batch processing interval (ms) - lower values reduce latency
+# 20ms = avg 10ms latency, 100ms = avg 50ms latency
+batch_interval_ms = 20
+
 [risk_monitor]
 # Maximum consecutive order failures before HardStop
 max_consecutive_failures = 5

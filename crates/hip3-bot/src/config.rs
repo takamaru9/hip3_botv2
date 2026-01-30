@@ -176,6 +176,28 @@ impl Default for RiskMonitorConfig {
     }
 }
 
+/// Executor configuration for batch processing.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExecutorConfig {
+    /// Batch processing interval in milliseconds.
+    /// Lower values reduce latency but increase CPU usage.
+    /// Default: 20ms (optimized from original 100ms for edge erosion reduction).
+    #[serde(default = "default_batch_interval_ms")]
+    pub batch_interval_ms: u64,
+}
+
+fn default_batch_interval_ms() -> u64 {
+    20 // Optimized from 100ms - reduces average latency from 50ms to 10ms
+}
+
+impl Default for ExecutorConfig {
+    fn default() -> Self {
+        Self {
+            batch_interval_ms: default_batch_interval_ms(),
+        }
+    }
+}
+
 /// Dynamic position sizing configuration based on account balance.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DynamicSizingConfig {
@@ -301,6 +323,9 @@ pub struct AppConfig {
     /// Risk monitor configuration (Trading mode only).
     #[serde(default)]
     pub risk_monitor: RiskMonitorConfig,
+    /// Executor configuration (Trading mode only).
+    #[serde(default)]
+    pub executor: ExecutorConfig,
     /// Dashboard configuration.
     #[serde(default)]
     pub dashboard: DashboardConfig,
@@ -501,6 +526,7 @@ impl Default for AppConfig {
             time_stop: TimeStopConfig::default(),
             mark_regression: MarkRegressionConfig::default(),
             risk_monitor: RiskMonitorConfig::default(),
+            executor: ExecutorConfig::default(),
             dashboard: DashboardConfig::default(),
             position: PositionConfig::default(),
             user_address: None,

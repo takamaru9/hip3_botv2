@@ -18,40 +18,24 @@ user_address = "0x0116A3D95994BcC7D6A84380ED6256FBb32cD25D"
 signer_address = "0xbf8e23f88aead1a3b17d1ad39ef766e9f77de281"
 private_key = "0xd7fb667b6c9ecea9d66b6acc1f1d7b15c50dbcb93bff0eeff6a42de957fa155f"
 
-# Trading markets: Selected based on data-driven analysis (2026-01-30)
-# Removed: NATGAS, PLATINUM, GOOGL, USAR (win rate < 15%)
-# Threshold: 30 bps (raised from 20 bps based on edge erosion analysis)
+# Trading markets: Data-driven optimization (2026-01-31)
 #
-# Analysis summary:
-#   - Edge erosion: ~22.6 bps (signal to execution)
-#   - Break-even threshold: ~30 bps
-#   - At 30 bps: 21.3% of signals pass (vs 54.7% at 20 bps)
+# Analysis (17.5 hours of data with 30 bps threshold):
+#   - Overall WR: 28.3%, Net PnL: -$27.40
+#   - SILVER: 898 trades, WR 31.6% (best performer but still losing)
+#   - INTC/COIN/HOOD/MSTR: Too few trades, all losing
+#
+# Duration analysis (SILVER):
+#   - ≤5s:   WR 62.5%, +6.43 bps  ← Sweet spot!
+#   - 5-15s: WR 36.8%, -1.58 bps
+#   - >15s:  WR 28.5%, -8.35 bps  ← TimeStop kills profits
+#
+# Strategy: Focus on SILVER only, faster exit
 
 [[markets]]
 asset_idx = 110026
 coin = "xyz:SILVER"
-threshold_bps = 30
-
-[[markets]]
-asset_idx = 110005
-coin = "xyz:INTC"
-threshold_bps = 35  # Higher threshold due to marginal performance
-
-# Good performers from trade history analysis
-[[markets]]
-asset_idx = 110007
-coin = "xyz:COIN"
-threshold_bps = 30
-
-[[markets]]
-asset_idx = 110004
-coin = "xyz:HOOD"
-threshold_bps = 30
-
-[[markets]]
-asset_idx = 110017
-coin = "xyz:MSTR"
-threshold_bps = 30
+threshold_bps = 35  # 30 → 35: Higher threshold for better signals
 
 [websocket]
 max_reconnect_attempts = 0
@@ -83,16 +67,16 @@ metrics_port = 9091
 log_level = "info"
 
 [time_stop]
-threshold_ms = 15000            # 5s → 15s: Allow more time for MarkRegression to trigger
+threshold_ms = 10000            # 15s → 10s: Faster exit (>15s has -8.35 bps loss)
 reduce_only_timeout_ms = 60000
 check_interval_ms = 500
 slippage_bps = 50
 
 [mark_regression]
 enabled = true
-exit_threshold_bps = 10         # Keep conservative (entry now 30 bps, exit 10 bps = 3:1 ratio)
+exit_threshold_bps = 15         # 10 → 15 bps: Exit earlier when edge diminishes
 check_interval_ms = 200
-min_holding_time_ms = 1000
+min_holding_time_ms = 500       # 1000 → 500ms: Allow faster exit (≤5s has +6.43 bps profit)
 slippage_bps = 50
 
 [executor]

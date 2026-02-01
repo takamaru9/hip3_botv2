@@ -137,8 +137,8 @@ impl DislocationDetector {
                 }
             } else {
                 // Calculate change in bps: |current - prev| / prev * 10000
-                let change_bps =
-                    ((current_oracle.inner() - prev.inner()).abs() / prev.inner()) * Decimal::from(10000);
+                let change_bps = ((current_oracle.inner() - prev.inner()).abs() / prev.inner())
+                    * Decimal::from(10000);
 
                 let direction = if current_oracle.inner() > prev.inner() {
                     OracleDirection::Rising

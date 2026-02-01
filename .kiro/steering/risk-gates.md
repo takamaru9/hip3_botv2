@@ -2,6 +2,8 @@
 
 Risk gates are **hard stop conditions** that must ALL pass before any trade can be executed. The bot prioritizes stopping over trading when in doubt.
 
+**Updated**: 2026-02-01
+
 ## Gate Philosophy
 
 > "When in doubt, block."

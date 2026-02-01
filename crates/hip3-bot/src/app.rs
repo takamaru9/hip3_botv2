@@ -428,6 +428,12 @@ impl Application {
     /// Called at startup to initialize PositionTracker with current positions.
     /// Also updates account balance for dynamic position sizing.
     /// This prevents stale position state after bot restart.
+    ///
+    /// # Balance Query Strategy
+    /// HIP-3 perps automatically use L1 Perp collateral (not xyz-specific balance).
+    /// Therefore, we query:
+    /// 1. L1 Perp balance (without dex param) for position sizing
+    /// 2. xyz positions (with dex param) for position sync
     async fn sync_positions_from_api(
         &self,
         position_tracker: &PositionTrackerHandle,
@@ -438,31 +444,32 @@ impl Application {
         let client = MetaClient::new(&self.config.info_url)
             .map_err(|e| AppError::Executor(format!("Failed to create HTTP client: {e}")))?;
 
-        // BUG-005: Pass dex name to fetch perpDex positions
-        // Without this, only L1 perp positions are returned (not xyz perpDex positions)
-        let dex_name = Some(self.config.xyz_pattern.as_str());
-
-        let state = client
-            .fetch_clearinghouse_state(user_address, dex_name)
+        // Step 1: Fetch L1 Perp balance (without dex param)
+        // HIP-3 trades automatically use L1 Perp collateral, so we need L1 balance for sizing.
+        // Querying with dex="xyz" returns $0 (xyz-specific balance), not the usable L1 balance.
+        let l1_state = client
+            .fetch_clearinghouse_state(user_address, None)
             .await
-            .map_err(|e| AppError::Executor(format!("Failed to fetch clearinghouseState: {e}")))?;
+            .map_err(|e| {
+                AppError::Executor(format!("Failed to fetch L1 clearinghouseState: {e}"))
+            })?;
 
-        // Update account balance from margin summary (for dynamic position sizing)
-        if let Some(ref margin_summary) = state.margin_summary {
+        // Update account balance from L1 Perp margin summary (for dynamic position sizing)
+        if let Some(ref margin_summary) = l1_state.margin_summary {
             match margin_summary.account_value_decimal() {
                 Ok(balance) => {
-                    info!(account_balance = %balance, "Updating account balance from API");
+                    info!(account_balance = %balance, "Updating account balance from L1 Perp API");
                     position_tracker.update_balance(balance);
                 }
                 Err(e) => {
                     warn!(error = ?e, "Failed to parse account_value from margin_summary");
                 }
             }
-        } else if let Some(ref cross_margin) = state.cross_margin_summary {
+        } else if let Some(ref cross_margin) = l1_state.cross_margin_summary {
             // Fallback to cross margin summary if margin summary not available
             match cross_margin.account_value_decimal() {
                 Ok(balance) => {
-                    info!(account_balance = %balance, "Updating account balance from cross margin API");
+                    info!(account_balance = %balance, "Updating account balance from L1 cross margin API");
                     position_tracker.update_balance(balance);
                 }
                 Err(e) => {
@@ -470,8 +477,19 @@ impl Application {
                 }
             }
         } else {
-            warn!("No margin summary available in clearinghouseState response");
+            warn!("No margin summary available in L1 clearinghouseState response");
         }
+
+        // Step 2: Fetch xyz positions (with dex param)
+        // BUG-005: Pass dex name to fetch perpDex positions.
+        // Without this, only L1 perp positions are returned (not xyz perpDex positions).
+        let dex_name = Some(self.config.xyz_pattern.as_str());
+        let state = client
+            .fetch_clearinghouse_state(user_address, dex_name)
+            .await
+            .map_err(|e| {
+                AppError::Executor(format!("Failed to fetch xyz clearinghouseState: {e}"))
+            })?;
 
         let now_ms = current_time_ms();
         let dex_id = self.get_dex_id();

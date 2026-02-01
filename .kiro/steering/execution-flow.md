@@ -44,6 +44,8 @@ WebSocket Events
 │  Detection          │
 │  - Oracle vs BBO    │
 │  - Edge calculation │
+│  - Direction filter │
+│  - Velocity filter  │
 └─────────────────────┘
       │
       ├── NO SIGNAL ──► Continue
@@ -277,6 +279,34 @@ Long:  Exit when best_bid >= oracle * (1 - threshold_bps/10000)
 Short: Exit when best_ask <= oracle * (1 + threshold_bps/10000)
 ```
 
+## Dislocation Detection Filters
+
+The detector applies additional filters beyond basic edge calculation:
+
+### Oracle Direction Filter
+Ensures signal direction matches oracle movement direction.
+
+| Parameter | Default | Purpose |
+|-----------|---------|---------|
+| `oracle_direction_filter` | `true` | Enable direction matching |
+
+**Logic**:
+- Long signal: Oracle must be rising (current > previous)
+- Short signal: Oracle must be falling (current < previous)
+
+**Rationale**: Aligns with core edge—only trade when oracle has moved and BBO hasn't caught up.
+
+### Oracle Velocity Filter
+Requires minimum oracle movement magnitude.
+
+| Parameter | Default | Purpose |
+|-----------|---------|---------|
+| `min_oracle_change_bps` | `3` | Minimum oracle change in basis points |
+
+**Logic**: `|oracle_change| >= min_oracle_change_bps` required for signal generation.
+
+**Rationale**: Filters noise—small oracle movements may not create meaningful dislocations.
+
 ## Key Timing Parameters
 
 | Parameter | Default | Purpose |
@@ -291,3 +321,4 @@ Short: Exit when best_ask <= oracle * (1 + threshold_bps/10000)
 
 ---
 _Document flow and conditions, not implementation details_
+_Updated: 2026-02-01_

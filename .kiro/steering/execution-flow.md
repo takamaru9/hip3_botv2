@@ -150,17 +150,22 @@ Signal arrives at Executor
 5. MaxConcurrentPositions → Rejected::MaxConcurrentPositions
       │
       ▼
-6. has_position       → Skipped::AlreadyHasPosition
+6. FlattenInProgress  → Skipped::FlattenInProgress
       │
       ▼
-7. PendingOrder       → Skipped::PendingOrderExists
+7. has_position       → Skipped::AlreadyHasPosition
       │
       ▼
-8. ActionBudget       → Skipped::BudgetExhausted
+8. PendingOrder       → Skipped::PendingOrderExists
       │
       ▼
-9. ALL PASSED         → try_mark_pending_market + enqueue
+9. ActionBudget       → Skipped::BudgetExhausted
+      │
+      ▼
+10. ALL PASSED        → try_mark_pending_market + enqueue
 ```
+
+**Gate 6 (FlattenInProgress)**: Blocks new entries when a reduce-only order is pending for the same market. Prevents position accumulation during exit operations.
 
 ### Position Limits (Config)
 
@@ -276,7 +281,7 @@ Short: Exit when best_ask <= oracle * (1 + threshold_bps/10000)
 
 | Parameter | Default | Purpose |
 |-----------|---------|---------|
-| Executor tick | 100ms | Batch processing interval |
+| Executor tick | 20ms | Batch processing interval (configurable via `batch_interval_ms`) |
 | Heartbeat interval | 45s | WS keep-alive ping |
 | Max BBO age | 2000ms | Freshness threshold |
 | Max Ctx age | 8000ms | Oracle freshness |

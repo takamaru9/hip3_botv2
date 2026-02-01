@@ -4,15 +4,37 @@
 //! edge to cover fees and slippage.
 //!
 //! Implements P0-24: HIP-3 2x fee calculation with audit trail.
+//!
+//! Oracle Direction Filter:
+//! The HIP-3 strategy targets "stale liquidity" - orders left behind when
+//! oracle moves. Signals should only be generated when:
+//! - Buy: Oracle is rising (stale ask from before oracle rise)
+//! - Sell: Oracle is falling (stale bid from before oracle fall)
+//!
+//! When oracle is lagging behind market (trending market), signals are
+//! filtered out to avoid trading against the trend.
 
 use crate::config::DetectorConfig;
 use crate::error::DetectorError;
 use crate::fee::{FeeCalculator, UserFees};
 use crate::signal::{DislocationSignal, SignalStrength};
 use hip3_core::types::MarketSnapshot;
-use hip3_core::{MarketKey, OrderSide, Size};
+use hip3_core::{MarketKey, OrderSide, Price, Size};
 use rust_decimal::Decimal;
+use std::cell::RefCell;
+use std::collections::HashMap;
 use tracing::info;
+
+/// Oracle direction for filtering signals.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OracleDirection {
+    /// Oracle is rising (current > previous).
+    Rising,
+    /// Oracle is falling (current < previous).
+    Falling,
+    /// Oracle is unchanged or no previous data.
+    Unchanged,
+}
 
 /// Dislocation detector.
 ///
@@ -23,9 +45,16 @@ use tracing::info;
 /// IMPORTANT: Only trigger on best crossing oracle, not on mid divergence.
 ///
 /// P0-24: Uses FeeCalculator for HIP-3 2x fee multiplier with full audit trail.
+///
+/// Oracle Direction Filter (when enabled):
+/// - Buy signals only generated when oracle is rising (stale ask)
+/// - Sell signals only generated when oracle is falling (stale bid)
 pub struct DislocationDetector {
     config: DetectorConfig,
     fee_calculator: FeeCalculator,
+    /// Previous oracle prices per market for direction detection.
+    /// Uses RefCell for interior mutability since check() takes &self.
+    prev_oracle: RefCell<HashMap<MarketKey, Price>>,
 }
 
 impl DislocationDetector {
@@ -45,6 +74,7 @@ impl DislocationDetector {
         Ok(Self {
             config,
             fee_calculator,
+            prev_oracle: RefCell::new(HashMap::new()),
         })
     }
 
@@ -64,6 +94,7 @@ impl DislocationDetector {
         Ok(Self {
             config,
             fee_calculator,
+            prev_oracle: RefCell::new(HashMap::new()),
         })
     }
 
@@ -75,6 +106,52 @@ impl DislocationDetector {
     /// Get current fee calculator.
     pub fn fee_calculator(&self) -> &FeeCalculator {
         &self.fee_calculator
+    }
+
+    /// Get oracle direction for a market.
+    ///
+    /// Compares current oracle with previous oracle to determine direction.
+    /// Also updates the previous oracle tracking.
+    ///
+    /// Returns:
+    /// - `Rising`: Current oracle > previous oracle
+    /// - `Falling`: Current oracle < previous oracle
+    /// - `Unchanged`: Current oracle == previous oracle, or no previous data
+    fn get_oracle_direction(&self, key: MarketKey, current_oracle: Price) -> OracleDirection {
+        let mut prev_map = self.prev_oracle.borrow_mut();
+
+        let direction = if let Some(&prev) = prev_map.get(&key) {
+            if current_oracle.inner() > prev.inner() {
+                OracleDirection::Rising
+            } else if current_oracle.inner() < prev.inner() {
+                OracleDirection::Falling
+            } else {
+                OracleDirection::Unchanged
+            }
+        } else {
+            OracleDirection::Unchanged
+        };
+
+        // Update previous oracle for next check
+        prev_map.insert(key, current_oracle);
+
+        direction
+    }
+
+    /// Check if oracle direction is compatible with signal side.
+    ///
+    /// For HIP-3 strategy, we only want signals caused by "stale liquidity":
+    /// - Buy: Oracle rose but ask is still low (stale ask) -> oracle must be Rising
+    /// - Sell: Oracle fell but bid is still high (stale bid) -> oracle must be Falling
+    ///
+    /// When oracle is lagging (market leading), we skip the signal:
+    /// - If market drops first, ask < oracle but oracle will follow down -> bad Buy
+    /// - If market rises first, bid > oracle but oracle will follow up -> bad Sell
+    fn is_direction_compatible(&self, side: OrderSide, direction: OracleDirection) -> bool {
+        match side {
+            OrderSide::Buy => direction == OracleDirection::Rising,
+            OrderSide::Sell => direction == OracleDirection::Falling,
+        }
     }
 
     /// Check for dislocation opportunity.
@@ -92,13 +169,17 @@ impl DislocationDetector {
         snapshot: &MarketSnapshot,
         threshold_override_bps: Option<Decimal>,
     ) -> Option<DislocationSignal> {
+        // Get oracle direction for filtering
+        let oracle = snapshot.ctx.oracle.oracle_px;
+        let direction = self.get_oracle_direction(key, oracle);
+
         // Check buy opportunity: ask below oracle
-        if let Some(signal) = self.check_buy(key, snapshot, threshold_override_bps) {
+        if let Some(signal) = self.check_buy(key, snapshot, threshold_override_bps, direction) {
             return Some(signal);
         }
 
         // Check sell opportunity: bid above oracle
-        if let Some(signal) = self.check_sell(key, snapshot, threshold_override_bps) {
+        if let Some(signal) = self.check_sell(key, snapshot, threshold_override_bps, direction) {
             return Some(signal);
         }
 
@@ -110,11 +191,15 @@ impl DislocationDetector {
     /// Buy when: best_ask <= oracle * (1 - cost_threshold)
     ///
     /// P0-24: Uses FeeCalculator with HIP-3 2x multiplier.
+    ///
+    /// Oracle Direction Filter: When enabled, only generates signal if oracle
+    /// is rising (stale ask from before oracle rise).
     fn check_buy(
         &self,
         key: MarketKey,
         snapshot: &MarketSnapshot,
         threshold_override_bps: Option<Decimal>,
+        oracle_direction: OracleDirection,
     ) -> Option<DislocationSignal> {
         // P0-14: Check if BBO is tradeable
         if !snapshot.is_tradeable() {
@@ -145,6 +230,21 @@ impl DislocationDetector {
         // Check if edge is sufficient
         let strength = SignalStrength::from_edge(raw_edge_bps, total_cost)?;
 
+        // Oracle Direction Filter: Buy only when oracle is rising (stale ask)
+        // This filters out signals caused by oracle lagging in downtrend
+        if self.config.oracle_direction_filter
+            && !self.is_direction_compatible(OrderSide::Buy, oracle_direction)
+        {
+            tracing::debug!(
+                %key,
+                side = "buy",
+                raw_edge_bps = %raw_edge_bps,
+                ?oracle_direction,
+                "Signal skipped: oracle not rising (oracle lag in downtrend)"
+            );
+            return None;
+        }
+
         // Calculate suggested size (may return ZERO if liquidity too low)
         let suggested_size = self.calculate_size(snapshot, OrderSide::Buy);
 
@@ -171,6 +271,7 @@ impl DislocationDetector {
             effective_fee_bps = %fee_metadata.effective_taker_fee_bps,
             oracle = %oracle,
             ask = %ask,
+            ?oracle_direction,
             "Dislocation detected (P0-24: HIP-3 2x fee applied)"
         );
 
@@ -193,11 +294,15 @@ impl DislocationDetector {
     /// Sell when: best_bid >= oracle * (1 + cost_threshold)
     ///
     /// P0-24: Uses FeeCalculator with HIP-3 2x multiplier.
+    ///
+    /// Oracle Direction Filter: When enabled, only generates signal if oracle
+    /// is falling (stale bid from before oracle fall).
     fn check_sell(
         &self,
         key: MarketKey,
         snapshot: &MarketSnapshot,
         threshold_override_bps: Option<Decimal>,
+        oracle_direction: OracleDirection,
     ) -> Option<DislocationSignal> {
         // P0-14: Check if BBO is tradeable
         if !snapshot.is_tradeable() {
@@ -228,6 +333,21 @@ impl DislocationDetector {
         // Check if edge is sufficient
         let strength = SignalStrength::from_edge(raw_edge_bps, total_cost)?;
 
+        // Oracle Direction Filter: Sell only when oracle is falling (stale bid)
+        // This filters out signals caused by oracle lagging in uptrend
+        if self.config.oracle_direction_filter
+            && !self.is_direction_compatible(OrderSide::Sell, oracle_direction)
+        {
+            tracing::debug!(
+                %key,
+                side = "sell",
+                raw_edge_bps = %raw_edge_bps,
+                ?oracle_direction,
+                "Signal skipped: oracle not falling (oracle lag in uptrend)"
+            );
+            return None;
+        }
+
         // Calculate suggested size (may return ZERO if liquidity too low)
         let suggested_size = self.calculate_size(snapshot, OrderSide::Sell);
 
@@ -254,6 +374,7 @@ impl DislocationDetector {
             effective_fee_bps = %fee_metadata.effective_taker_fee_bps,
             oracle = %oracle,
             bid = %bid,
+            ?oracle_direction,
             "Dislocation detected (P0-24: HIP-3 2x fee applied)"
         );
 
@@ -439,6 +560,7 @@ mod tests {
         let config = DetectorConfig {
             slippage_bps: dec!(2),
             min_edge_bps: dec!(4),
+            oracle_direction_filter: false, // Disable for this test
             ..Default::default()
         };
         // Total cost = 4 (effective) + 2 (slip) + 4 (min_edge) = 10 bps
@@ -473,6 +595,7 @@ mod tests {
         let config = DetectorConfig {
             slippage_bps: dec!(2),
             min_edge_bps: dec!(4),
+            oracle_direction_filter: false, // Disable for this test
             ..Default::default()
         };
         // Total cost = 4 (effective) + 2 (slip) + 4 (min_edge) = 10 bps
@@ -811,6 +934,7 @@ mod tests {
             max_notional: dec!(10000),
             min_book_notional: dec!(500),
             normal_book_notional: dec!(5000),
+            oracle_direction_filter: false, // Disable for this test
             ..Default::default()
         };
         let detector = DislocationDetector::with_user_fees(config, user_fees).unwrap();
@@ -861,6 +985,7 @@ mod tests {
             max_notional: dec!(1000),
             min_book_notional: dec!(100),
             normal_book_notional: dec!(1000),
+            oracle_direction_filter: false, // Disable for this test
             ..Default::default()
         };
         let detector = DislocationDetector::new(config).unwrap();
@@ -888,6 +1013,164 @@ mod tests {
         assert!(
             signal.is_some(),
             "Signal should be generated with 12bps threshold (15bps > 12bps)"
+        );
+    }
+
+    // ==========================================
+    // Oracle Direction Filter Tests
+    // ==========================================
+
+    #[test]
+    fn test_oracle_direction_filter_buy_rising() {
+        // Buy signal should be generated when oracle is rising (stale ask)
+        let config = DetectorConfig {
+            slippage_bps: dec!(2),
+            min_edge_bps: dec!(4),
+            oracle_direction_filter: true, // Enable filter
+            ..Default::default()
+        };
+        let detector = DislocationDetector::new(config).unwrap();
+        let key = test_key();
+
+        // First tick: establish baseline oracle at 49900
+        let snapshot1 = make_snapshot(dec!(49900), dec!(49880), dec!(49890));
+        let _ = detector.check(key, &snapshot1, None);
+
+        // Second tick: oracle rises to 50000, ask still at 49940 (stale)
+        // Edge = (50000 - 49940) / 50000 * 10000 = 12 bps
+        let snapshot2 = make_snapshot(dec!(50000), dec!(49920), dec!(49940));
+        let signal = detector.check(key, &snapshot2, None);
+
+        assert!(
+            signal.is_some(),
+            "Buy signal should be generated when oracle is rising"
+        );
+        assert_eq!(signal.unwrap().side, OrderSide::Buy);
+    }
+
+    #[test]
+    fn test_oracle_direction_filter_buy_falling_skipped() {
+        // Buy signal should be skipped when oracle is falling (oracle lag)
+        let config = DetectorConfig {
+            slippage_bps: dec!(2),
+            min_edge_bps: dec!(4),
+            oracle_direction_filter: true, // Enable filter
+            ..Default::default()
+        };
+        let detector = DislocationDetector::new(config).unwrap();
+        let key = test_key();
+
+        // First tick: establish baseline oracle at 50100
+        let snapshot1 = make_snapshot(dec!(50100), dec!(50080), dec!(50090));
+        let _ = detector.check(key, &snapshot1, None);
+
+        // Second tick: oracle falls to 50000, ask at 49940 (looks like edge but oracle lagging)
+        // This is oracle lagging in downtrend - should skip
+        let snapshot2 = make_snapshot(dec!(50000), dec!(49920), dec!(49940));
+        let signal = detector.check(key, &snapshot2, None);
+
+        assert!(
+            signal.is_none(),
+            "Buy signal should be skipped when oracle is falling (oracle lag in downtrend)"
+        );
+    }
+
+    #[test]
+    fn test_oracle_direction_filter_sell_falling() {
+        // Sell signal should be generated when oracle is falling (stale bid)
+        let config = DetectorConfig {
+            slippage_bps: dec!(2),
+            min_edge_bps: dec!(4),
+            oracle_direction_filter: true, // Enable filter
+            ..Default::default()
+        };
+        let detector = DislocationDetector::new(config).unwrap();
+        let key = test_key();
+
+        // First tick: establish baseline oracle at 50100
+        let snapshot1 = make_snapshot(dec!(50100), dec!(50080), dec!(50090));
+        let _ = detector.check(key, &snapshot1, None);
+
+        // Second tick: oracle falls to 50000, bid still at 50060 (stale)
+        // Edge = (50060 - 50000) / 50000 * 10000 = 12 bps
+        let snapshot2 = make_snapshot(dec!(50000), dec!(50060), dec!(50080));
+        let signal = detector.check(key, &snapshot2, None);
+
+        assert!(
+            signal.is_some(),
+            "Sell signal should be generated when oracle is falling"
+        );
+        assert_eq!(signal.unwrap().side, OrderSide::Sell);
+    }
+
+    #[test]
+    fn test_oracle_direction_filter_sell_rising_skipped() {
+        // Sell signal should be skipped when oracle is rising (oracle lag)
+        let config = DetectorConfig {
+            slippage_bps: dec!(2),
+            min_edge_bps: dec!(4),
+            oracle_direction_filter: true, // Enable filter
+            ..Default::default()
+        };
+        let detector = DislocationDetector::new(config).unwrap();
+        let key = test_key();
+
+        // First tick: establish baseline oracle at 49900
+        let snapshot1 = make_snapshot(dec!(49900), dec!(49880), dec!(49890));
+        let _ = detector.check(key, &snapshot1, None);
+
+        // Second tick: oracle rises to 50000, bid at 50060 (looks like edge but oracle lagging)
+        // This is oracle lagging in uptrend - should skip
+        let snapshot2 = make_snapshot(dec!(50000), dec!(50060), dec!(50080));
+        let signal = detector.check(key, &snapshot2, None);
+
+        assert!(
+            signal.is_none(),
+            "Sell signal should be skipped when oracle is rising (oracle lag in uptrend)"
+        );
+    }
+
+    #[test]
+    fn test_oracle_direction_filter_unchanged_skipped() {
+        // Signal should be skipped when oracle is unchanged (first tick or no movement)
+        let config = DetectorConfig {
+            slippage_bps: dec!(2),
+            min_edge_bps: dec!(4),
+            oracle_direction_filter: true, // Enable filter
+            ..Default::default()
+        };
+        let detector = DislocationDetector::new(config).unwrap();
+        let key = test_key();
+
+        // First tick with edge - should be skipped (no previous oracle)
+        let snapshot = make_snapshot(dec!(50000), dec!(49920), dec!(49940));
+        let signal = detector.check(key, &snapshot, None);
+
+        assert!(
+            signal.is_none(),
+            "Signal should be skipped on first tick (no oracle direction)"
+        );
+    }
+
+    #[test]
+    fn test_oracle_direction_filter_disabled() {
+        // When filter is disabled, signals should be generated regardless of direction
+        let config = DetectorConfig {
+            slippage_bps: dec!(2),
+            min_edge_bps: dec!(4),
+            oracle_direction_filter: false, // Disable filter
+            ..Default::default()
+        };
+        let detector = DislocationDetector::new(config).unwrap();
+        let key = test_key();
+
+        // First tick with edge - should NOT be skipped when filter disabled
+        let snapshot = make_snapshot(dec!(50000), dec!(49920), dec!(49940));
+        let signal = detector.check(key, &snapshot, None);
+
+        assert!(
+            signal.is_some(),
+            "Signal should be generated when filter is disabled"
         );
     }
 }

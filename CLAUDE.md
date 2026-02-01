@@ -1,5 +1,20 @@
 # hip3_botv2 Project Configuration
 
+## Trading Philosophy (Core Principle - 絶対遵守)
+
+**戦略の本質:**
+
+> **正しいエッジ**: オラクルが動いた後、マーケットメーカーの注文が追従していない「取り残された流動性」を取る
+
+This is the fundamental edge of HIP-3 strategy:
+- Oracle moves first (price discovery)
+- Market maker quotes lag behind (stale liquidity)
+- We capture the difference before quotes update
+
+**すべての設計・実装判断はこの原則に基づくこと。**
+
+---
+
 ## Plan Mode Settings (MANDATORY)
 
 **⚠️ CRITICAL: These settings MUST be followed without exception.**

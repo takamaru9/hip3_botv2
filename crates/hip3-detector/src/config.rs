@@ -29,6 +29,16 @@ pub struct DetectorConfig {
     /// Between min and normal, sizing is linearly interpolated.
     #[serde(default = "default_normal_book_notional")]
     pub normal_book_notional: Decimal,
+    /// Enable oracle direction filter.
+    ///
+    /// When enabled, signals are only generated when oracle movement
+    /// matches the signal direction:
+    /// - Buy signals: oracle must be rising (stale ask from before oracle rise)
+    /// - Sell signals: oracle must be falling (stale bid from before oracle fall)
+    ///
+    /// This filters out signals caused by oracle lag in trending markets.
+    #[serde(default = "default_oracle_direction_filter")]
+    pub oracle_direction_filter: bool,
 }
 
 fn default_min_order_notional() -> Decimal {
@@ -43,17 +53,22 @@ fn default_normal_book_notional() -> Decimal {
     Decimal::from(5000) // $5000
 }
 
+fn default_oracle_direction_filter() -> bool {
+    true // Enabled by default - only trade stale liquidity, not oracle lag
+}
+
 impl Default for DetectorConfig {
     fn default() -> Self {
         Self {
-            taker_fee_bps: Decimal::from(4),                      // 0.04%
-            slippage_bps: Decimal::from(2),                       // 0.02%
-            min_edge_bps: Decimal::from(5),                       // 0.05% minimum edge
-            sizing_alpha: Decimal::new(10, 2),                    // 0.10 = 10% of top-of-book
-            max_notional: Decimal::from(1000),                    // $1000 max
-            min_order_notional: default_min_order_notional(),     // $11 min order
-            min_book_notional: default_min_book_notional(),       // $500 min
-            normal_book_notional: default_normal_book_notional(), // $5000 normal
+            taker_fee_bps: Decimal::from(4),                            // 0.04%
+            slippage_bps: Decimal::from(2),                             // 0.02%
+            min_edge_bps: Decimal::from(5),                             // 0.05% minimum edge
+            sizing_alpha: Decimal::new(10, 2),                          // 0.10 = 10% of top-of-book
+            max_notional: Decimal::from(1000),                          // $1000 max
+            min_order_notional: default_min_order_notional(),           // $11 min order
+            min_book_notional: default_min_book_notional(),             // $500 min
+            normal_book_notional: default_normal_book_notional(),       // $5000 normal
+            oracle_direction_filter: default_oracle_direction_filter(), // Filter oracle lag
         }
     }
 }

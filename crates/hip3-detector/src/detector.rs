@@ -36,6 +36,15 @@ pub enum OracleDirection {
     Unchanged,
 }
 
+/// Oracle movement data for filtering (direction + magnitude).
+#[derive(Debug, Clone, Copy)]
+struct OracleMovement {
+    /// Direction of oracle movement.
+    direction: OracleDirection,
+    /// Absolute change in basis points.
+    change_bps: Decimal,
+}
+
 /// Dislocation detector.
 ///
 /// Strategy: Enter when best price crosses oracle with edge > (FEE + SLIP + EDGE).
@@ -108,34 +117,53 @@ impl DislocationDetector {
         &self.fee_calculator
     }
 
-    /// Get oracle direction for a market.
+    /// Get oracle direction and change amount for a market.
     ///
-    /// Compares current oracle with previous oracle to determine direction.
+    /// Compares current oracle with previous oracle to determine direction
+    /// and magnitude of movement.
     /// Also updates the previous oracle tracking.
     ///
-    /// Returns:
-    /// - `Rising`: Current oracle > previous oracle
-    /// - `Falling`: Current oracle < previous oracle
-    /// - `Unchanged`: Current oracle == previous oracle, or no previous data
-    fn get_oracle_direction(&self, key: MarketKey, current_oracle: Price) -> OracleDirection {
+    /// Returns OracleMovement with:
+    /// - `direction`: Rising, Falling, or Unchanged
+    /// - `change_bps`: Absolute change in basis points (always positive)
+    fn get_oracle_movement(&self, key: MarketKey, current_oracle: Price) -> OracleMovement {
         let mut prev_map = self.prev_oracle.borrow_mut();
 
-        let direction = if let Some(&prev) = prev_map.get(&key) {
-            if current_oracle.inner() > prev.inner() {
-                OracleDirection::Rising
-            } else if current_oracle.inner() < prev.inner() {
-                OracleDirection::Falling
+        let movement = if let Some(&prev) = prev_map.get(&key) {
+            if prev.is_zero() {
+                OracleMovement {
+                    direction: OracleDirection::Unchanged,
+                    change_bps: Decimal::ZERO,
+                }
             } else {
-                OracleDirection::Unchanged
+                // Calculate change in bps: |current - prev| / prev * 10000
+                let change_bps =
+                    ((current_oracle.inner() - prev.inner()).abs() / prev.inner()) * Decimal::from(10000);
+
+                let direction = if current_oracle.inner() > prev.inner() {
+                    OracleDirection::Rising
+                } else if current_oracle.inner() < prev.inner() {
+                    OracleDirection::Falling
+                } else {
+                    OracleDirection::Unchanged
+                };
+
+                OracleMovement {
+                    direction,
+                    change_bps,
+                }
             }
         } else {
-            OracleDirection::Unchanged
+            OracleMovement {
+                direction: OracleDirection::Unchanged,
+                change_bps: Decimal::ZERO,
+            }
         };
 
         // Update previous oracle for next check
         prev_map.insert(key, current_oracle);
 
-        direction
+        movement
     }
 
     /// Check if oracle direction is compatible with signal side.
@@ -169,17 +197,17 @@ impl DislocationDetector {
         snapshot: &MarketSnapshot,
         threshold_override_bps: Option<Decimal>,
     ) -> Option<DislocationSignal> {
-        // Get oracle direction for filtering
+        // Get oracle movement (direction + change amount) for filtering
         let oracle = snapshot.ctx.oracle.oracle_px;
-        let direction = self.get_oracle_direction(key, oracle);
+        let movement = Self::get_oracle_movement(self, key, oracle);
 
         // Check buy opportunity: ask below oracle
-        if let Some(signal) = self.check_buy(key, snapshot, threshold_override_bps, direction) {
+        if let Some(signal) = self.check_buy(key, snapshot, threshold_override_bps, movement) {
             return Some(signal);
         }
 
         // Check sell opportunity: bid above oracle
-        if let Some(signal) = self.check_sell(key, snapshot, threshold_override_bps, direction) {
+        if let Some(signal) = self.check_sell(key, snapshot, threshold_override_bps, movement) {
             return Some(signal);
         }
 
@@ -192,14 +220,15 @@ impl DislocationDetector {
     ///
     /// P0-24: Uses FeeCalculator with HIP-3 2x multiplier.
     ///
-    /// Oracle Direction Filter: When enabled, only generates signal if oracle
-    /// is rising (stale ask from before oracle rise).
+    /// Oracle Filters (when enabled):
+    /// - Direction: Only generates signal if oracle is rising (stale ask)
+    /// - Velocity: Only generates signal if oracle moved enough (min_oracle_change_bps)
     fn check_buy(
         &self,
         key: MarketKey,
         snapshot: &MarketSnapshot,
         threshold_override_bps: Option<Decimal>,
-        oracle_direction: OracleDirection,
+        oracle_movement: OracleMovement,
     ) -> Option<DislocationSignal> {
         // P0-14: Check if BBO is tradeable
         if !snapshot.is_tradeable() {
@@ -233,14 +262,28 @@ impl DislocationDetector {
         // Oracle Direction Filter: Buy only when oracle is rising (stale ask)
         // This filters out signals caused by oracle lagging in downtrend
         if self.config.oracle_direction_filter
-            && !self.is_direction_compatible(OrderSide::Buy, oracle_direction)
+            && !self.is_direction_compatible(OrderSide::Buy, oracle_movement.direction)
         {
             tracing::debug!(
                 %key,
                 side = "buy",
                 raw_edge_bps = %raw_edge_bps,
-                ?oracle_direction,
+                oracle_direction = ?oracle_movement.direction,
                 "Signal skipped: oracle not rising (oracle lag in downtrend)"
+            );
+            return None;
+        }
+
+        // Oracle Velocity Filter: Skip if oracle movement is too small
+        // Small movements are likely noise, MM will quickly follow
+        if oracle_movement.change_bps < self.config.min_oracle_change_bps {
+            tracing::debug!(
+                %key,
+                side = "buy",
+                raw_edge_bps = %raw_edge_bps,
+                oracle_change_bps = %oracle_movement.change_bps,
+                min_oracle_change_bps = %self.config.min_oracle_change_bps,
+                "Signal skipped: oracle movement too small"
             );
             return None;
         }
@@ -271,7 +314,8 @@ impl DislocationDetector {
             effective_fee_bps = %fee_metadata.effective_taker_fee_bps,
             oracle = %oracle,
             ask = %ask,
-            ?oracle_direction,
+            oracle_direction = ?oracle_movement.direction,
+            oracle_change_bps = %oracle_movement.change_bps,
             "Dislocation detected (P0-24: HIP-3 2x fee applied)"
         );
 
@@ -295,14 +339,15 @@ impl DislocationDetector {
     ///
     /// P0-24: Uses FeeCalculator with HIP-3 2x multiplier.
     ///
-    /// Oracle Direction Filter: When enabled, only generates signal if oracle
-    /// is falling (stale bid from before oracle fall).
+    /// Oracle Filters (when enabled):
+    /// - Direction: Only generates signal if oracle is falling (stale bid)
+    /// - Velocity: Only generates signal if oracle moved enough (min_oracle_change_bps)
     fn check_sell(
         &self,
         key: MarketKey,
         snapshot: &MarketSnapshot,
         threshold_override_bps: Option<Decimal>,
-        oracle_direction: OracleDirection,
+        oracle_movement: OracleMovement,
     ) -> Option<DislocationSignal> {
         // P0-14: Check if BBO is tradeable
         if !snapshot.is_tradeable() {
@@ -336,14 +381,28 @@ impl DislocationDetector {
         // Oracle Direction Filter: Sell only when oracle is falling (stale bid)
         // This filters out signals caused by oracle lagging in uptrend
         if self.config.oracle_direction_filter
-            && !self.is_direction_compatible(OrderSide::Sell, oracle_direction)
+            && !self.is_direction_compatible(OrderSide::Sell, oracle_movement.direction)
         {
             tracing::debug!(
                 %key,
                 side = "sell",
                 raw_edge_bps = %raw_edge_bps,
-                ?oracle_direction,
+                oracle_direction = ?oracle_movement.direction,
                 "Signal skipped: oracle not falling (oracle lag in uptrend)"
+            );
+            return None;
+        }
+
+        // Oracle Velocity Filter: Skip if oracle movement is too small
+        // Small movements are likely noise, MM will quickly follow
+        if oracle_movement.change_bps < self.config.min_oracle_change_bps {
+            tracing::debug!(
+                %key,
+                side = "sell",
+                raw_edge_bps = %raw_edge_bps,
+                oracle_change_bps = %oracle_movement.change_bps,
+                min_oracle_change_bps = %self.config.min_oracle_change_bps,
+                "Signal skipped: oracle movement too small"
             );
             return None;
         }
@@ -374,7 +433,8 @@ impl DislocationDetector {
             effective_fee_bps = %fee_metadata.effective_taker_fee_bps,
             oracle = %oracle,
             bid = %bid,
-            ?oracle_direction,
+            oracle_direction = ?oracle_movement.direction,
+            oracle_change_bps = %oracle_movement.change_bps,
             "Dislocation detected (P0-24: HIP-3 2x fee applied)"
         );
 

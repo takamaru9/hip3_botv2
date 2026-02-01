@@ -405,6 +405,59 @@ Agent definition files: `.claude/agents/*.md`
 
 ---
 
+## xyz Perp Asset ID Reference
+
+### Asset ID Formula
+
+```
+asset_id = 100000 + perp_dex_id × 10000 + index_in_meta
+```
+
+For **xyz** (perp_dex_id = 1):
+```
+asset_id = 100000 + 10000 + index_in_meta = 110000 + index_in_meta
+```
+
+### Getting Market Names and Indices
+
+**API Endpoint (正規ソース - 必ずこれを使用):**
+```bash
+curl -X POST https://api.hyperliquid.xyz/info \
+  -H "Content-Type: application/json" \
+  -d '{"type": "meta", "dex": "xyz"}'
+```
+
+**Response format:**
+```json
+{
+  "universe": [
+    {"name": "xyz:AAPL", ...},   // index 0 → asset_id 110000
+    {"name": "xyz:GOOG", ...},   // index 1 → asset_id 110001
+    ...
+    {"name": "xyz:SILVER", ...}, // index 26 → asset_id 110026
+    ...
+  ]
+}
+```
+
+### Implementation Location
+
+| File | Function | Purpose |
+|------|----------|---------|
+| `crates/hip3-registry/src/client.rs` | `fetch_dex_meta_indices()` | meta(dex=xyz)からindex取得 |
+| `crates/hip3-registry/src/client.rs` | `fetch_perp_dexs()` | 全マーケット情報取得 |
+| `crates/hip3-registry/src/preflight.rs` | `PerpMarketInfo.asset_index` | index格納フィールド |
+
+### ⚠️ Critical Warning
+
+**`perpDexs` API と `meta(dex=xyz)` API は異なる順序でマーケットを返す。**
+
+Asset ID計算には必ず `meta(dex=xyz)` を使用すること。
+
+詳細: `.claude/specs/2026-01-25-xyz-perp-asset-id-fix.md`
+
+---
+
 ## VPS Deployment (Production)
 
 ### Connection Info

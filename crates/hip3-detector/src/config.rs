@@ -39,6 +39,15 @@ pub struct DetectorConfig {
     /// This filters out signals caused by oracle lag in trending markets.
     #[serde(default = "default_oracle_direction_filter")]
     pub oracle_direction_filter: bool,
+    /// Minimum oracle change in basis points to trigger signal.
+    ///
+    /// Only generates signals when oracle has moved at least this much
+    /// since the previous tick. Small oracle movements are likely noise
+    /// or quickly followed by MM quote updates.
+    ///
+    /// Set to 0 to disable (any oracle movement triggers signal).
+    #[serde(default = "default_min_oracle_change_bps")]
+    pub min_oracle_change_bps: Decimal,
 }
 
 fn default_min_order_notional() -> Decimal {
@@ -57,6 +66,10 @@ fn default_oracle_direction_filter() -> bool {
     true // Enabled by default - only trade stale liquidity, not oracle lag
 }
 
+fn default_min_oracle_change_bps() -> Decimal {
+    Decimal::from(3) // 3 bps minimum oracle movement to trigger signal
+}
+
 impl Default for DetectorConfig {
     fn default() -> Self {
         Self {
@@ -69,6 +82,7 @@ impl Default for DetectorConfig {
             min_book_notional: default_min_book_notional(),             // $500 min
             normal_book_notional: default_normal_book_notional(),       // $5000 normal
             oracle_direction_filter: default_oracle_direction_filter(), // Filter oracle lag
+            min_oracle_change_bps: default_min_oracle_change_bps(),     // 3 bps min move
         }
     }
 }

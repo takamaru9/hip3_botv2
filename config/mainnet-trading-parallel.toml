@@ -18,45 +18,49 @@ user_address = "0x0116A3D95994BcC7D6A84380ED6256FBb32cD25D"
 signer_address = "0xbf8e23f88aead1a3b17d1ad39ef766e9f77de281"
 private_key = "0xd7fb667b6c9ecea9d66b6acc1f1d7b15c50dbcb93bff0eeff6a42de957fa155f"
 
-# Trading markets: Data-driven multi-market expansion (2026-02-01)
+# Trading markets: Optimized with Oracle Direction Filter (2026-02-01)
 #
-# Market selection based on observation bot analysis:
-# Score = (count/1000) × avg_edge × (0.5 + balance/200)
+# Oracle direction filter enabled (default=true):
+# - Buy signals: Only when oracle is rising (stale ask)
+# - Sell signals: Only when oracle is falling (stale bid)
+# - Filters out "oracle lag" signals → lower thresholds viable
 #
-# | Market | Signals | AvgEdge | Balance | Score |
-# |--------|---------|---------|---------|-------|
-# | SILVER | 32,120  | 43.02   | 74.2%   | 1204  | ← Best: high volume, balanced
-# | MSTR   | 17,579  | 79.32   | 14.0%   | 795   | ← Highest edge, buy-biased
-# | COPPER | 19,105  | 43.76   | 19.0%   | 497   |
-# | GOLD   | 22,846  | 26.46   | 47.7%   | 447   | ← Second most balanced
-# | COIN   | 11,344  | 62.90   | 15.2%   | 411   |
+# Threshold strategy:
+# - Balanced markets (>40% balance): 25 bps - more signals OK
+# - Biased markets (<20% balance): 30 bps - filter handles bias
 #
-# Note: Oracle direction filter (config.rs) prevents trading against trend
+# | Market | Balance | Type     | Threshold |
+# |--------|---------|----------|-----------|
+# | SILVER | 74.2%   | Balanced | 25 bps    |
+# | GOLD   | 47.7%   | Balanced | 25 bps    |
+# | MSTR   | 14.0%   | Biased   | 30 bps    |
+# | COPPER | 19.0%   | Biased   | 30 bps    |
+# | COIN   | 15.2%   | Biased   | 30 bps    |
 
 [[markets]]
 asset_idx = 110026
 coin = "xyz:SILVER"
-threshold_bps = 35  # Most balanced (74.2%), good edge
+threshold_bps = 25  # Balanced (74.2%) - oracle filter effective
 
 [[markets]]
 asset_idx = 110017
 coin = "xyz:MSTR"
-threshold_bps = 50  # Highest edge (79.32 bps) but buy-biased (14.0%)
+threshold_bps = 30  # Biased (14.0%) - filter removes oracle-lag buys
 
 [[markets]]
 asset_idx = 110030
 coin = "xyz:COPPER"
-threshold_bps = 35  # Similar to SILVER
+threshold_bps = 30  # Biased (19.0%) - conservative with filter
 
 [[markets]]
 asset_idx = 110003
 coin = "xyz:GOLD"
-threshold_bps = 30  # Lower edge (26.46) but decent balance (47.7%)
+threshold_bps = 25  # Balanced (47.7%) - oracle filter effective
 
 [[markets]]
 asset_idx = 110007
 coin = "xyz:COIN"
-threshold_bps = 45  # High edge (62.90) but buy-biased (15.2%)
+threshold_bps = 30  # Biased (15.2%) - filter removes oracle-lag buys
 
 [websocket]
 max_reconnect_attempts = 0

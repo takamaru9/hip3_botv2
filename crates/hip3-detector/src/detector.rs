@@ -620,7 +620,8 @@ mod tests {
         let config = DetectorConfig {
             slippage_bps: dec!(2),
             min_edge_bps: dec!(4),
-            oracle_direction_filter: false, // Disable for this test
+            oracle_direction_filter: false, // Disable direction filter
+            min_oracle_change_bps: dec!(0), // Disable velocity filter
             ..Default::default()
         };
         // Total cost = 4 (effective) + 2 (slip) + 4 (min_edge) = 10 bps
@@ -655,7 +656,8 @@ mod tests {
         let config = DetectorConfig {
             slippage_bps: dec!(2),
             min_edge_bps: dec!(4),
-            oracle_direction_filter: false, // Disable for this test
+            oracle_direction_filter: false, // Disable direction filter
+            min_oracle_change_bps: dec!(0), // Disable velocity filter
             ..Default::default()
         };
         // Total cost = 4 (effective) + 2 (slip) + 4 (min_edge) = 10 bps
@@ -994,7 +996,8 @@ mod tests {
             max_notional: dec!(10000),
             min_book_notional: dec!(500),
             normal_book_notional: dec!(5000),
-            oracle_direction_filter: false, // Disable for this test
+            oracle_direction_filter: false, // Disable direction filter
+            min_oracle_change_bps: dec!(0), // Disable velocity filter
             ..Default::default()
         };
         let detector = DislocationDetector::with_user_fees(config, user_fees).unwrap();
@@ -1045,7 +1048,8 @@ mod tests {
             max_notional: dec!(1000),
             min_book_notional: dec!(100),
             normal_book_notional: dec!(1000),
-            oracle_direction_filter: false, // Disable for this test
+            oracle_direction_filter: false, // Disable direction filter
+            min_oracle_change_bps: dec!(0), // Disable velocity filter
             ..Default::default()
         };
         let detector = DislocationDetector::new(config).unwrap();
@@ -1218,7 +1222,8 @@ mod tests {
         let config = DetectorConfig {
             slippage_bps: dec!(2),
             min_edge_bps: dec!(4),
-            oracle_direction_filter: false, // Disable filter
+            oracle_direction_filter: false, // Disable direction filter
+            min_oracle_change_bps: dec!(0), // Disable velocity filter
             ..Default::default()
         };
         let detector = DislocationDetector::new(config).unwrap();
@@ -1231,6 +1236,121 @@ mod tests {
         assert!(
             signal.is_some(),
             "Signal should be generated when filter is disabled"
+        );
+    }
+
+    // ==========================================
+    // Oracle Velocity Filter Tests
+    // ==========================================
+
+    #[test]
+    fn test_oracle_velocity_filter_sufficient_movement() {
+        // Signal should be generated when oracle moves enough
+        let config = DetectorConfig {
+            slippage_bps: dec!(2),
+            min_edge_bps: dec!(4),
+            oracle_direction_filter: true,
+            min_oracle_change_bps: dec!(5), // 5 bps minimum movement
+            ..Default::default()
+        };
+        let detector = DislocationDetector::new(config).unwrap();
+        let key = test_key();
+
+        // First tick: establish baseline oracle at 49900
+        let snapshot1 = make_snapshot(dec!(49900), dec!(49880), dec!(49890));
+        let _ = detector.check(key, &snapshot1, None);
+
+        // Second tick: oracle rises by 200 bps (49900 -> 50000 = 0.2%)
+        // That's 200 bps > 5 bps min, should pass velocity filter
+        let snapshot2 = make_snapshot(dec!(50000), dec!(49920), dec!(49940));
+        let signal = detector.check(key, &snapshot2, None);
+
+        assert!(
+            signal.is_some(),
+            "Signal should be generated when oracle moves enough (200 bps > 5 bps min)"
+        );
+    }
+
+    #[test]
+    fn test_oracle_velocity_filter_insufficient_movement() {
+        // Signal should be skipped when oracle movement is too small
+        let config = DetectorConfig {
+            slippage_bps: dec!(2),
+            min_edge_bps: dec!(4),
+            oracle_direction_filter: true,
+            min_oracle_change_bps: dec!(10), // 10 bps minimum movement
+            ..Default::default()
+        };
+        let detector = DislocationDetector::new(config).unwrap();
+        let key = test_key();
+
+        // First tick: establish baseline oracle at 49995
+        let snapshot1 = make_snapshot(dec!(49995), dec!(49975), dec!(49985));
+        let _ = detector.check(key, &snapshot1, None);
+
+        // Second tick: oracle rises by only 1 bps (49995 -> 50000 = 0.01%)
+        // That's ~1 bps < 10 bps min, should NOT pass velocity filter
+        // Edge = (50000 - 49940) / 50000 * 10000 = 12 bps (sufficient edge)
+        let snapshot2 = make_snapshot(dec!(50000), dec!(49920), dec!(49940));
+        let signal = detector.check(key, &snapshot2, None);
+
+        assert!(
+            signal.is_none(),
+            "Signal should be skipped when oracle movement too small (1 bps < 10 bps min)"
+        );
+    }
+
+    #[test]
+    fn test_oracle_velocity_filter_zero_disables() {
+        // When min_oracle_change_bps is 0, velocity filter is disabled
+        let config = DetectorConfig {
+            slippage_bps: dec!(2),
+            min_edge_bps: dec!(4),
+            oracle_direction_filter: false, // Disable direction filter too
+            min_oracle_change_bps: dec!(0), // Disable velocity filter
+            ..Default::default()
+        };
+        let detector = DislocationDetector::new(config).unwrap();
+        let key = test_key();
+
+        // First tick with edge - no previous oracle, change_bps = 0
+        // But since min_oracle_change_bps = 0, should still generate signal
+        let snapshot = make_snapshot(dec!(50000), dec!(49920), dec!(49940));
+        let signal = detector.check(key, &snapshot, None);
+
+        assert!(
+            signal.is_some(),
+            "Signal should be generated when velocity filter is disabled (min=0)"
+        );
+    }
+
+    #[test]
+    fn test_oracle_velocity_combined_with_direction() {
+        // Both filters must pass for signal to be generated
+        let config = DetectorConfig {
+            slippage_bps: dec!(2),
+            min_edge_bps: dec!(4),
+            oracle_direction_filter: true,
+            min_oracle_change_bps: dec!(5), // 5 bps minimum
+            ..Default::default()
+        };
+        let detector = DislocationDetector::new(config).unwrap();
+        let key = test_key();
+
+        // First tick: establish baseline
+        let snapshot1 = make_snapshot(dec!(50000), dec!(49980), dec!(49990));
+        let _ = detector.check(key, &snapshot1, None);
+
+        // Second tick: oracle FALLS by 200 bps (50000 -> 49900)
+        // Velocity passes (200 bps > 5 bps)
+        // But for BUY signal, direction is WRONG (falling, not rising)
+        // Ask is below oracle (edge exists), but direction filter should block
+        let snapshot2 = make_snapshot(dec!(49900), dec!(49820), dec!(49840));
+        let signal = detector.check(key, &snapshot2, None);
+
+        assert!(
+            signal.is_none(),
+            "Buy signal should be skipped: velocity OK but direction wrong (falling)"
         );
     }
 }

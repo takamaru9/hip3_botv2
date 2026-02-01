@@ -434,7 +434,16 @@ impl RiskGate {
     ///
     /// Block new orders if BBO update is stale (monotonic age).
     /// This is different from OracleFresh which checks oracle change time.
+    ///
+    /// Set `max_bbo_age_ms = 0` to disable this gate.
+    /// Trading Philosophy: BBO not updating = MM lazy = stale liquidity = edge.
     pub fn check_bbo_update(&self, bbo_age_ms: i64) -> GateResult {
+        // max_bbo_age_ms = 0 means gate is disabled
+        // Rationale: Stale BBO is the edge we want to capture (lazy MM quotes)
+        if self.config.max_bbo_age_ms == 0 {
+            return GateResult::Pass;
+        }
+
         if bbo_age_ms > self.config.max_bbo_age_ms {
             return GateResult::Block(format!(
                 "BBO stale: {}ms > {}ms max (P0-12)",

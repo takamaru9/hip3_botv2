@@ -73,6 +73,9 @@ max_mark_mid_divergence_bps = 50
 spread_shock_multiplier = 3
 min_buffer_ratio = 0.15
 max_oi_fraction = 0.01
+# BBO stale gate disabled: BBOが更新されない = MMが怠惰 = エッジ（Trading Philosophy）
+# WebSocket接続状態は ctx_update (8秒) でカバー
+max_bbo_age_ms = 0
 
 [detector]
 taker_fee_bps = 2              # Actual fee ~0.79 bps, but 2 bps for safety (HIP-3 multiplier applied: 2×2=4)

@@ -144,6 +144,12 @@ impl MarkRegressionMonitor {
             let positions = self.position_handle.positions_snapshot();
 
             for position in positions {
+                // Check if flatten order already pending for this market
+                // This prevents duplicate flatten orders when MarkRegression triggers repeatedly
+                if self.position_handle.is_flattening(&position.market) {
+                    continue;
+                }
+
                 if let Some(edge_bps) = self.check_exit(&position, now_ms) {
                     self.trigger_exit(&position, edge_bps, now_ms).await;
                 }

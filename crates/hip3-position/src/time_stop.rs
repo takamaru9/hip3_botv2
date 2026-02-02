@@ -402,6 +402,16 @@ impl<P: PriceProvider + 'static> TimeStopMonitor<P> {
                     continue;
                 }
 
+                // Check if flatten order already pending for this market
+                // This prevents duplicate flatten orders when TimeStop triggers repeatedly
+                if self.position_handle.is_flattening(&market) {
+                    debug!(
+                        "TimeStop: flatten already in progress for market {}, skipping duplicate",
+                        market
+                    );
+                    continue;
+                }
+
                 // Find the position for this market
                 let Some(position) = positions.iter().find(|p| p.market == market) else {
                     continue;

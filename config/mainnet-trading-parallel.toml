@@ -40,27 +40,27 @@ private_key = "0xd7fb667b6c9ecea9d66b6acc1f1d7b15c50dbcb93bff0eeff6a42de957fa155
 [[markets]]
 asset_idx = 110026
 coin = "xyz:SILVER"
-threshold_bps = 30  # 20 → 30: Real spread cost ~25-30 bps, need wider divergence to profit
+threshold_bps = 40  # 30 → 40: 37 bps signal still lost 11 bps due to actual spread > detected
 
 [[markets]]
 asset_idx = 110017
 coin = "xyz:MSTR"
-threshold_bps = 30  # 20 → 30: Cover round-trip spread cost
+threshold_bps = 40  # 30 → 40: Actual spread + slippage requires higher threshold
 
 [[markets]]
 asset_idx = 110030
 coin = "xyz:COPPER"
-threshold_bps = 30  # 20 → 30: Wider threshold for spread cost coverage
+threshold_bps = 40  # 30 → 40: Wider threshold for real spread cost
 
 [[markets]]
 asset_idx = 110003
 coin = "xyz:GOLD"
-threshold_bps = 30  # 20 → 30: Cover spread cost
+threshold_bps = 40  # 30 → 40: Cover actual spread cost
 
 [[markets]]
 asset_idx = 110007
 coin = "xyz:COIN"
-threshold_bps = 30  # 20 → 30: Cover spread cost
+threshold_bps = 40  # 30 → 40: Cover actual spread cost
 
 [websocket]
 max_reconnect_attempts = 0
@@ -81,8 +81,8 @@ max_bbo_age_ms = 0
 
 [detector]
 taker_fee_bps = 2              # Actual fee ~0.79 bps, but 2 bps for safety (HIP-3 multiplier applied: 2×2=4)
-slippage_bps = 15              # 10 → 15: More realistic based on observed spreads (25-30 bps round-trip)
-min_edge_bps = 20              # 15 → 20: Increased for profit after spread cost
+slippage_bps = 20              # 15 → 20: Actual spread observed is ~20 bps entry + 20 bps exit
+min_edge_bps = 25              # 20 → 25: Require significant edge to overcome spread
 sizing_alpha = 0.10
 max_notional = 50
 min_book_notional = 50

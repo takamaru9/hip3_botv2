@@ -7,6 +7,7 @@
 //! - Long: `best_bid >= oracle * (1 - exit_threshold_bps / 10000)`
 //! - Short: `best_ask <= oracle * (1 + exit_threshold_bps / 10000)`
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use rust_decimal::Decimal;
@@ -14,7 +15,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 use tracing::{debug, info};
 
-use hip3_core::{OrderSide, PendingOrder};
+use hip3_core::{MarketKey, OrderSide, PendingOrder};
 use hip3_feed::MarketState;
 
 use crate::time_stop::FlattenOrderBuilder;
@@ -98,6 +99,12 @@ pub struct MarkRegressionMonitor {
     flatten_tx: mpsc::Sender<PendingOrder>,
     /// Market state for BBO and Oracle data.
     market_state: Arc<MarketState>,
+    /// Local tracking of markets with pending flatten orders.
+    ///
+    /// This provides immediate protection against duplicate flatten orders,
+    /// without waiting for the position tracker to be updated asynchronously.
+    /// Cleared when the market is no longer in positions snapshot.
+    local_flattening: HashSet<MarketKey>,
 }
 
 impl MarkRegressionMonitor {
@@ -114,6 +121,7 @@ impl MarkRegressionMonitor {
             position_handle,
             flatten_tx,
             market_state,
+            local_flattening: HashSet::new(),
         }
     }
 
@@ -121,7 +129,7 @@ impl MarkRegressionMonitor {
     ///
     /// Checks positions every `check_interval_ms` and triggers exit
     /// when BBO returns to Oracle proximity.
-    pub async fn run(self) {
+    pub async fn run(mut self) {
         if !self.config.enabled {
             info!("MarkRegressionMonitor disabled");
             return;
@@ -143,14 +151,26 @@ impl MarkRegressionMonitor {
             let now_ms = chrono::Utc::now().timestamp_millis() as u64;
             let positions = self.position_handle.positions_snapshot();
 
+            // Clean up local_flattening for markets no longer in positions
+            let position_markets: HashSet<MarketKey> = positions.iter().map(|p| p.market).collect();
+            self.local_flattening
+                .retain(|m| position_markets.contains(m));
+
             for position in positions {
-                // Check if flatten order already pending for this market
-                // This prevents duplicate flatten orders when MarkRegression triggers repeatedly
+                // Check local flattening state first (immediate, no async delay)
+                if self.local_flattening.contains(&position.market) {
+                    continue;
+                }
+
+                // Check if flatten order already pending in position tracker
+                // This catches cases where TimeStop sent a flatten
                 if self.position_handle.is_flattening(&position.market) {
                     continue;
                 }
 
                 if let Some(edge_bps) = self.check_exit(&position, now_ms) {
+                    // Mark as flattening BEFORE sending to prevent duplicates
+                    self.local_flattening.insert(position.market);
                     self.trigger_exit(&position, edge_bps, now_ms).await;
                 }
             }

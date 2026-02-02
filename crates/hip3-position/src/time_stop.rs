@@ -8,6 +8,7 @@
 //!
 //! Phase B parameter: TIME_STOP_MS = 30 seconds.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use rust_decimal::Decimal;
@@ -303,6 +304,13 @@ pub struct TimeStopMonitor<P: PriceProvider> {
 
     /// Check interval in milliseconds.
     check_interval_ms: u64,
+
+    /// Local tracking of markets with pending flatten orders.
+    ///
+    /// This provides immediate protection against duplicate flatten orders,
+    /// without waiting for the position tracker to be updated asynchronously.
+    /// Cleared when the market is no longer in positions snapshot.
+    local_flattening: HashSet<MarketKey>,
 }
 
 impl<P: PriceProvider + 'static> TimeStopMonitor<P> {
@@ -331,6 +339,7 @@ impl<P: PriceProvider + 'static> TimeStopMonitor<P> {
             price_provider,
             slippage_bps,
             check_interval_ms,
+            local_flattening: HashSet::new(),
         }
     }
 
@@ -361,7 +370,7 @@ impl<P: PriceProvider + 'static> TimeStopMonitor<P> {
     /// the 60-second timeout threshold.
     ///
     /// This method runs until the flatten channel is closed.
-    pub async fn run(self) {
+    pub async fn run(mut self) {
         info!(
             "TimeStopMonitor started: threshold={}ms, reduce_only_timeout={}ms, interval={}ms",
             self.time_stop.threshold_ms(),
@@ -384,6 +393,12 @@ impl<P: PriceProvider + 'static> TimeStopMonitor<P> {
             // Check for reduce-only order timeout alerts (60s threshold)
             self.check_reduce_only_timeout_alerts(now_ms);
 
+            // Clean up local_flattening for markets no longer in positions
+            // This ensures we don't keep stale entries forever
+            let position_markets: HashSet<MarketKey> = positions.iter().map(|p| p.market).collect();
+            self.local_flattening
+                .retain(|m| position_markets.contains(m));
+
             if positions.is_empty() {
                 continue;
             }
@@ -402,8 +417,17 @@ impl<P: PriceProvider + 'static> TimeStopMonitor<P> {
                     continue;
                 }
 
-                // Check if flatten order already pending for this market
-                // This prevents duplicate flatten orders when TimeStop triggers repeatedly
+                // Check local flattening state first (immediate, no async delay)
+                if self.local_flattening.contains(&market) {
+                    debug!(
+                        "TimeStop: flatten already sent for market {} (local tracking), skipping",
+                        market
+                    );
+                    continue;
+                }
+
+                // Check if flatten order already pending in position tracker
+                // This catches cases where another component (e.g., MarkRegression) sent a flatten
                 if self.position_handle.is_flattening(&market) {
                     debug!(
                         "TimeStop: flatten already in progress for market {}, skipping duplicate",
@@ -435,6 +459,9 @@ impl<P: PriceProvider + 'static> TimeStopMonitor<P> {
                     "TimeStop triggered for market {}: creating flatten order cloid={}, side={:?}, size={}, price={}",
                     market, order.cloid, order.side, order.size, order.price
                 );
+
+                // Mark as flattening BEFORE sending to prevent duplicates in next check cycle
+                self.local_flattening.insert(market);
 
                 // Send flatten order
                 if self.flatten_tx.send(order).await.is_err() {

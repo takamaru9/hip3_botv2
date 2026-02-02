@@ -97,7 +97,7 @@ metrics_port = 9091
 log_level = "debug"
 
 [time_stop]
-threshold_ms = 5000             # 10s → 5s: "取り残された流動性"は一時的、5秒で強制exit
+threshold_ms = 3000             # 5s → 3s: Edge侵食分析でT+3sまでに大半侵食、より早くexit
 reduce_only_timeout_ms = 60000
 check_interval_ms = 500
 slippage_bps = 50

@@ -203,18 +203,24 @@ mod tests {
         let cache = SpecCache::default();
         let key = test_key();
 
-        let mut spec1 = MarketSpec::default();
-        spec1.tick_size = Price::new(dec!(0.01));
+        let spec1 = MarketSpec {
+            tick_size: Price::new(dec!(0.01)),
+            ..Default::default()
+        };
         cache.update(key, spec1).unwrap();
 
         // Same spec should be fine
-        let mut spec2 = MarketSpec::default();
-        spec2.tick_size = Price::new(dec!(0.01));
+        let spec2 = MarketSpec {
+            tick_size: Price::new(dec!(0.01)),
+            ..Default::default()
+        };
         cache.update(key, spec2).unwrap();
 
         // Different tick_size should fail
-        let mut spec3 = MarketSpec::default();
-        spec3.tick_size = Price::new(dec!(0.001));
+        let spec3 = MarketSpec {
+            tick_size: Price::new(dec!(0.001)),
+            ..Default::default()
+        };
         let result = cache.update(key, spec3);
         assert!(result.is_err());
     }

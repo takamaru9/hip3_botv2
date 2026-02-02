@@ -83,18 +83,18 @@ fn test_as_order_update_exact_channel_match() {
         "is_order_updates should match exact channel"
     );
 
-    // as_order_update should successfully parse the payload
-    let payload = msg.as_order_update();
+    // as_order_updates should successfully parse the payload
+    let result = msg.as_order_updates();
     assert!(
-        payload.is_some(),
-        "as_order_update should parse exact channel match"
+        !result.updates.is_empty(),
+        "as_order_updates should parse exact channel match"
     );
 
     // Verify parsed fields
-    let payload = payload.unwrap();
-    assert_eq!(payload.order.coin, "ETH");
-    assert_eq!(payload.order.oid, 12345);
-    assert_eq!(payload.status, "open");
+    assert_eq!(result.failed_count, 0);
+    assert_eq!(result.updates[0].order.coin, "ETH");
+    assert_eq!(result.updates[0].order.oid, 12345);
+    assert_eq!(result.updates[0].status, "open");
 }
 
 /// Test as_order_update with user suffix (legacy format)
@@ -120,16 +120,16 @@ fn test_as_order_update_with_user_suffix() {
     let msg: WsMessage = serde_json::from_str(raw).expect("parse WsMessage");
 
     assert!(msg.is_order_updates());
-    let payload = msg.as_order_update();
+    let result = msg.as_order_updates();
     assert!(
-        payload.is_some(),
-        "as_order_update should parse user suffix format"
+        !result.updates.is_empty(),
+        "as_order_updates should parse user suffix format"
     );
 
     // Verify parsed fields
-    let payload = payload.unwrap();
-    assert_eq!(payload.order.coin, "BTC");
-    assert!(payload.is_terminal(), "filled status should be terminal");
+    assert_eq!(result.failed_count, 0);
+    assert_eq!(result.updates[0].order.coin, "BTC");
+    assert!(result.updates[0].is_terminal(), "filled status should be terminal");
 }
 
 /// Test orderUpdates data message with user suffix

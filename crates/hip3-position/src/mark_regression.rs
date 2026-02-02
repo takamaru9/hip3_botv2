@@ -156,6 +156,21 @@ impl MarkRegressionMonitor {
             self.local_flattening
                 .retain(|m| position_markets.contains(m));
 
+            // Clean up local_flattening for markets where flatten order was rejected
+            // If local_flattening contains a market but is_flattening() returns false,
+            // the flatten order was rejected or cancelled - clear local state to allow retry
+            self.local_flattening.retain(|m| {
+                if self.position_handle.is_flattening(m) {
+                    true // Keep: flatten still in progress
+                } else {
+                    debug!(
+                        "MarkRegression: clearing local_flattening for market {} (flatten order completed or rejected)",
+                        m
+                    );
+                    false // Remove: flatten order no longer pending, allow retry
+                }
+            });
+
             for position in positions {
                 // Check local flattening state first (immediate, no async delay)
                 if self.local_flattening.contains(&position.market) {

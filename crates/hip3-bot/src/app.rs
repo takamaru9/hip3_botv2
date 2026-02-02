@@ -2093,10 +2093,11 @@ mod tests {
 
     /// Helper to create a minimal config for testing.
     fn test_config_with_markets(markets: Vec<MarketConfig>) -> AppConfig {
-        let mut config = AppConfig::default();
-        config.mode = OperatingMode::Observation;
-        config.markets = Some(markets);
-        config
+        AppConfig {
+            mode: OperatingMode::Observation,
+            markets: Some(markets),
+            ..Default::default()
+        }
     }
 
     /// Test coin_to_market with full match.

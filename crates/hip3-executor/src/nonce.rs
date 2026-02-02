@@ -384,7 +384,7 @@ mod tests {
 
         // Initial nonces should be around BASE_TIME
         let n1 = manager.next();
-        assert!(n1 >= BASE_TIME && n1 < BASE_TIME + 100);
+        assert!((BASE_TIME..BASE_TIME + 100).contains(&n1));
 
         // Advance clock by 5 seconds
         manager.clock.advance(5000);

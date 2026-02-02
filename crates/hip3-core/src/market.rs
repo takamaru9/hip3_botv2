@@ -564,15 +564,22 @@ mod tests {
 
     #[test]
     fn test_tick_decimals() {
-        let mut spec = MarketSpec::default();
-
-        spec.tick_size = Price::new(dec!(0.01));
+        let spec = MarketSpec {
+            tick_size: Price::new(dec!(0.01)),
+            ..Default::default()
+        };
         assert_eq!(spec.tick_decimals(), 2);
 
-        spec.tick_size = Price::new(dec!(0.0001));
+        let spec = MarketSpec {
+            tick_size: Price::new(dec!(0.0001)),
+            ..Default::default()
+        };
         assert_eq!(spec.tick_decimals(), 4);
 
-        spec.tick_size = Price::new(dec!(1));
+        let spec = MarketSpec {
+            tick_size: Price::new(dec!(1)),
+            ..Default::default()
+        };
         assert_eq!(spec.tick_decimals(), 0);
     }
 

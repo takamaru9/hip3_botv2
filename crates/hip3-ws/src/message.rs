@@ -1144,9 +1144,11 @@ mod tests {
         let msg: WsMessage = serde_json::from_value(json).unwrap();
         assert!(msg.is_order_updates());
 
-        let update = msg.as_order_update().unwrap();
-        assert_eq!(update.order.oid, 555);
-        assert!(update.is_terminal());
+        let result = msg.as_order_updates();
+        assert!(!result.updates.is_empty());
+        assert_eq!(result.failed_count, 0);
+        assert_eq!(result.updates[0].order.oid, 555);
+        assert!(result.updates[0].is_terminal());
     }
 
     #[test]

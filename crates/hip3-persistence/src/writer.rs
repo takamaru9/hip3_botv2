@@ -432,7 +432,7 @@ mod tests {
         // Read and verify
         let file = File::open(entries[0].path()).unwrap();
         let reader = BufReader::new(file);
-        let lines: Vec<_> = reader.lines().filter_map(|l| l.ok()).collect();
+        let lines: Vec<_> = reader.lines().map_while(Result::ok).collect();
 
         assert_eq!(lines.len(), 5);
 
@@ -472,7 +472,7 @@ mod tests {
 
         let file = File::open(entries[0].path()).unwrap();
         let reader = BufReader::new(file);
-        let lines: Vec<_> = reader.lines().filter_map(|l| l.ok()).collect();
+        let lines: Vec<_> = reader.lines().map_while(Result::ok).collect();
 
         assert_eq!(lines.len(), 6, "Should have 6 records total from 2 writes");
     }
@@ -499,7 +499,7 @@ mod tests {
 
         let file = File::open(entries[0].path()).unwrap();
         let reader = BufReader::new(file);
-        let lines: Vec<_> = reader.lines().filter_map(|l| l.ok()).collect();
+        let lines: Vec<_> = reader.lines().map_while(Result::ok).collect();
 
         assert_eq!(lines.len(), 15);
     }

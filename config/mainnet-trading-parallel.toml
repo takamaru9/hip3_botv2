@@ -40,27 +40,27 @@ private_key = "0xd7fb667b6c9ecea9d66b6acc1f1d7b15c50dbcb93bff0eeff6a42de957fa155
 [[markets]]
 asset_idx = 110026
 coin = "xyz:SILVER"
-threshold_bps = 25  # Balanced (74.2%) - oracle filter effective
+threshold_bps = 20  # Trading Philosophy: Capture stranded liquidity (net edge ~6 bps after costs)
 
 [[markets]]
 asset_idx = 110017
 coin = "xyz:MSTR"
-threshold_bps = 30  # Biased (14.0%) - filter removes oracle-lag buys
+threshold_bps = 20  # Trading Philosophy: 20 bps - 14 bps costs = 6 bps net edge
 
 [[markets]]
 asset_idx = 110030
 coin = "xyz:COPPER"
-threshold_bps = 30  # Biased (19.0%) - conservative with filter
+threshold_bps = 20  # Trading Philosophy: Oracle filter handles quality control
 
 [[markets]]
 asset_idx = 110003
 coin = "xyz:GOLD"
-threshold_bps = 25  # Balanced (47.7%) - oracle filter effective
+threshold_bps = 20  # Trading Philosophy: Capture stranded liquidity
 
 [[markets]]
 asset_idx = 110007
 coin = "xyz:COIN"
-threshold_bps = 30  # Biased (15.2%) - filter removes oracle-lag buys
+threshold_bps = 20  # Trading Philosophy: Don't miss stranded liquidity
 
 [websocket]
 max_reconnect_attempts = 0

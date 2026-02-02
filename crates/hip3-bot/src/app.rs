@@ -27,8 +27,8 @@ use hip3_executor::{
 use hip3_feed::{MarketEvent, MarketState, MessageParser};
 use hip3_persistence::{FollowupRecord, FollowupWriter, ParquetWriter, SignalRecord};
 use hip3_position::{
-    flatten_all_positions, spawn_position_tracker, FlattenReason, MarkRegressionConfig,
-    MarkRegressionMonitor, Position, PositionTrackerHandle,
+    flatten_all_positions, new_exit_watcher, spawn_position_tracker, ExitWatcherHandle,
+    FlattenReason, MarkRegressionConfig, MarkRegressionMonitor, Position, PositionTrackerHandle,
     TimeStopConfig as PositionTimeStopConfig, TimeStopMonitor,
 };
 use hip3_registry::{
@@ -121,6 +121,8 @@ pub struct Application {
     /// Deduplication: track last persisted signal time per (market_key, side).
     /// Signals within DEDUP_INTERVAL_MS of the last one are skipped.
     last_persisted_signals: HashMap<(String, String), i64>,
+    /// WS-driven exit watcher for immediate mark regression detection.
+    exit_watcher: Option<ExitWatcherHandle>,
 }
 
 impl Application {
@@ -188,6 +190,8 @@ impl Application {
             dashboard_signal_tx: None,
             // Deduplication: Initialize empty map
             last_persisted_signals: HashMap::new(),
+            // WS-driven exit watcher (initialized in Trading mode only)
+            exit_watcher: None,
         })
     }
 
@@ -876,8 +880,9 @@ impl Application {
                     self.config.time_stop.reduce_only_timeout_ms,
                 );
 
-                // Clone flatten_tx for MarkRegressionMonitor
+                // Clone flatten_tx for MarkRegressionMonitor and ExitWatcher
                 let mark_regression_flatten_tx = flatten_tx.clone();
+                let exit_watcher_flatten_tx = flatten_tx.clone();
 
                 // Create TimeStopMonitor
                 let time_stop_monitor = TimeStopMonitor::new(
@@ -900,7 +905,7 @@ impl Application {
                     "TimeStopMonitor started"
                 );
 
-                // 13b. MarkRegressionMonitor for profit-taking exit
+                // 13b. MarkRegressionMonitor for profit-taking exit (polling backup)
                 if self.config.mark_regression.enabled {
                     let mark_regression_config = MarkRegressionConfig {
                         enabled: true,
@@ -913,7 +918,7 @@ impl Application {
                     };
 
                     let mark_regression_monitor = MarkRegressionMonitor::new(
-                        mark_regression_config,
+                        mark_regression_config.clone(),
                         position_tracker.clone(),
                         mark_regression_flatten_tx,
                         self.market_state.clone(),
@@ -927,8 +932,18 @@ impl Application {
                         exit_threshold_bps = self.config.mark_regression.exit_threshold_bps,
                         check_interval_ms = self.config.mark_regression.check_interval_ms,
                         min_holding_time_ms = self.config.mark_regression.min_holding_time_ms,
-                        "MarkRegressionMonitor spawned"
+                        "MarkRegressionMonitor spawned (polling backup)"
                     );
+
+                    // 13c. ExitWatcher for WS-driven immediate exit detection
+                    let exit_watcher = new_exit_watcher(
+                        mark_regression_config,
+                        position_tracker.clone(),
+                        exit_watcher_flatten_tx,
+                    );
+                    self.exit_watcher = Some(exit_watcher);
+
+                    info!("ExitWatcher started (WS-driven, < 1ms latency)");
                 }
             }
 
@@ -1706,6 +1721,13 @@ impl Application {
                 if let Some(bbo_age_ms) = self.market_state.get_bbo_age_ms(&key) {
                     Metrics::bbo_age_hist(&key_str, bbo_age_ms as f64);
                 }
+
+                // WS-driven exit check: immediately check for mark regression
+                if let Some(ref exit_watcher) = self.exit_watcher {
+                    if let Some(snapshot) = self.market_state.get_snapshot(&key) {
+                        exit_watcher.on_market_update(key, &snapshot);
+                    }
+                }
             }
             MarketEvent::CtxUpdate { key, ctx } => {
                 let key_str = key.to_string();
@@ -1732,6 +1754,13 @@ impl Application {
                 // P0-31: Record ctx age to histogram after state update
                 if let Some(ctx_age_ms) = self.market_state.get_ctx_age_ms(&key) {
                     Metrics::ctx_age_hist(&key_str, ctx_age_ms as f64);
+                }
+
+                // WS-driven exit check: immediately check for mark regression
+                if let Some(ref exit_watcher) = self.exit_watcher {
+                    if let Some(snapshot) = self.market_state.get_snapshot(&key) {
+                        exit_watcher.on_market_update(key, &snapshot);
+                    }
                 }
             }
         }

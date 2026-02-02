@@ -805,6 +805,15 @@ impl PositionTrackerHandle {
         self.pending_orders_snapshot.get(cloid).map(|r| r.0)
     }
 
+    /// Get the position for a market.
+    ///
+    /// Returns `None` if no position exists for the market.
+    /// Used by ExitWatcher for WS-driven exit checks.
+    #[must_use]
+    pub fn get_position(&self, market: &MarketKey) -> Option<Position> {
+        self.positions_data.get(market).map(|r| r.clone())
+    }
+
     /// Get the notional value of the position for a market.
     #[must_use]
     pub fn get_notional(&self, market: &MarketKey, mark_px: Price) -> Size {

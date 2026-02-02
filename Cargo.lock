@@ -2116,6 +2116,7 @@ dependencies = [
  "dashmap",
  "hip3-core",
  "hip3-feed",
+ "parking_lot",
  "rust_decimal",
  "rust_decimal_macros",
  "serde",

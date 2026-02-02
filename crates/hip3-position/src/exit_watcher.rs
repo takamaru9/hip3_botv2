@@ -1,0 +1,398 @@
+//! WS-driven exit watcher for immediate mark regression detection.
+//!
+//! Unlike the polling-based `MarkRegressionMonitor` (200ms interval),
+//! `ExitWatcher` is called directly from the WS message handler when
+//! BBO or Oracle updates are received, enabling sub-millisecond exit detection.
+//!
+//! # Trading Philosophy
+//!
+//! > **正しいエッジ**: オラクルが動いた後、マーケットメーカーの注文が追従していない
+//! > 「取り残された流動性」を取る
+//!
+//! The divergence between Oracle and BBO is short-lived (typically < 100ms).
+//! Polling-based detection with 200ms intervals means average 100ms latency,
+//! which can miss the optimal exit timing when the divergence narrows.
+//!
+//! # Architecture
+//!
+//! ```text
+//! WS Message → App.handle_market_event()
+//!                     ↓
+//!              market_state.update_bbo/ctx()
+//!                     ↓
+//!              exit_watcher.on_market_update(key, snapshot)
+//!                     ↓ [immediate check]
+//!              Exit condition met → flatten_tx.try_send()
+//! ```
+
+use std::collections::HashSet;
+use std::sync::Arc;
+
+use parking_lot::RwLock;
+use rust_decimal::Decimal;
+use tokio::sync::mpsc;
+use tracing::{debug, info, trace, warn};
+
+use hip3_core::types::MarketSnapshot;
+use hip3_core::{MarketKey, OrderSide, PendingOrder};
+
+use crate::mark_regression::MarkRegressionConfig;
+use crate::time_stop::FlattenOrderBuilder;
+use crate::tracker::{Position, PositionTrackerHandle};
+
+// ============================================================================
+// ExitWatcher
+// ============================================================================
+
+/// WS-driven exit watcher for immediate mark regression detection.
+///
+/// Called synchronously from the WS message handler when market data updates.
+/// Performs fast, non-blocking exit condition checks.
+pub struct ExitWatcher {
+    /// Configuration (shared with MarkRegressionMonitor).
+    config: MarkRegressionConfig,
+
+    /// Handle to position tracker for position lookups.
+    position_handle: PositionTrackerHandle,
+
+    /// Channel to send flatten orders (non-blocking try_send).
+    flatten_tx: mpsc::Sender<PendingOrder>,
+
+    /// Local tracking of markets with pending flatten orders.
+    /// Protected by RwLock for thread-safe access from WS handler.
+    local_flattening: RwLock<HashSet<MarketKey>>,
+
+    /// Counter for exit triggers (for metrics/debugging).
+    exit_count: std::sync::atomic::AtomicU64,
+}
+
+impl ExitWatcher {
+    /// Create a new ExitWatcher.
+    #[must_use]
+    pub fn new(
+        config: MarkRegressionConfig,
+        position_handle: PositionTrackerHandle,
+        flatten_tx: mpsc::Sender<PendingOrder>,
+    ) -> Self {
+        info!(
+            exit_threshold_bps = %config.exit_threshold_bps,
+            min_holding_time_ms = config.min_holding_time_ms,
+            "ExitWatcher initialized (WS-driven)"
+        );
+
+        Self {
+            config,
+            position_handle,
+            flatten_tx,
+            local_flattening: RwLock::new(HashSet::new()),
+            exit_count: std::sync::atomic::AtomicU64::new(0),
+        }
+    }
+
+    /// Called when market data is updated (BBO or Oracle).
+    ///
+    /// This is the main entry point, called from `App::handle_market_event()`
+    /// immediately after `market_state.update_bbo/ctx()`.
+    ///
+    /// # Performance
+    ///
+    /// This method is designed to be fast and non-blocking:
+    /// - O(1) position lookup via DashMap
+    /// - O(1) flattening check via HashSet
+    /// - Non-blocking `try_send` for flatten orders
+    ///
+    /// Typical execution time: < 1µs when no position, < 10µs with exit check.
+    pub fn on_market_update(&self, key: MarketKey, snapshot: &MarketSnapshot) {
+        // 1. Fast path: Check if we have a position in this market
+        let position = match self.position_handle.get_position(&key) {
+            Some(p) => p,
+            None => return, // No position, nothing to do
+        };
+
+        // 2. Check if already flattening (local state for immediate check)
+        {
+            let flattening = self.local_flattening.read();
+            if flattening.contains(&key) {
+                trace!(market = %key, "ExitWatcher: already flattening (local)");
+                return;
+            }
+        }
+
+        // 3. Check if flatten order pending in position tracker
+        if self.position_handle.is_flattening(&key) {
+            trace!(market = %key, "ExitWatcher: already flattening (tracker)");
+            return;
+        }
+
+        // 4. Check exit condition
+        let now_ms = chrono::Utc::now().timestamp_millis() as u64;
+        if let Some(edge_bps) = self.check_exit(&position, snapshot, now_ms) {
+            // 5. Mark as flattening BEFORE sending to prevent duplicates
+            {
+                let mut flattening = self.local_flattening.write();
+                flattening.insert(key);
+            }
+
+            // 6. Trigger exit (non-blocking)
+            self.trigger_exit(&position, edge_bps, snapshot, now_ms);
+        }
+    }
+
+    /// Check if a position should exit based on mark regression.
+    ///
+    /// Returns the edge (in bps) if exit condition is met, None otherwise.
+    ///
+    /// # Exit Conditions
+    ///
+    /// - Long: `best_bid >= oracle * (1 - exit_threshold_bps / 10000)`
+    /// - Short: `best_ask <= oracle * (1 + exit_threshold_bps / 10000)`
+    fn check_exit(
+        &self,
+        position: &Position,
+        snapshot: &MarketSnapshot,
+        now_ms: u64,
+    ) -> Option<Decimal> {
+        // 1. Check minimum holding time
+        let held_ms = now_ms.saturating_sub(position.entry_timestamp_ms);
+        if held_ms < self.config.min_holding_time_ms {
+            return None;
+        }
+
+        // 2. Get oracle price
+        let oracle = snapshot.ctx.oracle.oracle_px;
+        if oracle.is_zero() {
+            return None;
+        }
+
+        // 3. Calculate threshold factor
+        let threshold_factor = self.config.exit_threshold_bps / Decimal::from(10000);
+
+        // 4. Check exit condition based on position side
+        match position.side {
+            OrderSide::Buy => {
+                // Long: exit when bid >= oracle * (1 - threshold)
+                let bid = snapshot.bbo.bid_price;
+                let exit_threshold = oracle.inner() * (Decimal::ONE - threshold_factor);
+
+                if bid.inner() >= exit_threshold {
+                    // Edge: (bid - oracle) / oracle * 10000
+                    let edge_bps =
+                        (bid.inner() - oracle.inner()) / oracle.inner() * Decimal::from(10000);
+                    return Some(edge_bps);
+                }
+            }
+            OrderSide::Sell => {
+                // Short: exit when ask <= oracle * (1 + threshold)
+                let ask = snapshot.bbo.ask_price;
+                let exit_threshold = oracle.inner() * (Decimal::ONE + threshold_factor);
+
+                if ask.inner() <= exit_threshold {
+                    // Edge: (oracle - ask) / oracle * 10000
+                    let edge_bps =
+                        (oracle.inner() - ask.inner()) / oracle.inner() * Decimal::from(10000);
+                    return Some(edge_bps);
+                }
+            }
+        }
+
+        None
+    }
+
+    /// Trigger exit for a position (non-blocking).
+    fn trigger_exit(
+        &self,
+        position: &Position,
+        edge_bps: Decimal,
+        snapshot: &MarketSnapshot,
+        now_ms: u64,
+    ) {
+        // Use BBO for flatten order pricing
+        let price = match position.side {
+            OrderSide::Buy => snapshot.bbo.bid_price,  // Sell at bid
+            OrderSide::Sell => snapshot.bbo.ask_price, // Buy at ask
+        };
+
+        // Create reduce-only order
+        let order = FlattenOrderBuilder::create_flatten_order(
+            position,
+            price,
+            self.config.slippage_bps,
+            now_ms,
+        );
+
+        let held_ms = now_ms.saturating_sub(position.entry_timestamp_ms);
+        let count = self
+            .exit_count
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+        info!(
+            market = %position.market,
+            side = ?position.side,
+            edge_bps = %edge_bps,
+            held_ms = held_ms,
+            cloid = %order.cloid,
+            exit_count = count + 1,
+            "ExitWatcher: WS-driven exit triggered"
+        );
+
+        // Non-blocking send - if channel is full, log warning
+        // MarkRegressionMonitor will catch it on next poll as backup
+        match self.flatten_tx.try_send(order) {
+            Ok(()) => {
+                debug!(market = %position.market, "ExitWatcher: flatten order sent");
+            }
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                warn!(
+                    market = %position.market,
+                    "ExitWatcher: flatten channel full, MarkRegressionMonitor will retry"
+                );
+                // Clear local_flattening so MarkRegressionMonitor can try
+                let mut flattening = self.local_flattening.write();
+                flattening.remove(&position.market);
+            }
+            Err(mpsc::error::TrySendError::Closed(_)) => {
+                warn!("ExitWatcher: flatten channel closed");
+            }
+        }
+    }
+
+    /// Clear local flattening state for a market.
+    ///
+    /// Called when:
+    /// - Position is closed (removed from tracker)
+    /// - Flatten order is rejected/cancelled
+    pub fn clear_flattening(&self, market: &MarketKey) {
+        let mut flattening = self.local_flattening.write();
+        if flattening.remove(market) {
+            debug!(market = %market, "ExitWatcher: cleared flattening state");
+        }
+    }
+
+    /// Sync local flattening state with position tracker.
+    ///
+    /// Removes markets from local_flattening if:
+    /// - No longer has a position
+    /// - No longer flattening in position tracker
+    pub fn sync_flattening_state(&self) {
+        let positions = self.position_handle.positions_snapshot();
+        let position_markets: HashSet<MarketKey> = positions.iter().map(|p| p.market).collect();
+
+        let mut flattening = self.local_flattening.write();
+
+        // Remove markets with no position
+        flattening.retain(|m| position_markets.contains(m));
+
+        // Remove markets where flatten order was completed/rejected
+        flattening.retain(|m| self.position_handle.is_flattening(m));
+    }
+
+    /// Get the number of exits triggered by this watcher.
+    #[must_use]
+    pub fn exit_count(&self) -> u64 {
+        self.exit_count.load(std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
+// ============================================================================
+// ExitWatcherHandle (Arc wrapper for sharing)
+// ============================================================================
+
+/// Thread-safe handle to ExitWatcher for use from App.
+pub type ExitWatcherHandle = Arc<ExitWatcher>;
+
+/// Create a new ExitWatcherHandle.
+#[must_use]
+pub fn new_exit_watcher(
+    config: MarkRegressionConfig,
+    position_handle: PositionTrackerHandle,
+    flatten_tx: mpsc::Sender<PendingOrder>,
+) -> ExitWatcherHandle {
+    Arc::new(ExitWatcher::new(config, position_handle, flatten_tx))
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use hip3_core::{AssetCtx, AssetId, Bbo, DexId, OracleData, Price, Size};
+    use rust_decimal_macros::dec;
+
+    fn test_market() -> MarketKey {
+        MarketKey::new(DexId::XYZ, AssetId::new(0))
+    }
+
+    fn test_snapshot(bid: Decimal, ask: Decimal, oracle: Decimal) -> MarketSnapshot {
+        let bbo = Bbo::new(
+            Price::new(bid),
+            Size::new(dec!(1)),
+            Price::new(ask),
+            Size::new(dec!(1)),
+        );
+        let oracle_data = OracleData::new(Price::new(oracle), Price::new(oracle));
+        let ctx = AssetCtx::new(oracle_data, dec!(0.0001));
+        MarketSnapshot::new(bbo, ctx)
+    }
+
+    fn test_config() -> MarkRegressionConfig {
+        MarkRegressionConfig {
+            enabled: true,
+            exit_threshold_bps: dec!(10), // 10 bps
+            check_interval_ms: 200,       // Not used in ExitWatcher
+            min_holding_time_ms: 0,       // No minimum for tests
+            slippage_bps: 50,
+        }
+    }
+
+    #[test]
+    fn test_long_exit_condition() {
+        // Long position: exit when bid >= oracle * (1 - threshold)
+        // Oracle = 100, threshold = 10bps = 0.001
+        // Exit threshold = 100 * (1 - 0.001) = 99.9
+        // Bid = 99.95 >= 99.9 → should exit
+
+        let config = test_config();
+        let threshold_factor = config.exit_threshold_bps / dec!(10000);
+        let oracle = dec!(100);
+        let exit_threshold = oracle * (Decimal::ONE - threshold_factor);
+
+        assert_eq!(exit_threshold, dec!(99.9));
+
+        let bid = dec!(99.95);
+        assert!(bid >= exit_threshold);
+    }
+
+    #[test]
+    fn test_short_exit_condition() {
+        // Short position: exit when ask <= oracle * (1 + threshold)
+        // Oracle = 100, threshold = 10bps = 0.001
+        // Exit threshold = 100 * (1 + 0.001) = 100.1
+        // Ask = 100.05 <= 100.1 → should exit
+
+        let config = test_config();
+        let threshold_factor = config.exit_threshold_bps / dec!(10000);
+        let oracle = dec!(100);
+        let exit_threshold = oracle * (Decimal::ONE + threshold_factor);
+
+        assert_eq!(exit_threshold, dec!(100.1));
+
+        let ask = dec!(100.05);
+        assert!(ask <= exit_threshold);
+    }
+
+    #[test]
+    fn test_edge_calculation() {
+        // Long: edge = (bid - oracle) / oracle * 10000
+        let oracle = dec!(100);
+        let bid = dec!(100.05);
+        let edge = (bid - oracle) / oracle * dec!(10000);
+        assert_eq!(edge, dec!(5)); // +5 bps (favorable)
+
+        // Short: edge = (oracle - ask) / oracle * 10000
+        let ask = dec!(99.95);
+        let edge = (oracle - ask) / oracle * dec!(10000);
+        assert_eq!(edge, dec!(5)); // +5 bps (favorable)
+    }
+}

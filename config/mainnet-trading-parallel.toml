@@ -126,7 +126,7 @@ position_resync_interval_secs = 60
 
 [position.dynamic_sizing]
 enabled = true
-risk_per_market_pct = 0.10  # 10% of account balance per market
+risk_per_market_pct = 1.0  # 100% of balance allowed per market (limited by max_notional_per_market)
 
 [dashboard]
 enabled = true

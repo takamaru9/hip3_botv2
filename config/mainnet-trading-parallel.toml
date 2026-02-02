@@ -104,7 +104,7 @@ slippage_bps = 50
 
 [mark_regression]
 enabled = true
-exit_threshold_bps = 15         # 10 → 15 bps: 緩和してTimeStopより先の発火を促進（ASKがoracle+15bps以内で発火）
+exit_threshold_bps = 20         # 15 → 20 bps: ASKがoracle+20bps以内で発火（TimeStop前にexit機会を増やす）
 check_interval_ms = 100         # より頻繁にチェックしてexit機会を逃さない
 min_holding_time_ms = 300       # さらに早期exitを許可（edge erosion対策）
 slippage_bps = 50

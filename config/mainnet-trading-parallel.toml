@@ -92,7 +92,7 @@ buffer_size = 10
 
 [telemetry]
 metrics_port = 9091
-log_level = "info"
+log_level = "debug"
 
 [time_stop]
 threshold_ms = 10000            # 15s → 10s: Faster exit (>15s has -8.35 bps loss)

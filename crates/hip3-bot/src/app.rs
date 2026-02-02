@@ -32,7 +32,8 @@ use hip3_position::{
     TimeStopConfig as PositionTimeStopConfig, TimeStopMonitor,
 };
 use hip3_registry::{
-    validate_market_keys, MetaClient, PerpDexsResponse, PreflightChecker, RawPerpSpec, SpecCache,
+    validate_market_keys, ClearinghouseStateResponse, MetaClient, PerpDexsResponse,
+    PreflightChecker, RawPerpSpec, SpecCache,
 };
 use hip3_risk::{RiskError, RiskGate};
 use hip3_telemetry::{DailyStatsReporter, Metrics};
@@ -423,6 +424,26 @@ impl Application {
         self.xyz_dex_id.unwrap_or(DexId::XYZ)
     }
 
+    /// Extract balance from clearinghouse state response.
+    ///
+    /// Tries margin_summary first, then cross_margin_summary.
+    /// Returns Decimal::ZERO if neither is available.
+    fn extract_balance_from_state(state: &ClearinghouseStateResponse) -> Decimal {
+        // Try margin_summary first
+        if let Some(ref margin_summary) = state.margin_summary {
+            if let Ok(balance) = margin_summary.account_value_decimal() {
+                return balance;
+            }
+        }
+        // Fallback to cross_margin_summary
+        if let Some(ref cross_margin) = state.cross_margin_summary {
+            if let Ok(balance) = cross_margin.account_value_decimal() {
+                return balance;
+            }
+        }
+        Decimal::ZERO
+    }
+
     /// Sync positions from Hyperliquid clearinghouseState API.
     ///
     /// Called at startup to initialize PositionTracker with current positions.
@@ -430,10 +451,10 @@ impl Application {
     /// This prevents stale position state after bot restart.
     ///
     /// # Balance Query Strategy
-    /// HIP-3 perps automatically use L1 Perp collateral (not xyz-specific balance).
-    /// Therefore, we query:
-    /// 1. L1 Perp balance (without dex param) for position sizing
-    /// 2. xyz positions (with dex param) for position sync
+    /// When trading on xyz DEX, funds automatically transfer between L1 and xyz.
+    /// We query both and sum the balances to get the total available:
+    /// 1. L1 Perp balance (without dex param)
+    /// 2. xyz balance + positions (with dex param)
     async fn sync_positions_from_api(
         &self,
         position_tracker: &PositionTrackerHandle,
@@ -445,8 +466,6 @@ impl Application {
             .map_err(|e| AppError::Executor(format!("Failed to create HTTP client: {e}")))?;
 
         // Step 1: Fetch L1 Perp balance (without dex param)
-        // HIP-3 trades automatically use L1 Perp collateral, so we need L1 balance for sizing.
-        // Querying with dex="xyz" returns $0 (xyz-specific balance), not the usable L1 balance.
         let l1_state = client
             .fetch_clearinghouse_state(user_address, None)
             .await
@@ -454,33 +473,10 @@ impl Application {
                 AppError::Executor(format!("Failed to fetch L1 clearinghouseState: {e}"))
             })?;
 
-        // Update account balance from L1 Perp margin summary (for dynamic position sizing)
-        if let Some(ref margin_summary) = l1_state.margin_summary {
-            match margin_summary.account_value_decimal() {
-                Ok(balance) => {
-                    info!(account_balance = %balance, "Updating account balance from L1 Perp API");
-                    position_tracker.update_balance(balance);
-                }
-                Err(e) => {
-                    warn!(error = ?e, "Failed to parse account_value from margin_summary");
-                }
-            }
-        } else if let Some(ref cross_margin) = l1_state.cross_margin_summary {
-            // Fallback to cross margin summary if margin summary not available
-            match cross_margin.account_value_decimal() {
-                Ok(balance) => {
-                    info!(account_balance = %balance, "Updating account balance from L1 cross margin API");
-                    position_tracker.update_balance(balance);
-                }
-                Err(e) => {
-                    warn!(error = ?e, "Failed to parse account_value from cross_margin_summary");
-                }
-            }
-        } else {
-            warn!("No margin summary available in L1 clearinghouseState response");
-        }
+        // Extract L1 balance
+        let l1_balance = Self::extract_balance_from_state(&l1_state);
 
-        // Step 2: Fetch xyz positions (with dex param)
+        // Step 2: Fetch xyz state (with dex param) - for both balance AND positions
         // BUG-005: Pass dex name to fetch perpDex positions.
         // Without this, only L1 perp positions are returned (not xyz perpDex positions).
         let dex_name = Some(self.config.xyz_pattern.as_str());
@@ -490,6 +486,19 @@ impl Application {
             .map_err(|e| {
                 AppError::Executor(format!("Failed to fetch xyz clearinghouseState: {e}"))
             })?;
+
+        // Extract xyz balance
+        let xyz_balance = Self::extract_balance_from_state(&state);
+
+        // Total balance = L1 + xyz (funds automatically transfer between them)
+        let total_balance = l1_balance + xyz_balance;
+        info!(
+            l1_balance = %l1_balance,
+            xyz_balance = %xyz_balance,
+            total_balance = %total_balance,
+            "Updating account balance from L1 + xyz"
+        );
+        position_tracker.update_balance(total_balance);
 
         let now_ms = current_time_ms();
         let dex_id = self.get_dex_id();

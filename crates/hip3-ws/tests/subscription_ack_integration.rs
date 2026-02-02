@@ -129,7 +129,10 @@ fn test_as_order_update_with_user_suffix() {
     // Verify parsed fields
     assert_eq!(result.failed_count, 0);
     assert_eq!(result.updates[0].order.coin, "BTC");
-    assert!(result.updates[0].is_terminal(), "filled status should be terminal");
+    assert!(
+        result.updates[0].is_terminal(),
+        "filled status should be terminal"
+    );
 }
 
 /// Test orderUpdates data message with user suffix

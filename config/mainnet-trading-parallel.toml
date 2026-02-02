@@ -104,9 +104,9 @@ slippage_bps = 50
 
 [mark_regression]
 enabled = true
-exit_threshold_bps = 3          # 15 → 3 bps: BBOがオラクルに完全収束した時のみ発火（TimeStop優先）
-check_interval_ms = 100         # 200 → 100ms: より頻繁にチェックしてexit機会を逃さない
-min_holding_time_ms = 300       # 500 → 300ms: さらに早期exitを許可（edge erosion対策）
+exit_threshold_bps = 5          # 3 → 5 bps: 緩和して早期exit機会を増やす（TimeStop強制より先に発火）
+check_interval_ms = 100         # より頻繁にチェックしてexit機会を逃さない
+min_holding_time_ms = 300       # さらに早期exitを許可（edge erosion対策）
 slippage_bps = 50
 
 [executor]

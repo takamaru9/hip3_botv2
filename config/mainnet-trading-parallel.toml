@@ -83,6 +83,7 @@ max_bbo_age_ms = 0
 taker_fee_bps = 2              # Actual fee ~0.79 bps, but 2 bps for safety (HIP-3 multiplier applied: 2×2=4)
 slippage_bps = 20              # 15 → 20: Actual spread observed is ~20 bps entry + 20 bps exit
 min_edge_bps = 25              # 20 → 25: Require significant edge to overcome spread
+oracle_direction_filter = false # Disable: 40+ bps signals being blocked by Unchanged oracle direction
 sizing_alpha = 0.10
 max_notional = 50
 min_book_notional = 50

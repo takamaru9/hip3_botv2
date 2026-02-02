@@ -25,7 +25,7 @@ use std::sync::Arc;
 
 use dashmap::DashMap;
 use rust_decimal::Decimal;
-use tracing::{debug, trace, warn};
+use tracing::{debug, info, trace, warn};
 
 use hip3_core::{
     ClientOrderId, EnqueueResult, ExecutionResult, MarketKey, OrderSide, PendingOrder, Price,
@@ -480,30 +480,74 @@ impl Executor {
         let pending_notional = self
             .position_tracker
             .get_pending_notional_excluding_reduce_only(market, mark_px);
-        // Use mark_px for new order notional (consistent with position/pending)
-        let new_order_notional = size.inner() * mark_px.inner();
-        let total_notional =
-            position_notional.inner() + pending_notional.inner() + new_order_notional;
 
         // Get effective max (dynamic or static depending on config)
         let effective_max = self.effective_max_notional_per_market();
 
-        // Compare using Decimal (no f64 conversion)
-        if total_notional >= effective_max {
+        // Calculate available capacity for new orders
+        let available_notional =
+            effective_max - position_notional.inner() - pending_notional.inner();
+
+        // If no capacity at all, reject
+        if available_notional <= Decimal::ZERO {
             debug!(
                 market = %market,
                 position_notional = %position_notional,
                 pending_notional = %pending_notional,
-                new_order_notional = %new_order_notional,
-                size = %size,
-                mark_px = %mark_px,
-                total_notional = %total_notional,
                 effective_max = %effective_max,
-                balance = %self.position_tracker.get_balance(),
-                dynamic_sizing = self.config.dynamic_sizing_enabled,
-                "Signal rejected: Would exceed max position per market"
+                "Signal rejected: No capacity for new position"
             );
             return ExecutionResult::rejected(RejectReason::MaxPositionPerMarket);
+        }
+
+        // Scale down size if it would exceed available capacity
+        let original_notional = size.inner() * mark_px.inner();
+        let (adjusted_size, was_scaled) = if original_notional > available_notional {
+            // Scale down to fit within available capacity
+            let scaled_size = available_notional / mark_px.inner();
+            // Minimum viable size: 10% of original or $5 notional, whichever is larger
+            let min_viable_notional = Decimal::new(5, 0); // $5 minimum
+            if scaled_size * mark_px.inner() < min_viable_notional {
+                debug!(
+                    market = %market,
+                    original_size = %size,
+                    scaled_size = %scaled_size,
+                    min_viable_notional = %min_viable_notional,
+                    "Signal rejected: Scaled size too small to be viable"
+                );
+                return ExecutionResult::rejected(RejectReason::MaxPositionPerMarket);
+            }
+            (Size::new(scaled_size), true)
+        } else {
+            (size, false)
+        };
+
+        if was_scaled {
+            info!(
+                market = %market,
+                original_size = %size,
+                adjusted_size = %adjusted_size,
+                original_notional = %original_notional,
+                available_notional = %available_notional,
+                "Order size scaled down to fit within capacity"
+            );
+        }
+
+        // Recalculate with potentially adjusted size
+        let size = adjusted_size;
+        let new_order_notional = size.inner() * mark_px.inner();
+
+        // Debug assertion: after scaling, total should be within limit
+        #[cfg(debug_assertions)]
+        {
+            let total_notional =
+                position_notional.inner() + pending_notional.inner() + new_order_notional;
+            debug_assert!(
+                total_notional <= effective_max,
+                "Size scaling logic error: total {} > max {}",
+                total_notional,
+                effective_max
+            );
         }
 
         // Gate 4: MaxPositionTotal

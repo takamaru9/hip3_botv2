@@ -304,7 +304,16 @@ impl RiskGate {
     ///
     /// Block if mark price diverges too much from mid price.
     /// P0-14: mid_price() now returns Option<Price>.
+    ///
+    /// Set `max_mark_mid_divergence_bps = 0` to disable this gate.
+    /// Trading Philosophy: Mark-Mid divergence = MM not following oracle = edge.
     pub fn check_mark_mid_divergence(&self, snapshot: &MarketSnapshot) -> GateResult {
+        // max_mark_mid_divergence_bps = 0 means gate is disabled
+        // Rationale: Mark-Mid divergence IS the edge we want to capture
+        if self.config.max_mark_mid_divergence_bps.is_zero() {
+            return GateResult::Pass;
+        }
+
         // P0-14: Handle null BBO case
         let mid = match snapshot.bbo.mid_price() {
             Some(m) if !m.is_zero() => m,

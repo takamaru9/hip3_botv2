@@ -97,7 +97,7 @@ metrics_port = 9091
 log_level = "debug"
 
 [time_stop]
-threshold_ms = 3000             # 5s → 3s: Edge侵食分析でT+3sまでに大半侵食、より早くexit
+threshold_ms = 5000             # 3s → 5s: MarkRegression発火のための時間確保（乖離解消を待つ）
 reduce_only_timeout_ms = 60000
 check_interval_ms = 500
 slippage_bps = 50

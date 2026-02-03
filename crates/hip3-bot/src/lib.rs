@@ -9,6 +9,7 @@
 
 pub mod app;
 pub mod config;
+pub mod edge_tracker;
 pub mod error;
 
 pub use app::Application;

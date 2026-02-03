@@ -10,6 +10,7 @@
 //! - Automatic market discovery (P0-15, P0-26, P0-27)
 
 use crate::config::{AppConfig, MarketConfig, OperatingMode};
+use crate::edge_tracker::EdgeTracker;
 use crate::error::{AppError, AppResult};
 use alloy::primitives::Address;
 use chrono::Utc;
@@ -123,6 +124,8 @@ pub struct Application {
     last_persisted_signals: HashMap<(String, String), i64>,
     /// WS-driven exit watcher for immediate mark regression detection.
     exit_watcher: Option<ExitWatcherHandle>,
+    /// Edge distribution tracker for threshold calibration.
+    edge_tracker: EdgeTracker,
 }
 
 impl Application {
@@ -192,6 +195,8 @@ impl Application {
             last_persisted_signals: HashMap::new(),
             // WS-driven exit watcher (initialized in Trading mode only)
             exit_watcher: None,
+            // Edge tracker for threshold calibration (60s log interval)
+            edge_tracker: EdgeTracker::new(60, Decimal::from(40)),
         })
     }
 
@@ -1811,6 +1816,18 @@ impl Application {
                     // This allows state-change logging when block resumes
                     self.gate_block_state.retain(|(k, _), _| *k != key);
 
+                    // Edge tracking: Calculate and record edge for threshold calibration
+                    let oracle = snapshot.ctx.oracle.oracle_px.inner();
+                    if !oracle.is_zero() {
+                        // Buy edge: (oracle - ask) / oracle * 10000
+                        let buy_edge = (oracle - snapshot.bbo.ask_price.inner()) / oracle
+                            * Decimal::from(10000);
+                        // Sell edge: (bid - oracle) / oracle * 10000
+                        let sell_edge = (snapshot.bbo.bid_price.inner() - oracle) / oracle
+                            * Decimal::from(10000);
+                        self.edge_tracker.record_edge(key, buy_edge, sell_edge);
+                    }
+
                     // Look up per-market threshold override
                     let threshold_override = self.market_threshold_map.get(&key.asset.0).copied();
 
@@ -1861,6 +1878,9 @@ impl Application {
                 }
             }
         }
+
+        // Edge tracking: Periodic logging for threshold calibration
+        self.edge_tracker.maybe_log();
 
         if signals.is_empty() {
             None

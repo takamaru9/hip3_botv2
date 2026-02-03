@@ -1,5 +1,5 @@
 # HIP-3 Bot Docker Compose
-# Phase A: Observation Mode (24h test)
+# Trading Mode with Oracle-Driven Entry/Exit
 
 services:
   hip3-bot:
@@ -8,6 +8,7 @@ services:
       dockerfile: Dockerfile
     container_name: hip3-bot
     restart: unless-stopped
+    command: ["--config", "/app/config/mainnet-trading-parallel.toml"]
 
     # Resource limits (increased for all-market observation)
     deploy:

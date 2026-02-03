@@ -1,8 +1,6 @@
 # HIP-3 Bot Docker Compose
 # Phase A: Observation Mode (24h test)
 
-version: '3.8'
-
 services:
   hip3-bot:
     build:

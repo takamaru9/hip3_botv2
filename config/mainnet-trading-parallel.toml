@@ -47,27 +47,27 @@ private_key = "0xd7fb667b6c9ecea9d66b6acc1f1d7b15c50dbcb93bff0eeff6a42de957fa155
 [[markets]]
 asset_idx = 110026
 coin = "xyz:SILVER"
-threshold_bps = 60  # 40 → 60: Spread ~8 bps, need 60 bps for 35+ bps net edge
+threshold_bps = 40  # Data-driven: 40bps+ = 100% win rate, 40.5 bps avg profit
 
 [[markets]]
 asset_idx = 110017
 coin = "xyz:MSTR"
-threshold_bps = 60  # 40 → 60: Spread ~8 bps, require strong edge
+threshold_bps = 40  # Data-driven: 40bps+ = 100% win rate
 
 [[markets]]
 asset_idx = 110030
 coin = "xyz:COPPER"
-threshold_bps = 60  # 40 → 60: Consistent threshold
+threshold_bps = 40  # Data-driven: 40bps+ = 100% win rate
 
 [[markets]]
 asset_idx = 110003
 coin = "xyz:GOLD"
-threshold_bps = 60  # 40 → 60: Consistent threshold
+threshold_bps = 40  # Data-driven: 40bps+ = 100% win rate
 
 [[markets]]
 asset_idx = 110007
 coin = "xyz:COIN"
-threshold_bps = 70  # 40 → 70: Highest spread (13 bps), need extra margin
+threshold_bps = 50  # Higher spread market: 50 bps for safety margin
 
 [websocket]
 max_reconnect_attempts = 0

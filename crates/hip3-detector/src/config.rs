@@ -48,6 +48,23 @@ pub struct DetectorConfig {
     /// Set to 0 to disable (any oracle movement triggers signal).
     #[serde(default = "default_min_oracle_change_bps")]
     pub min_oracle_change_bps: Decimal,
+
+    /// Minimum consecutive oracle moves in signal direction to trigger.
+    ///
+    /// Only generates signals when oracle has moved in the same direction
+    /// for at least this many ticks. This filters out noise and ensures
+    /// a real trend is forming.
+    ///
+    /// Data analysis (2026-02-03):
+    /// - 0 consecutive: 29.79 bps avg edge
+    /// - 1 consecutive: 41.98 bps avg edge (+12.2 bps)
+    /// - 2 consecutive: 43.43 bps avg edge (+13.6 bps)
+    /// - 3+ consecutive: diminishing returns, smaller sample
+    ///
+    /// Recommended: 2 for balance of edge vs opportunity count.
+    /// Set to 0 to disable (any direction match triggers signal).
+    #[serde(default = "default_min_consecutive_oracle_moves")]
+    pub min_consecutive_oracle_moves: u32,
 }
 
 fn default_min_order_notional() -> Decimal {
@@ -70,6 +87,10 @@ fn default_min_oracle_change_bps() -> Decimal {
     Decimal::from(3) // 3 bps minimum oracle movement to trigger signal
 }
 
+fn default_min_consecutive_oracle_moves() -> u32 {
+    2 // 2 consecutive moves for +13.6 bps edge improvement
+}
+
 impl Default for DetectorConfig {
     fn default() -> Self {
         Self {
@@ -83,6 +104,7 @@ impl Default for DetectorConfig {
             normal_book_notional: default_normal_book_notional(),       // $5000 normal
             oracle_direction_filter: default_oracle_direction_filter(), // Filter oracle lag
             min_oracle_change_bps: default_min_oracle_change_bps(),     // 3 bps min move
+            min_consecutive_oracle_moves: default_min_consecutive_oracle_moves(), // 2 consecutive
         }
     }
 }

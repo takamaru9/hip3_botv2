@@ -25,11 +25,12 @@ use hip3_executor::{
     MarkPriceProvider, MarketStateCache, NonceManager, RealWsSender, RiskMonitor,
     RiskMonitorConfig as ExecutorRiskMonitorConfig, Signer, SystemClock, TradingReadyChecker,
 };
-use hip3_feed::{MarketEvent, MarketState, MessageParser};
+use hip3_feed::{MarketEvent, MarketState, MessageParser, OracleMovementTracker, OracleTrackerHandle};
 use hip3_persistence::{FollowupRecord, FollowupWriter, ParquetWriter, SignalRecord};
 use hip3_position::{
-    flatten_all_positions, new_exit_watcher, spawn_position_tracker, ExitWatcherHandle,
-    FlattenReason, MarkRegressionConfig, MarkRegressionMonitor, Position, PositionTrackerHandle,
+    flatten_all_positions, new_exit_watcher, new_oracle_exit_watcher, spawn_position_tracker,
+    ExitWatcherHandle, FlattenReason, MarkRegressionConfig, MarkRegressionMonitor,
+    OracleExitWatcherHandle, Position, PositionTrackerHandle,
     TimeStopConfig as PositionTimeStopConfig, TimeStopMonitor,
 };
 use hip3_registry::{
@@ -124,6 +125,10 @@ pub struct Application {
     last_persisted_signals: HashMap<(String, String), i64>,
     /// WS-driven exit watcher for immediate mark regression detection.
     exit_watcher: Option<ExitWatcherHandle>,
+    /// Oracle movement tracker for consecutive direction detection.
+    oracle_tracker: OracleTrackerHandle,
+    /// Oracle-driven exit watcher based on consecutive price movements.
+    oracle_exit_watcher: Option<OracleExitWatcherHandle>,
     /// Edge distribution tracker for threshold calibration.
     edge_tracker: EdgeTracker,
 }
@@ -147,6 +152,10 @@ impl Application {
 
         // P0-31: Cross tracker initialized, daily_stats deferred until markets known
         let cross_tracker = CrossDurationTracker::new();
+
+        // Oracle movement tracker for consecutive direction detection
+        let oracle_tracker_config = config.oracle_tracking.clone().unwrap_or_default();
+        let oracle_tracker = OracleMovementTracker::new_shared(oracle_tracker_config);
 
         // Build per-market threshold map from config
         let market_threshold_map: HashMap<u32, Decimal> = config
@@ -195,6 +204,10 @@ impl Application {
             last_persisted_signals: HashMap::new(),
             // WS-driven exit watcher (initialized in Trading mode only)
             exit_watcher: None,
+            // Oracle movement tracker (always active)
+            oracle_tracker,
+            // Oracle-driven exit watcher (initialized in Trading mode only)
+            oracle_exit_watcher: None,
             // Edge tracker for threshold calibration (60s log interval)
             edge_tracker: EdgeTracker::new(60, Decimal::from(40)),
         })
@@ -885,9 +898,10 @@ impl Application {
                     self.config.time_stop.reduce_only_timeout_ms,
                 );
 
-                // Clone flatten_tx for MarkRegressionMonitor and ExitWatcher
+                // Clone flatten_tx for MarkRegressionMonitor, ExitWatcher, and OracleExitWatcher
                 let mark_regression_flatten_tx = flatten_tx.clone();
                 let exit_watcher_flatten_tx = flatten_tx.clone();
+                let oracle_exit_flatten_tx = flatten_tx.clone();
 
                 // Create TimeStopMonitor
                 let time_stop_monitor = TimeStopMonitor::new(
@@ -949,6 +963,24 @@ impl Application {
                     self.exit_watcher = Some(exit_watcher);
 
                     info!("ExitWatcher started (WS-driven, < 1ms latency)");
+
+                    // 13d. OracleExitWatcher for oracle-driven exit (reversal/catchup)
+                    let oracle_exit_config = self.config.oracle_exit.clone().unwrap_or_default();
+                    if oracle_exit_config.enabled {
+                        let oracle_exit_watcher = new_oracle_exit_watcher(
+                            oracle_exit_config.clone(),
+                            position_tracker.clone(),
+                            self.oracle_tracker.clone(),
+                            oracle_exit_flatten_tx,
+                        );
+                        self.oracle_exit_watcher = Some(oracle_exit_watcher);
+
+                        info!(
+                            exit_against_moves = oracle_exit_config.exit_against_moves,
+                            exit_with_moves = oracle_exit_config.exit_with_moves,
+                            "OracleExitWatcher started (oracle-driven)"
+                        );
+                    }
                 }
             }
 
@@ -1749,7 +1781,11 @@ impl Application {
                 }
 
                 // P2-1: Update state first, then record metrics
-                self.market_state.update_ctx(key, ctx);
+                self.market_state.update_ctx(key, ctx.clone());
+
+                // Record oracle movement for consecutive direction tracking
+                let oracle_px = ctx.oracle.oracle_px;
+                self.oracle_tracker.record_move(key, oracle_px);
 
                 // Update oracle age gauge metric (after state update)
                 if let Some(oracle_age) = self.market_state.get_oracle_age_ms(&key) {
@@ -1765,6 +1801,13 @@ impl Application {
                 if let Some(ref exit_watcher) = self.exit_watcher {
                     if let Some(snapshot) = self.market_state.get_snapshot(&key) {
                         exit_watcher.on_market_update(key, &snapshot);
+                    }
+                }
+
+                // Oracle-driven exit check: check for reversal/catchup
+                if let Some(ref oracle_exit) = self.oracle_exit_watcher {
+                    if let Some(snapshot) = self.market_state.get_snapshot(&key) {
+                        oracle_exit.on_market_update(key, &snapshot);
                     }
                 }
             }
@@ -1832,7 +1875,12 @@ impl Application {
                     let threshold_override = self.market_threshold_map.get(&key.asset.0).copied();
 
                     // All gates passed, check for dislocation
-                    if let Some(signal) = self.detector.check(key, &snapshot, threshold_override) {
+                    if let Some(signal) = self.detector.check(
+                        key,
+                        &snapshot,
+                        threshold_override,
+                        Some(&self.oracle_tracker),
+                    ) {
                         // P0-31: Cross detected - record cross count and update tracker
                         let side = signal.side;
                         Metrics::cross_detected(&key.to_string(), &side.to_string());

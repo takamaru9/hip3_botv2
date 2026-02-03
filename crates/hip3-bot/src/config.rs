@@ -320,6 +320,12 @@ pub struct AppConfig {
     /// Mark regression exit configuration (Trading mode only).
     #[serde(default)]
     pub mark_regression: MarkRegressionConfig,
+    /// Oracle movement tracking configuration.
+    #[serde(default)]
+    pub oracle_tracking: Option<hip3_feed::OracleTrackerConfig>,
+    /// Oracle-driven exit configuration (Trading mode only).
+    #[serde(default)]
+    pub oracle_exit: Option<hip3_position::OracleExitConfig>,
     /// Risk monitor configuration (Trading mode only).
     #[serde(default)]
     pub risk_monitor: RiskMonitorConfig,
@@ -534,6 +540,8 @@ impl Default for AppConfig {
             is_mainnet: None,
             vault_address: None,
             private_key: None,
+            oracle_tracking: None,
+            oracle_exit: None,
         }
     }
 }

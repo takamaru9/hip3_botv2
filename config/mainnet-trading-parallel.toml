@@ -86,6 +86,17 @@ max_oi_fraction = 0.01
 # WebSocket接続状態は ctx_update (8秒) でカバー
 max_bbo_age_ms = 0
 
+# Oracle Movement Tracker (P1)
+# オラクルの連続性を追跡し、エントリー/エグジット判断に使用
+[oracle_tracking]
+# オラクルの動きを「変化」と見なす最小bps
+# 小さすぎるとノイズ、大きすぎると動きを見逃す
+min_move_bps = 2
+# 保持する履歴数
+max_history = 20
+# Unchanged時の連続性: 維持（リセットしない）
+# → オラクルが動かない = MMが追従する時間を与えるだけ、トレンドは継続
+
 [detector]
 taker_fee_bps = 2              # Actual fee ~0.79 bps, but 2 bps for safety (HIP-3 multiplier applied: 2×2=4)
 # 2026-02-03: Measured spread 8-13 bps per side, 16-26 bps round trip
@@ -93,6 +104,13 @@ slippage_bps = 25              # 20 → 25: More realistic spread estimate (25 b
 min_edge_bps = 30              # 25 → 30: Require edge > spread cost to be profitable
 oracle_direction_filter = false # Disable: 40+ bps signals being blocked by Unchanged oracle direction
 min_oracle_change_bps = 0      # Disable: Velocity filter blocking signals with stale oracle
+# Oracle consecutive filter (P2): エントリー前にオラクルがN回連続で同方向に動いていることを要求
+# データ分析結果:
+#   連続0回: 平均エッジ 29.79 bps → 避ける
+#   連続1回: 平均エッジ 41.98 bps (+12.2 bps)
+#   連続2回: 平均エッジ 43.43 bps (+13.6 bps) ← 採用（コスパ最良）
+#   連続3回以上: 改善小さくサンプル減少
+min_consecutive_oracle_moves = 2
 sizing_alpha = 0.10
 max_notional = 50
 min_book_notional = 50
@@ -106,10 +124,25 @@ buffer_size = 10
 metrics_port = 9091
 log_level = "debug"
 
+# Oracle-Driven Exit (P3) - メインのExit戦略
+# TimeStopの代わりにオラクルの動きでエグジット判断
+[oracle_exit]
+enabled = true
+# 損切り: 反対方向にN回連続で動いたら exit（エッジ消失）
+# データ分析: 低エッジ時91%に低下を防ぐため素早い損切り
+exit_against_moves = 2
+# 利確: 我々の方向にN回連続で動いたら exit（MMがキャッチアップ）
+# スプレッドが圧縮される前に利確
+exit_with_moves = 3
+# 最小保持時間: 無効化（Oracle連続性チェックで既にフィルタ済み）
+min_holding_time_ms = 0
+# スリッページ
+slippage_bps = 50
+
 [time_stop]
-# 2026-02-03: 3s TimeStop was exiting before MM caught up → losing to spread
-# New strategy: Wait for true price discovery (MM fully caught up)
-threshold_ms = 15000            # 3s → 15s: Allow time for edge to materialize or clearly fail
+# Oracle-driven exitがメイン、TimeStopはバックアップ（非常用ハードリミット）
+# オラクルが動かない異常事態でのみ発火
+threshold_ms = 60000            # 15s → 60s: 非常用ハードリミット
 reduce_only_timeout_ms = 60000
 check_interval_ms = 500
 slippage_bps = 50

@@ -37,30 +37,37 @@ private_key = "0xd7fb667b6c9ecea9d66b6acc1f1d7b15c50dbcb93bff0eeff6a42de957fa155
 # | COPPER | 19.0%   | Biased   | 30 bps    |
 # | COIN   | 15.2%   | Biased   | 30 bps    |
 
+# 2026-02-03 Analysis: 10% win rate, 8-13 bps actual spread
+# Problem: 40 bps entry - 8-13 bps spread × 2 (entry+exit) = ~15-26 bps net edge
+# Solution: Raise threshold to ensure sufficient edge after spread costs
+#
+# New threshold = spread_cost × 2 (entry+exit) + min_profit margin
+# Conservative: 25 bps spread cost + 35 bps profit target = 60 bps
+
 [[markets]]
 asset_idx = 110026
 coin = "xyz:SILVER"
-threshold_bps = 40  # 30 → 40: 37 bps signal still lost 11 bps due to actual spread > detected
+threshold_bps = 60  # 40 → 60: Spread ~8 bps, need 60 bps for 35+ bps net edge
 
 [[markets]]
 asset_idx = 110017
 coin = "xyz:MSTR"
-threshold_bps = 40  # 30 → 40: Actual spread + slippage requires higher threshold
+threshold_bps = 60  # 40 → 60: Spread ~8 bps, require strong edge
 
 [[markets]]
 asset_idx = 110030
 coin = "xyz:COPPER"
-threshold_bps = 40  # 30 → 40: Wider threshold for real spread cost
+threshold_bps = 60  # 40 → 60: Consistent threshold
 
 [[markets]]
 asset_idx = 110003
 coin = "xyz:GOLD"
-threshold_bps = 40  # 30 → 40: Cover actual spread cost
+threshold_bps = 60  # 40 → 60: Consistent threshold
 
 [[markets]]
 asset_idx = 110007
 coin = "xyz:COIN"
-threshold_bps = 40  # 30 → 40: Cover actual spread cost
+threshold_bps = 70  # 40 → 70: Highest spread (13 bps), need extra margin
 
 [websocket]
 max_reconnect_attempts = 0
@@ -81,8 +88,9 @@ max_bbo_age_ms = 0
 
 [detector]
 taker_fee_bps = 2              # Actual fee ~0.79 bps, but 2 bps for safety (HIP-3 multiplier applied: 2×2=4)
-slippage_bps = 20              # 15 → 20: Actual spread observed is ~20 bps entry + 20 bps exit
-min_edge_bps = 25              # 20 → 25: Require significant edge to overcome spread
+# 2026-02-03: Measured spread 8-13 bps per side, 16-26 bps round trip
+slippage_bps = 25              # 20 → 25: More realistic spread estimate (25 bps round trip)
+min_edge_bps = 30              # 25 → 30: Require edge > spread cost to be profitable
 oracle_direction_filter = false # Disable: 40+ bps signals being blocked by Unchanged oracle direction
 min_oracle_change_bps = 0      # Disable: Velocity filter blocking signals with stale oracle
 sizing_alpha = 0.10
@@ -99,16 +107,19 @@ metrics_port = 9091
 log_level = "debug"
 
 [time_stop]
-threshold_ms = 3000             # 5s → 3s: Edge erodes severely at T+5s, exit before full erosion
+# 2026-02-03: 3s TimeStop was exiting before MM caught up → losing to spread
+# New strategy: Wait for true price discovery (MM fully caught up)
+threshold_ms = 15000            # 3s → 15s: Allow time for edge to materialize or clearly fail
 reduce_only_timeout_ms = 60000
 check_interval_ms = 500
 slippage_bps = 50
 
 [mark_regression]
 enabled = true
-exit_threshold_bps = 30         # 20 → 30 bps: スプレッド広い市場でexit機会を増やす
-check_interval_ms = 100         # より頻繁にチェックしてexit機会を逃さない
-min_holding_time_ms = 300       # さらに早期exitを許可（edge erosion対策）
+# 2026-02-03: With 60 bps entry threshold, mark should regress significantly for profitable exit
+exit_threshold_bps = 25         # 30 → 25 bps: Tighter exit to capture smaller regressions
+check_interval_ms = 100
+min_holding_time_ms = 2000      # 300ms → 2s: Filter noise, wait for true regression signal
 slippage_bps = 50
 
 [executor]

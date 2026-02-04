@@ -188,7 +188,7 @@ risk_per_market_pct = 1.0  # 100% of balance allowed per market (limited by max_
 
 [dashboard]
 enabled = true
-port = 8081
+port = 8080
 update_interval_ms = 100
 max_connections = 10
 username = ""

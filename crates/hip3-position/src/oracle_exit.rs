@@ -29,7 +29,7 @@
 //!              Exit condition met → flatten_tx.try_send()
 //! ```
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
@@ -44,6 +44,22 @@ use hip3_feed::OracleMovementTracker;
 
 use crate::time_stop::FlattenOrderBuilder;
 use crate::tracker::{Position, PositionTrackerHandle};
+
+// ============================================================================
+// Oracle Baseline
+// ============================================================================
+
+/// Baseline oracle consecutive counts at position entry time.
+///
+/// Used to calculate delta (movements since entry) rather than
+/// using global market consecutive counts which include pre-entry movements.
+#[derive(Debug, Clone, Copy)]
+struct OracleBaseline {
+    /// Consecutive count moving WITH our position side at entry.
+    consecutive_with: u32,
+    /// Consecutive count moving AGAINST our position side at entry.
+    consecutive_against: u32,
+}
 
 // ============================================================================
 // Configuration

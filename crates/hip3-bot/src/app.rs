@@ -963,24 +963,25 @@ impl Application {
                     self.exit_watcher = Some(exit_watcher);
 
                     info!("ExitWatcher started (WS-driven, < 1ms latency)");
+                }
 
-                    // 13d. OracleExitWatcher for oracle-driven exit (reversal/catchup)
-                    let oracle_exit_config = self.config.oracle_exit.clone().unwrap_or_default();
-                    if oracle_exit_config.enabled {
-                        let oracle_exit_watcher = new_oracle_exit_watcher(
-                            oracle_exit_config.clone(),
-                            position_tracker.clone(),
-                            self.oracle_tracker.clone(),
-                            oracle_exit_flatten_tx,
-                        );
-                        self.oracle_exit_watcher = Some(oracle_exit_watcher);
+                // 13d. OracleExitWatcher for oracle-driven exit (reversal/catchup)
+                // NOTE: Independent of mark_regression - controlled by oracle_exit.enabled
+                let oracle_exit_config = self.config.oracle_exit.clone().unwrap_or_default();
+                if oracle_exit_config.enabled {
+                    let oracle_exit_watcher = new_oracle_exit_watcher(
+                        oracle_exit_config.clone(),
+                        position_tracker.clone(),
+                        self.oracle_tracker.clone(),
+                        oracle_exit_flatten_tx,
+                    );
+                    self.oracle_exit_watcher = Some(oracle_exit_watcher);
 
-                        info!(
-                            exit_against_moves = oracle_exit_config.exit_against_moves,
-                            exit_with_moves = oracle_exit_config.exit_with_moves,
-                            "OracleExitWatcher started (oracle-driven)"
-                        );
-                    }
+                    info!(
+                        exit_against_moves = oracle_exit_config.exit_against_moves,
+                        exit_with_moves = oracle_exit_config.exit_with_moves,
+                        "OracleExitWatcher started (oracle-driven)"
+                    );
                 }
             }
 

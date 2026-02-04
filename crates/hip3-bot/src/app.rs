@@ -1954,12 +1954,16 @@ impl Application {
                     // Look up per-market threshold override
                     let threshold_override = self.market_threshold_map.get(&key.asset.0).copied();
 
+                    // Get oracle age for quote lag gate
+                    let oracle_age_ms = self.market_state.get_oracle_age_ms(&key);
+
                     // All gates passed, check for dislocation
                     if let Some(signal) = self.detector.check(
                         key,
                         &snapshot,
                         threshold_override,
                         Some(&self.oracle_tracker),
+                        oracle_age_ms,
                     ) {
                         // P0-31: Cross detected - record cross count and update tracker
                         let side = signal.side;

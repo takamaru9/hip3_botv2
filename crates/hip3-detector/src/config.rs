@@ -65,6 +65,26 @@ pub struct DetectorConfig {
     /// Set to 0 to disable (any direction match triggers signal).
     #[serde(default = "default_min_consecutive_oracle_moves")]
     pub min_consecutive_oracle_moves: u32,
+
+    /// Minimum time since oracle changed (ms) to generate signal.
+    ///
+    /// Quote Lag Gate: Filters "true stale liquidity" opportunities.
+    ///
+    /// Trading Philosophy: "Oracle moves → MM quotes lag → capture stale liquidity"
+    /// - Too fresh (<50ms): May be noise, oracle will stabilize
+    /// - Sweet spot (50-500ms): True stale liquidity opportunity
+    /// - Too stale (>500ms): MM has already adjusted quotes
+    ///
+    /// Set to 0 to disable (any oracle age is allowed).
+    #[serde(default = "default_min_quote_lag_ms")]
+    pub min_quote_lag_ms: i64,
+
+    /// Maximum time since oracle changed (ms) to generate signal.
+    ///
+    /// Filters out stale oracle moves where MM has likely caught up.
+    /// Set to 0 to disable (no upper bound on oracle age).
+    #[serde(default = "default_max_quote_lag_ms")]
+    pub max_quote_lag_ms: i64,
 }
 
 fn default_min_order_notional() -> Decimal {
@@ -91,6 +111,14 @@ fn default_min_consecutive_oracle_moves() -> u32 {
     2 // 2 consecutive moves for +13.6 bps edge improvement
 }
 
+fn default_min_quote_lag_ms() -> i64 {
+    0 // Disabled by default for backwards compatibility
+}
+
+fn default_max_quote_lag_ms() -> i64 {
+    0 // Disabled by default for backwards compatibility
+}
+
 impl Default for DetectorConfig {
     fn default() -> Self {
         Self {
@@ -105,6 +133,8 @@ impl Default for DetectorConfig {
             oracle_direction_filter: default_oracle_direction_filter(), // Filter oracle lag
             min_oracle_change_bps: default_min_oracle_change_bps(),     // 3 bps min move
             min_consecutive_oracle_moves: default_min_consecutive_oracle_moves(), // 2 consecutive
+            min_quote_lag_ms: default_min_quote_lag_ms(),               // 0 = disabled
+            max_quote_lag_ms: default_max_quote_lag_ms(),               // 0 = disabled
         }
     }
 }

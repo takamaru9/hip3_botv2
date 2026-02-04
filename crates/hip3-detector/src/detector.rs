@@ -194,12 +194,15 @@ impl DislocationDetector {
     ///   If provided, uses this instead of fee_calculator's total_cost_bps.
     /// * `oracle_tracker` - Optional oracle movement tracker for consecutive move filtering.
     ///   If None, consecutive move check is skipped (backward compatible).
+    /// * `oracle_age_ms` - Optional time since oracle last changed (ms).
+    ///   Used for Quote Lag Gate filtering. If None, gate is skipped.
     pub fn check(
         &self,
         key: MarketKey,
         snapshot: &MarketSnapshot,
         threshold_override_bps: Option<Decimal>,
         oracle_tracker: Option<&OracleMovementTracker>,
+        oracle_age_ms: Option<i64>,
     ) -> Option<DislocationSignal> {
         // Get oracle movement (direction + change amount) for filtering
         let oracle = snapshot.ctx.oracle.oracle_px;
@@ -212,6 +215,7 @@ impl DislocationDetector {
             threshold_override_bps,
             movement,
             oracle_tracker,
+            oracle_age_ms,
         ) {
             return Some(signal);
         }
@@ -223,6 +227,7 @@ impl DislocationDetector {
             threshold_override_bps,
             movement,
             oracle_tracker,
+            oracle_age_ms,
         ) {
             return Some(signal);
         }
@@ -240,6 +245,7 @@ impl DislocationDetector {
     /// - Direction: Only generates signal if oracle is rising (stale ask)
     /// - Velocity: Only generates signal if oracle moved enough (min_oracle_change_bps)
     /// - Consecutive: Only generates signal if oracle has moved N times in same direction
+    /// - Quote Lag: Only generates signal if oracle age is within configured window
     fn check_buy(
         &self,
         key: MarketKey,
@@ -247,6 +253,7 @@ impl DislocationDetector {
         threshold_override_bps: Option<Decimal>,
         oracle_movement: OracleMovement,
         oracle_tracker: Option<&OracleMovementTracker>,
+        oracle_age_ms: Option<i64>,
     ) -> Option<DislocationSignal> {
         // P0-14: Check if BBO is tradeable
         if !snapshot.is_tradeable() {
@@ -325,6 +332,36 @@ impl DislocationDetector {
             }
         }
 
+        // Quote Lag Gate: Only generate signal when oracle changed within time window
+        // This ensures "true stale liquidity" - oracle moved but MM hasn't caught up yet
+        if let Some(age_ms) = oracle_age_ms {
+            // Check minimum lag (filter noise from micro-movements)
+            if self.config.min_quote_lag_ms > 0 && age_ms < self.config.min_quote_lag_ms {
+                tracing::debug!(
+                    %key,
+                    side = "buy",
+                    raw_edge_bps = %raw_edge_bps,
+                    oracle_age_ms = age_ms,
+                    min_quote_lag_ms = self.config.min_quote_lag_ms,
+                    "Signal skipped: oracle moved too recently (noise filter)"
+                );
+                return None;
+            }
+
+            // Check maximum lag (filter stale - MM caught up)
+            if self.config.max_quote_lag_ms > 0 && age_ms > self.config.max_quote_lag_ms {
+                tracing::debug!(
+                    %key,
+                    side = "buy",
+                    raw_edge_bps = %raw_edge_bps,
+                    oracle_age_ms = age_ms,
+                    max_quote_lag_ms = self.config.max_quote_lag_ms,
+                    "Signal skipped: oracle moved too long ago (MM caught up)"
+                );
+                return None;
+            }
+        }
+
         // Calculate suggested size (may return ZERO if liquidity too low)
         let suggested_size = self.calculate_size(snapshot, OrderSide::Buy);
 
@@ -353,6 +390,7 @@ impl DislocationDetector {
             ask = %ask,
             oracle_direction = ?oracle_movement.direction,
             oracle_change_bps = %oracle_movement.change_bps,
+            ?oracle_age_ms,
             "Dislocation detected (P0-24: HIP-3 2x fee applied)"
         );
 
@@ -380,6 +418,7 @@ impl DislocationDetector {
     /// - Direction: Only generates signal if oracle is falling (stale bid)
     /// - Velocity: Only generates signal if oracle moved enough (min_oracle_change_bps)
     /// - Consecutive: Only generates signal if oracle has moved N times in same direction
+    /// - Quote Lag: Only generates signal if oracle age is within configured window
     fn check_sell(
         &self,
         key: MarketKey,
@@ -387,6 +426,7 @@ impl DislocationDetector {
         threshold_override_bps: Option<Decimal>,
         oracle_movement: OracleMovement,
         oracle_tracker: Option<&OracleMovementTracker>,
+        oracle_age_ms: Option<i64>,
     ) -> Option<DislocationSignal> {
         // P0-14: Check if BBO is tradeable
         if !snapshot.is_tradeable() {
@@ -465,6 +505,36 @@ impl DislocationDetector {
             }
         }
 
+        // Quote Lag Gate: Only generate signal when oracle changed within time window
+        // This ensures "true stale liquidity" - oracle moved but MM hasn't caught up yet
+        if let Some(age_ms) = oracle_age_ms {
+            // Check minimum lag (filter noise from micro-movements)
+            if self.config.min_quote_lag_ms > 0 && age_ms < self.config.min_quote_lag_ms {
+                tracing::debug!(
+                    %key,
+                    side = "sell",
+                    raw_edge_bps = %raw_edge_bps,
+                    oracle_age_ms = age_ms,
+                    min_quote_lag_ms = self.config.min_quote_lag_ms,
+                    "Signal skipped: oracle moved too recently (noise filter)"
+                );
+                return None;
+            }
+
+            // Check maximum lag (filter stale - MM caught up)
+            if self.config.max_quote_lag_ms > 0 && age_ms > self.config.max_quote_lag_ms {
+                tracing::debug!(
+                    %key,
+                    side = "sell",
+                    raw_edge_bps = %raw_edge_bps,
+                    oracle_age_ms = age_ms,
+                    max_quote_lag_ms = self.config.max_quote_lag_ms,
+                    "Signal skipped: oracle moved too long ago (MM caught up)"
+                );
+                return None;
+            }
+        }
+
         // Calculate suggested size (may return ZERO if liquidity too low)
         let suggested_size = self.calculate_size(snapshot, OrderSide::Sell);
 
@@ -493,6 +563,7 @@ impl DislocationDetector {
             bid = %bid,
             oracle_direction = ?oracle_movement.direction,
             oracle_change_bps = %oracle_movement.change_bps,
+            ?oracle_age_ms,
             "Dislocation detected (P0-24: HIP-3 2x fee applied)"
         );
 
@@ -664,7 +735,7 @@ mod tests {
         // Oracle at 50000, bid/ask around it with normal spread
         let snapshot = make_snapshot(dec!(50000), dec!(49990), dec!(50010));
 
-        let signal = detector.check(key, &snapshot, None, None);
+        let signal = detector.check(key, &snapshot, None, None, None);
         assert!(signal.is_none());
     }
 
@@ -690,7 +761,7 @@ mod tests {
         // Edge = (50000 - 49940) / 50000 * 10000 = 12 bps
         let snapshot = make_snapshot(dec!(50000), dec!(49920), dec!(49940));
 
-        let signal = detector.check(key, &snapshot, None, None);
+        let signal = detector.check(key, &snapshot, None, None, None);
         assert!(signal.is_some());
 
         let signal = signal.unwrap();
@@ -725,7 +796,7 @@ mod tests {
         // Oracle at 50000, bid at 50060 (12 bps above = edge after 10 bps cost)
         let snapshot = make_snapshot(dec!(50000), dec!(50060), dec!(50080));
 
-        let signal = detector.check(key, &snapshot, None, None);
+        let signal = detector.check(key, &snapshot, None, None, None);
         assert!(signal.is_some());
 
         let signal = signal.unwrap();
@@ -843,7 +914,7 @@ mod tests {
         let snapshot = MarketSnapshot::new(bbo, ctx);
 
         // Should return None even if ask is below oracle
-        let signal = detector.check(key, &snapshot, None, None);
+        let signal = detector.check(key, &snapshot, None, None, None);
         assert!(signal.is_none());
     }
 
@@ -930,7 +1001,7 @@ mod tests {
             dec!(0.005),
         );
 
-        let signal = detector.check(key, &snapshot, None, None);
+        let signal = detector.check(key, &snapshot, None, None, None);
         assert!(
             signal.is_none(),
             "Signal should be skipped due to low liquidity"
@@ -1074,7 +1145,7 @@ mod tests {
             dec!(0.055),
         );
 
-        let signal = detector.check(key, &snapshot, None, None);
+        let signal = detector.check(key, &snapshot, None, None, None);
         assert!(
             signal.is_some(),
             "Signal should be generated with partial liquidity"
@@ -1117,21 +1188,21 @@ mod tests {
         let snapshot = make_snapshot(dec!(50000), dec!(49925), dec!(49930));
 
         // Test 1: Without override, signal should be generated (15bps > 10bps threshold)
-        let signal = detector.check(key, &snapshot, None, None);
+        let signal = detector.check(key, &snapshot, None, None, None);
         assert!(
             signal.is_some(),
             "Signal should be generated without override (15bps > 10bps)"
         );
 
         // Test 2: With higher threshold override (20bps), no signal should be generated
-        let signal = detector.check(key, &snapshot, Some(dec!(20)), None);
+        let signal = detector.check(key, &snapshot, Some(dec!(20)), None, None);
         assert!(
             signal.is_none(),
             "No signal should be generated with 20bps threshold (15bps < 20bps)"
         );
 
         // Test 3: With lower threshold override (12bps), signal should be generated
-        let signal = detector.check(key, &snapshot, Some(dec!(12)), None);
+        let signal = detector.check(key, &snapshot, Some(dec!(12)), None, None);
         assert!(
             signal.is_some(),
             "Signal should be generated with 12bps threshold (15bps > 12bps)"
@@ -1156,12 +1227,12 @@ mod tests {
 
         // First tick: establish baseline oracle at 49900
         let snapshot1 = make_snapshot(dec!(49900), dec!(49880), dec!(49890));
-        let _ = detector.check(key, &snapshot1, None, None);
+        let _ = detector.check(key, &snapshot1, None, None, None);
 
         // Second tick: oracle rises to 50000, ask still at 49940 (stale)
         // Edge = (50000 - 49940) / 50000 * 10000 = 12 bps
         let snapshot2 = make_snapshot(dec!(50000), dec!(49920), dec!(49940));
-        let signal = detector.check(key, &snapshot2, None, None);
+        let signal = detector.check(key, &snapshot2, None, None, None);
 
         assert!(
             signal.is_some(),
@@ -1184,12 +1255,12 @@ mod tests {
 
         // First tick: establish baseline oracle at 50100
         let snapshot1 = make_snapshot(dec!(50100), dec!(50080), dec!(50090));
-        let _ = detector.check(key, &snapshot1, None, None);
+        let _ = detector.check(key, &snapshot1, None, None, None);
 
         // Second tick: oracle falls to 50000, ask at 49940 (looks like edge but oracle lagging)
         // This is oracle lagging in downtrend - should skip
         let snapshot2 = make_snapshot(dec!(50000), dec!(49920), dec!(49940));
-        let signal = detector.check(key, &snapshot2, None, None);
+        let signal = detector.check(key, &snapshot2, None, None, None);
 
         assert!(
             signal.is_none(),
@@ -1211,12 +1282,12 @@ mod tests {
 
         // First tick: establish baseline oracle at 50100
         let snapshot1 = make_snapshot(dec!(50100), dec!(50080), dec!(50090));
-        let _ = detector.check(key, &snapshot1, None, None);
+        let _ = detector.check(key, &snapshot1, None, None, None);
 
         // Second tick: oracle falls to 50000, bid still at 50060 (stale)
         // Edge = (50060 - 50000) / 50000 * 10000 = 12 bps
         let snapshot2 = make_snapshot(dec!(50000), dec!(50060), dec!(50080));
-        let signal = detector.check(key, &snapshot2, None, None);
+        let signal = detector.check(key, &snapshot2, None, None, None);
 
         assert!(
             signal.is_some(),
@@ -1239,12 +1310,12 @@ mod tests {
 
         // First tick: establish baseline oracle at 49900
         let snapshot1 = make_snapshot(dec!(49900), dec!(49880), dec!(49890));
-        let _ = detector.check(key, &snapshot1, None, None);
+        let _ = detector.check(key, &snapshot1, None, None, None);
 
         // Second tick: oracle rises to 50000, bid at 50060 (looks like edge but oracle lagging)
         // This is oracle lagging in uptrend - should skip
         let snapshot2 = make_snapshot(dec!(50000), dec!(50060), dec!(50080));
-        let signal = detector.check(key, &snapshot2, None, None);
+        let signal = detector.check(key, &snapshot2, None, None, None);
 
         assert!(
             signal.is_none(),
@@ -1266,7 +1337,7 @@ mod tests {
 
         // First tick with edge - should be skipped (no previous oracle)
         let snapshot = make_snapshot(dec!(50000), dec!(49920), dec!(49940));
-        let signal = detector.check(key, &snapshot, None, None);
+        let signal = detector.check(key, &snapshot, None, None, None);
 
         assert!(
             signal.is_none(),
@@ -1289,7 +1360,7 @@ mod tests {
 
         // First tick with edge - should NOT be skipped when filter disabled
         let snapshot = make_snapshot(dec!(50000), dec!(49920), dec!(49940));
-        let signal = detector.check(key, &snapshot, None, None);
+        let signal = detector.check(key, &snapshot, None, None, None);
 
         assert!(
             signal.is_some(),
@@ -1316,12 +1387,12 @@ mod tests {
 
         // First tick: establish baseline oracle at 49900
         let snapshot1 = make_snapshot(dec!(49900), dec!(49880), dec!(49890));
-        let _ = detector.check(key, &snapshot1, None, None);
+        let _ = detector.check(key, &snapshot1, None, None, None);
 
         // Second tick: oracle rises by 200 bps (49900 -> 50000 = 0.2%)
         // That's 200 bps > 5 bps min, should pass velocity filter
         let snapshot2 = make_snapshot(dec!(50000), dec!(49920), dec!(49940));
-        let signal = detector.check(key, &snapshot2, None, None);
+        let signal = detector.check(key, &snapshot2, None, None, None);
 
         assert!(
             signal.is_some(),
@@ -1344,13 +1415,13 @@ mod tests {
 
         // First tick: establish baseline oracle at 49995
         let snapshot1 = make_snapshot(dec!(49995), dec!(49975), dec!(49985));
-        let _ = detector.check(key, &snapshot1, None, None);
+        let _ = detector.check(key, &snapshot1, None, None, None);
 
         // Second tick: oracle rises by only 1 bps (49995 -> 50000 = 0.01%)
         // That's ~1 bps < 10 bps min, should NOT pass velocity filter
         // Edge = (50000 - 49940) / 50000 * 10000 = 12 bps (sufficient edge)
         let snapshot2 = make_snapshot(dec!(50000), dec!(49920), dec!(49940));
-        let signal = detector.check(key, &snapshot2, None, None);
+        let signal = detector.check(key, &snapshot2, None, None, None);
 
         assert!(
             signal.is_none(),
@@ -1374,7 +1445,7 @@ mod tests {
         // First tick with edge - no previous oracle, change_bps = 0
         // But since min_oracle_change_bps = 0, should still generate signal
         let snapshot = make_snapshot(dec!(50000), dec!(49920), dec!(49940));
-        let signal = detector.check(key, &snapshot, None, None);
+        let signal = detector.check(key, &snapshot, None, None, None);
 
         assert!(
             signal.is_some(),
@@ -1397,18 +1468,211 @@ mod tests {
 
         // First tick: establish baseline
         let snapshot1 = make_snapshot(dec!(50000), dec!(49980), dec!(49990));
-        let _ = detector.check(key, &snapshot1, None, None);
+        let _ = detector.check(key, &snapshot1, None, None, None);
 
         // Second tick: oracle FALLS by 200 bps (50000 -> 49900)
         // Velocity passes (200 bps > 5 bps)
         // But for BUY signal, direction is WRONG (falling, not rising)
         // Ask is below oracle (edge exists), but direction filter should block
         let snapshot2 = make_snapshot(dec!(49900), dec!(49820), dec!(49840));
-        let signal = detector.check(key, &snapshot2, None, None);
+        let signal = detector.check(key, &snapshot2, None, None, None);
 
         assert!(
             signal.is_none(),
             "Buy signal should be skipped: velocity OK but direction wrong (falling)"
         );
+    }
+
+    // ==========================================
+    // Quote Lag Gate Tests
+    // ==========================================
+
+    #[test]
+    fn test_quote_lag_gate_disabled_by_default() {
+        // When both min and max are 0, gate should be disabled
+        let config = DetectorConfig {
+            slippage_bps: dec!(2),
+            min_edge_bps: dec!(4),
+            oracle_direction_filter: false,
+            min_oracle_change_bps: dec!(0),
+            min_quote_lag_ms: 0, // Disabled
+            max_quote_lag_ms: 0, // Disabled
+            ..Default::default()
+        };
+        let detector = DislocationDetector::new(config).unwrap();
+        let key = test_key();
+
+        // Signal should pass with any oracle_age_ms
+        let snapshot = make_snapshot(dec!(50000), dec!(49920), dec!(49940));
+        let signal = detector.check(key, &snapshot, None, None, Some(100));
+        assert!(
+            signal.is_some(),
+            "Signal should pass when quote lag gate is disabled"
+        );
+    }
+
+    #[test]
+    fn test_quote_lag_gate_min_blocks_too_fresh() {
+        // When oracle age < min_quote_lag_ms, signal should be blocked
+        let config = DetectorConfig {
+            slippage_bps: dec!(2),
+            min_edge_bps: dec!(4),
+            oracle_direction_filter: false,
+            min_oracle_change_bps: dec!(0),
+            min_quote_lag_ms: 50, // Minimum 50ms
+            max_quote_lag_ms: 0,  // No upper bound
+            ..Default::default()
+        };
+        let detector = DislocationDetector::new(config).unwrap();
+        let key = test_key();
+
+        let snapshot = make_snapshot(dec!(50000), dec!(49920), dec!(49940));
+
+        // Too fresh (30ms < 50ms min) - should be blocked
+        let signal = detector.check(key, &snapshot, None, None, Some(30));
+        assert!(
+            signal.is_none(),
+            "Signal should be blocked when oracle moved too recently (30ms < 50ms min)"
+        );
+
+        // At threshold (50ms == 50ms min) - should pass
+        let signal = detector.check(key, &snapshot, None, None, Some(50));
+        assert!(
+            signal.is_some(),
+            "Signal should pass when oracle age equals min (50ms)"
+        );
+
+        // Above threshold (100ms > 50ms min) - should pass
+        let signal = detector.check(key, &snapshot, None, None, Some(100));
+        assert!(
+            signal.is_some(),
+            "Signal should pass when oracle age above min (100ms > 50ms)"
+        );
+    }
+
+    #[test]
+    fn test_quote_lag_gate_max_blocks_too_stale() {
+        // When oracle age > max_quote_lag_ms, signal should be blocked
+        let config = DetectorConfig {
+            slippage_bps: dec!(2),
+            min_edge_bps: dec!(4),
+            oracle_direction_filter: false,
+            min_oracle_change_bps: dec!(0),
+            min_quote_lag_ms: 0,   // No lower bound
+            max_quote_lag_ms: 500, // Maximum 500ms
+            ..Default::default()
+        };
+        let detector = DislocationDetector::new(config).unwrap();
+        let key = test_key();
+
+        let snapshot = make_snapshot(dec!(50000), dec!(49920), dec!(49940));
+
+        // Too stale (1000ms > 500ms max) - should be blocked
+        let signal = detector.check(key, &snapshot, None, None, Some(1000));
+        assert!(
+            signal.is_none(),
+            "Signal should be blocked when oracle moved too long ago (1000ms > 500ms max)"
+        );
+
+        // At threshold (500ms == 500ms max) - should pass
+        let signal = detector.check(key, &snapshot, None, None, Some(500));
+        assert!(
+            signal.is_some(),
+            "Signal should pass when oracle age equals max (500ms)"
+        );
+
+        // Below threshold (200ms < 500ms max) - should pass
+        let signal = detector.check(key, &snapshot, None, None, Some(200));
+        assert!(
+            signal.is_some(),
+            "Signal should pass when oracle age below max (200ms < 500ms)"
+        );
+    }
+
+    #[test]
+    fn test_quote_lag_gate_window() {
+        // When both min and max are set, only signals within window should pass
+        let config = DetectorConfig {
+            slippage_bps: dec!(2),
+            min_edge_bps: dec!(4),
+            oracle_direction_filter: false,
+            min_oracle_change_bps: dec!(0),
+            min_quote_lag_ms: 50,  // Minimum 50ms
+            max_quote_lag_ms: 500, // Maximum 500ms
+            ..Default::default()
+        };
+        let detector = DislocationDetector::new(config).unwrap();
+        let key = test_key();
+
+        let snapshot = make_snapshot(dec!(50000), dec!(49920), dec!(49940));
+
+        // Below window (30ms < 50ms) - blocked
+        let signal = detector.check(key, &snapshot, None, None, Some(30));
+        assert!(signal.is_none(), "Should be blocked: below min window");
+
+        // In window (200ms, within 50-500ms) - pass
+        let signal = detector.check(key, &snapshot, None, None, Some(200));
+        assert!(signal.is_some(), "Should pass: within window");
+
+        // Above window (1000ms > 500ms) - blocked
+        let signal = detector.check(key, &snapshot, None, None, Some(1000));
+        assert!(signal.is_none(), "Should be blocked: above max window");
+    }
+
+    #[test]
+    fn test_quote_lag_gate_none_allows() {
+        // When oracle_age_ms is None, gate should be skipped
+        let config = DetectorConfig {
+            slippage_bps: dec!(2),
+            min_edge_bps: dec!(4),
+            oracle_direction_filter: false,
+            min_oracle_change_bps: dec!(0),
+            min_quote_lag_ms: 50,  // Minimum 50ms
+            max_quote_lag_ms: 500, // Maximum 500ms
+            ..Default::default()
+        };
+        let detector = DislocationDetector::new(config).unwrap();
+        let key = test_key();
+
+        let snapshot = make_snapshot(dec!(50000), dec!(49920), dec!(49940));
+
+        // None should skip the gate (first tick scenario)
+        let signal = detector.check(key, &snapshot, None, None, None);
+        assert!(
+            signal.is_some(),
+            "Signal should pass when oracle_age_ms is None (gate skipped)"
+        );
+    }
+
+    #[test]
+    fn test_quote_lag_gate_sell_side() {
+        // Verify gate works for sell signals too
+        let config = DetectorConfig {
+            slippage_bps: dec!(2),
+            min_edge_bps: dec!(4),
+            oracle_direction_filter: false,
+            min_oracle_change_bps: dec!(0),
+            min_quote_lag_ms: 50,
+            max_quote_lag_ms: 500,
+            ..Default::default()
+        };
+        let detector = DislocationDetector::new(config).unwrap();
+        let key = test_key();
+
+        // Sell signal: bid above oracle
+        let snapshot = make_snapshot(dec!(50000), dec!(50060), dec!(50080));
+
+        // Too fresh - blocked
+        let signal = detector.check(key, &snapshot, None, None, Some(30));
+        assert!(signal.is_none(), "Sell signal should be blocked: too fresh");
+
+        // In window - pass
+        let signal = detector.check(key, &snapshot, None, None, Some(200));
+        assert!(signal.is_some(), "Sell signal should pass: in window");
+        assert_eq!(signal.unwrap().side, OrderSide::Sell);
+
+        // Too stale - blocked
+        let signal = detector.check(key, &snapshot, None, None, Some(1000));
+        assert!(signal.is_none(), "Sell signal should be blocked: too stale");
     }
 }

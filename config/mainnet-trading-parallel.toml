@@ -115,6 +115,18 @@ sizing_alpha = 0.10
 max_notional = 50
 min_book_notional = 50
 normal_book_notional = 5000
+#
+# Quote Lag Gate (PR-5: True Stale Liquidity)
+# Only generate signals when oracle changed within this time window.
+# Both set to 0 = disabled (backwards compatible)
+#
+# Trading Philosophy: "Oracle moves → MM quotes lag → capture stale liquidity"
+# - Too fresh (<50ms): May be noise, oracle will stabilize
+# - Sweet spot (50-500ms): True stale liquidity opportunity
+# - Too stale (>500ms): MM has already adjusted quotes
+#
+min_quote_lag_ms = 0   # 0=disabled, 推奨: 50ms (ノイズフィルタ)
+max_quote_lag_ms = 0   # 0=disabled, 推奨: 500ms (MM追従フィルタ)
 
 [persistence]
 data_dir = "./data/signals-trading"

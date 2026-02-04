@@ -25,7 +25,9 @@ use hip3_executor::{
     MarkPriceProvider, MarketStateCache, NonceManager, RealWsSender, RiskMonitor,
     RiskMonitorConfig as ExecutorRiskMonitorConfig, Signer, SystemClock, TradingReadyChecker,
 };
-use hip3_feed::{MarketEvent, MarketState, MessageParser, OracleMovementTracker, OracleTrackerHandle};
+use hip3_feed::{
+    MarketEvent, MarketState, MessageParser, OracleMovementTracker, OracleTrackerHandle,
+};
 use hip3_persistence::{FollowupRecord, FollowupWriter, ParquetWriter, SignalRecord};
 use hip3_position::{
     flatten_all_positions, new_exit_watcher, new_oracle_exit_watcher, spawn_position_tracker,
@@ -596,7 +598,31 @@ impl Application {
             positions_to_sync.len()
         );
 
+        // Record oracle baselines for existing positions BEFORE syncing to tracker.
+        // This ensures OracleExitWatcher won't immediately exit positions that were
+        // opened before the bot started (e.g., manual trades or bot restart).
+        //
+        // Note: We record baselines with current oracle consecutive counts.
+        // This means we only track movements AFTER the bot starts, not the full
+        // position history. This is the safest approach since we don't know the
+        // market state when the position was originally opened.
+        if let Some(ref oracle_exit) = self.oracle_exit_watcher {
+            for position in &positions_to_sync {
+                oracle_exit.on_position_opened(position.market, position.side);
+            }
+        }
+
         position_tracker.sync_positions(positions_to_sync).await;
+
+        // Sync flattening state to clear stale local_flattening entries
+        // This ensures that if a position was closed externally or by a previous flatten,
+        // the local state is cleared and future exits are not blocked.
+        if let Some(ref exit_watcher) = self.exit_watcher {
+            exit_watcher.sync_flattening_state();
+        }
+        if let Some(ref oracle_exit) = self.oracle_exit_watcher {
+            oracle_exit.sync_flattening_state();
+        }
 
         Ok(())
     }
@@ -1707,6 +1733,28 @@ impl Application {
         // Extract cloid from FillPayload for deduplication
         let cloid = fill.cloid.as_ref().map(|s| ClientOrderId::from(s.clone()));
 
+        // Record oracle baseline BEFORE creating position
+        // This prevents false exits when market already had consecutive moves
+        // before our position was opened.
+        //
+        // Example without baseline tracking (BUG):
+        //   - Market had 3 consecutive DOWN moves
+        //   - Bot opens LONG position
+        //   - OracleExitWatcher sees consecutive_against = 3 >= exit_against_moves
+        //   - Exit triggers immediately (incorrect!)
+        //
+        // With baseline tracking (FIX):
+        //   - Market had 3 consecutive DOWN moves
+        //   - Bot opens LONG position, baseline = { against: 3, with: 0 }
+        //   - After 2 more DOWN: delta_against = 5 - 3 = 2
+        //   - Exit triggers when delta >= threshold (correct!)
+        if !tracker.has_position(&market) {
+            // New position will be created - record baseline
+            if let Some(ref oracle_exit) = self.oracle_exit_watcher {
+                oracle_exit.on_position_opened(market, side);
+            }
+        }
+
         let tracker = tracker.clone();
         let timestamp = time;
         tokio::spawn(async move {
@@ -1714,6 +1762,16 @@ impl Application {
                 .fill(market, side, price, size, timestamp, cloid)
                 .await;
         });
+
+        // Clear flattening state for this market on any fill
+        // This ensures that after a position is closed, future exits are not blocked
+        // by stale local_flattening state in ExitWatcher/OracleExitWatcher.
+        if let Some(ref exit_watcher) = self.exit_watcher {
+            exit_watcher.clear_flattening(&market);
+        }
+        if let Some(ref oracle_exit) = self.oracle_exit_watcher {
+            oracle_exit.clear_flattening(&market);
+        }
     }
 
     /// Convert coin name to MarketKey.

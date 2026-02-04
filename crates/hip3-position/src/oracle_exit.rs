@@ -169,6 +169,19 @@ impl std::fmt::Display for OracleExitReason {
 ///
 /// Monitors oracle price movements to determine optimal exit timing.
 /// Called from WS message handler for sub-millisecond latency.
+///
+/// # Position Baseline Tracking
+///
+/// To correctly measure oracle movements "since entry", this watcher stores
+/// the baseline consecutive counts at position open time. Exit conditions
+/// are evaluated using the delta from baseline, not the global count.
+///
+/// Example:
+/// - Market had 3 consecutive DOWN moves before entry
+/// - Bot opens LONG position
+/// - Baseline stored: { consecutive_against: 3, consecutive_with: 0 }
+/// - After 2 more DOWN moves: current = 5, delta = 5 - 3 = 2
+/// - Exit triggers when delta >= exit_against_moves (not when global >= N)
 pub struct OracleExitWatcher {
     /// Configuration.
     config: OracleExitConfig,
@@ -184,6 +197,13 @@ pub struct OracleExitWatcher {
 
     /// Local tracking of markets with pending flatten orders.
     local_flattening: RwLock<HashSet<MarketKey>>,
+
+    /// Baseline consecutive counts at position entry time.
+    /// Key: MarketKey, Value: OracleBaseline
+    ///
+    /// This prevents immediate false exits when the market already had
+    /// consecutive moves before our position was opened.
+    position_baselines: RwLock<HashMap<MarketKey, OracleBaseline>>,
 
     /// Counter for reversal exits (metrics).
     reversal_count: AtomicU64,
@@ -216,8 +236,49 @@ impl OracleExitWatcher {
             oracle_tracker,
             flatten_tx,
             local_flattening: RwLock::new(HashSet::new()),
+            position_baselines: RwLock::new(HashMap::new()),
             reversal_count: AtomicU64::new(0),
             catchup_count: AtomicU64::new(0),
+        }
+    }
+
+    /// Record baseline consecutive counts when a new position is opened.
+    ///
+    /// This MUST be called when a position is created to prevent false exits.
+    /// Without baseline tracking, if the market already had N consecutive moves
+    /// against the position side, exit would trigger immediately.
+    ///
+    /// # Arguments
+    /// * `key` - Market key
+    /// * `side` - Position side (Buy = long, Sell = short)
+    pub fn on_position_opened(&self, key: MarketKey, side: OrderSide) {
+        let consecutive_with = self.oracle_tracker.consecutive_with(&key, side);
+        let consecutive_against = self.oracle_tracker.consecutive_against(&key, side);
+
+        let baseline = OracleBaseline {
+            consecutive_with,
+            consecutive_against,
+        };
+
+        debug!(
+            market = %key,
+            side = ?side,
+            baseline_with = consecutive_with,
+            baseline_against = consecutive_against,
+            "OracleExitWatcher: recorded position baseline"
+        );
+
+        let mut baselines = self.position_baselines.write();
+        baselines.insert(key, baseline);
+    }
+
+    /// Clear baseline when position is closed.
+    ///
+    /// Should be called when a position is fully closed to clean up state.
+    pub fn on_position_closed(&self, key: &MarketKey) {
+        let mut baselines = self.position_baselines.write();
+        if baselines.remove(key).is_some() {
+            debug!(market = %key, "OracleExitWatcher: cleared position baseline");
         }
     }
 
@@ -279,20 +340,63 @@ impl OracleExitWatcher {
         }
     }
 
-    /// Check if position should exit based on oracle movements.
+    /// Check if position should exit based on oracle movements since entry.
+    ///
+    /// Uses delta from baseline (not global count) to correctly measure
+    /// movements that occurred after position was opened.
     fn check_oracle_exit(&self, position: &Position) -> Option<OracleExitReason> {
         let key = &position.market;
 
-        // Check for loss cut: oracle moving against us
-        let against = self.oracle_tracker.consecutive_against(key, position.side);
-        if against >= self.config.exit_against_moves {
-            return Some(OracleExitReason::OracleReversal { moves: against });
+        // Get baseline for this position
+        let baseline = {
+            let baselines = self.position_baselines.read();
+            baselines.get(key).copied()
+        };
+
+        // If no baseline, position was opened before OracleExitWatcher started
+        // or on_position_opened() wasn't called. Use conservative approach: no exit.
+        let baseline = match baseline {
+            Some(b) => b,
+            None => {
+                trace!(
+                    market = %key,
+                    "OracleExitWatcher: no baseline for position, skipping exit check"
+                );
+                return None;
+            }
+        };
+
+        // Get current consecutive counts
+        let current_against = self.oracle_tracker.consecutive_against(key, position.side);
+        let current_with = self.oracle_tracker.consecutive_with(key, position.side);
+
+        // Calculate delta (movements since entry)
+        // Use saturating_sub in case oracle tracker was reset
+        let delta_against = current_against.saturating_sub(baseline.consecutive_against);
+        let delta_with = current_with.saturating_sub(baseline.consecutive_with);
+
+        trace!(
+            market = %key,
+            side = ?position.side,
+            baseline_against = baseline.consecutive_against,
+            baseline_with = baseline.consecutive_with,
+            current_against = current_against,
+            current_with = current_with,
+            delta_against = delta_against,
+            delta_with = delta_with,
+            "OracleExitWatcher: checking exit condition"
+        );
+
+        // Check for loss cut: oracle moving against us since entry
+        if delta_against >= self.config.exit_against_moves {
+            return Some(OracleExitReason::OracleReversal {
+                moves: delta_against,
+            });
         }
 
-        // Check for profit take: oracle moving with us (MMs catching up)
-        let with = self.oracle_tracker.consecutive_with(key, position.side);
-        if with >= self.config.exit_with_moves {
-            return Some(OracleExitReason::OracleCatchup { moves: with });
+        // Check for profit take: oracle moving with us since entry (MMs catching up)
+        if delta_with >= self.config.exit_with_moves {
+            return Some(OracleExitReason::OracleCatchup { moves: delta_with });
         }
 
         None
@@ -371,18 +475,36 @@ impl OracleExitWatcher {
         }
     }
 
-    /// Sync local flattening state with position tracker.
+    /// Sync local flattening state and baselines with position tracker.
     pub fn sync_flattening_state(&self) {
         let positions = self.position_handle.positions_snapshot();
         let position_markets: HashSet<MarketKey> = positions.iter().map(|p| p.market).collect();
 
-        let mut flattening = self.local_flattening.write();
+        // Clean up flattening state
+        {
+            let mut flattening = self.local_flattening.write();
 
-        // Remove markets with no position
-        flattening.retain(|m| position_markets.contains(m));
+            // Remove markets with no position
+            flattening.retain(|m| position_markets.contains(m));
 
-        // Remove markets where flatten order was completed/rejected
-        flattening.retain(|m| self.position_handle.is_flattening(m));
+            // Remove markets where flatten order was completed/rejected
+            flattening.retain(|m| self.position_handle.is_flattening(m));
+        }
+
+        // Clean up baselines for closed positions
+        {
+            let mut baselines = self.position_baselines.write();
+            let before_count = baselines.len();
+            baselines.retain(|m, _| position_markets.contains(m));
+            let removed = before_count - baselines.len();
+            if removed > 0 {
+                debug!(
+                    removed = removed,
+                    remaining = baselines.len(),
+                    "OracleExitWatcher: cleaned up stale baselines"
+                );
+            }
+        }
     }
 
     /// Get metrics.

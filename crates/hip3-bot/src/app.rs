@@ -1677,6 +1677,27 @@ impl Application {
             }
         }
 
+        // PR-4: Clear flattening state on ANY terminal state (Filled, Rejected, Cancelled)
+        // This prevents local_flattening from getting stuck when flatten orders fail.
+        // The tracker's pending_orders_snapshot is cleared by order_update() below,
+        // but local_flattening in ExitWatcher/OracleExitWatcher needs explicit clearing.
+        if state.is_terminal() {
+            if let Some(market) = self.coin_to_market(coin) {
+                if let Some(ref exit_watcher) = self.exit_watcher {
+                    exit_watcher.clear_flattening(&market);
+                }
+                if let Some(ref oracle_exit) = self.oracle_exit_watcher {
+                    oracle_exit.clear_flattening(&market);
+                }
+                debug!(
+                    market = %market,
+                    state = ?state,
+                    cloid = %cloid_str,
+                    "Cleared flattening state on terminal order"
+                );
+            }
+        }
+
         let filled_size = sz.parse().map(Size::new).unwrap_or(Size::ZERO);
 
         let tracker = tracker.clone();

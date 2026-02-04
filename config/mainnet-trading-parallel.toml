@@ -18,56 +18,218 @@ user_address = "0x0116A3D95994BcC7D6A84380ED6256FBb32cD25D"
 signer_address = "0xbf8e23f88aead1a3b17d1ad39ef766e9f77de281"
 private_key = "0xd7fb667b6c9ecea9d66b6acc1f1d7b15c50dbcb93bff0eeff6a42de957fa155f"
 
-# Trading markets: Optimized with Oracle Direction Filter (2026-02-01)
-#
-# Oracle direction filter enabled (default=true):
-# - Buy signals: Only when oracle is rising (stale ask)
-# - Sell signals: Only when oracle is falling (stale bid)
-# - Filters out "oracle lag" signals → lower thresholds viable
-#
-# Threshold strategy:
-# - Balanced markets (>40% balance): 25 bps - more signals OK
-# - Biased markets (<20% balance): 30 bps - filter handles bias
-#
-# | Market | Balance | Type     | Threshold |
-# |--------|---------|----------|-----------|
-# | SILVER | 74.2%   | Balanced | 25 bps    |
-# | GOLD   | 47.7%   | Balanced | 25 bps    |
-# | MSTR   | 14.0%   | Biased   | 30 bps    |
-# | COPPER | 19.0%   | Biased   | 30 bps    |
-# | COIN   | 15.2%   | Biased   | 30 bps    |
-
-# 2026-02-03 Analysis: 10% win rate, 8-13 bps actual spread
-# Problem: 40 bps entry - 8-13 bps spread × 2 (entry+exit) = ~15-26 bps net edge
-# Solution: Raise threshold to ensure sufficient edge after spread costs
-#
-# New threshold = spread_cost × 2 (entry+exit) + min_profit margin
-# Conservative: 25 bps spread cost + 35 bps profit target = 60 bps
+# Trading markets: ALL xyz perp markets (2026-02-04)
+# 42 markets total - threshold 40 bps (data-driven: 40bps+ = 100% win rate)
 
 [[markets]]
-asset_idx = 110026
-coin = "xyz:SILVER"
-threshold_bps = 40  # Data-driven: 40bps+ = 100% win rate, 40.5 bps avg profit
+asset_idx = 110000
+coin = "xyz:XYZ100"
+threshold_bps = 40
 
 [[markets]]
-asset_idx = 110017
-coin = "xyz:MSTR"
-threshold_bps = 40  # Data-driven: 40bps+ = 100% win rate
+asset_idx = 110001
+coin = "xyz:TSLA"
+threshold_bps = 40
 
 [[markets]]
-asset_idx = 110030
-coin = "xyz:COPPER"
-threshold_bps = 40  # Data-driven: 40bps+ = 100% win rate
+asset_idx = 110002
+coin = "xyz:NVDA"
+threshold_bps = 40
 
 [[markets]]
 asset_idx = 110003
 coin = "xyz:GOLD"
-threshold_bps = 40  # Data-driven: 40bps+ = 100% win rate
+threshold_bps = 40
+
+[[markets]]
+asset_idx = 110004
+coin = "xyz:HOOD"
+threshold_bps = 40
+
+[[markets]]
+asset_idx = 110005
+coin = "xyz:INTC"
+threshold_bps = 40
+
+[[markets]]
+asset_idx = 110006
+coin = "xyz:PLTR"
+threshold_bps = 40
 
 [[markets]]
 asset_idx = 110007
 coin = "xyz:COIN"
-threshold_bps = 50  # Higher spread market: 50 bps for safety margin
+threshold_bps = 50  # Higher spread market
+
+[[markets]]
+asset_idx = 110008
+coin = "xyz:META"
+threshold_bps = 40
+
+[[markets]]
+asset_idx = 110009
+coin = "xyz:AAPL"
+threshold_bps = 40
+
+[[markets]]
+asset_idx = 110010
+coin = "xyz:MSFT"
+threshold_bps = 40
+
+[[markets]]
+asset_idx = 110011
+coin = "xyz:ORCL"
+threshold_bps = 40
+
+[[markets]]
+asset_idx = 110012
+coin = "xyz:GOOGL"
+threshold_bps = 40
+
+[[markets]]
+asset_idx = 110013
+coin = "xyz:AMZN"
+threshold_bps = 40
+
+[[markets]]
+asset_idx = 110014
+coin = "xyz:AMD"
+threshold_bps = 40
+
+[[markets]]
+asset_idx = 110015
+coin = "xyz:MU"
+threshold_bps = 40
+
+[[markets]]
+asset_idx = 110016
+coin = "xyz:SNDK"
+threshold_bps = 40
+
+[[markets]]
+asset_idx = 110017
+coin = "xyz:MSTR"
+threshold_bps = 40
+
+[[markets]]
+asset_idx = 110018
+coin = "xyz:CRCL"
+threshold_bps = 40
+
+[[markets]]
+asset_idx = 110019
+coin = "xyz:NFLX"
+threshold_bps = 40
+
+[[markets]]
+asset_idx = 110020
+coin = "xyz:COST"
+threshold_bps = 40
+
+[[markets]]
+asset_idx = 110021
+coin = "xyz:LLY"
+threshold_bps = 40
+
+[[markets]]
+asset_idx = 110022
+coin = "xyz:SKHX"
+threshold_bps = 40
+
+[[markets]]
+asset_idx = 110023
+coin = "xyz:TSM"
+threshold_bps = 40
+
+[[markets]]
+asset_idx = 110024
+coin = "xyz:JPY"
+threshold_bps = 40
+
+[[markets]]
+asset_idx = 110025
+coin = "xyz:EUR"
+threshold_bps = 40
+
+[[markets]]
+asset_idx = 110026
+coin = "xyz:SILVER"
+threshold_bps = 40
+
+[[markets]]
+asset_idx = 110027
+coin = "xyz:RIVN"
+threshold_bps = 40
+
+[[markets]]
+asset_idx = 110028
+coin = "xyz:BABA"
+threshold_bps = 40
+
+[[markets]]
+asset_idx = 110029
+coin = "xyz:CL"
+threshold_bps = 40
+
+[[markets]]
+asset_idx = 110030
+coin = "xyz:COPPER"
+threshold_bps = 40
+
+[[markets]]
+asset_idx = 110031
+coin = "xyz:NATGAS"
+threshold_bps = 40
+
+[[markets]]
+asset_idx = 110032
+coin = "xyz:URANIUM"
+threshold_bps = 40
+
+[[markets]]
+asset_idx = 110033
+coin = "xyz:ALUMINIUM"
+threshold_bps = 40
+
+[[markets]]
+asset_idx = 110034
+coin = "xyz:SMSN"
+threshold_bps = 40
+
+[[markets]]
+asset_idx = 110035
+coin = "xyz:PLATINUM"
+threshold_bps = 40
+
+[[markets]]
+asset_idx = 110036
+coin = "xyz:USAR"
+threshold_bps = 40
+
+[[markets]]
+asset_idx = 110037
+coin = "xyz:CRWV"
+threshold_bps = 40
+
+[[markets]]
+asset_idx = 110038
+coin = "xyz:URNM"
+threshold_bps = 40
+
+[[markets]]
+asset_idx = 110039
+coin = "xyz:PALLADIUM"
+threshold_bps = 40
+
+[[markets]]
+asset_idx = 110040
+coin = "xyz:DXY"
+threshold_bps = 40
+
+[[markets]]
+asset_idx = 110041
+coin = "xyz:GME"
+threshold_bps = 40
 
 [websocket]
 max_reconnect_attempts = 0

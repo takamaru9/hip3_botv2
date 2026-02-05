@@ -26,12 +26,57 @@
 use std::collections::HashMap;
 
 use crate::error::{RiskError, RiskResult};
+use chrono::{NaiveTime, Timelike, Utc};
 use hip3_core::types::MarketSnapshot;
 use hip3_core::{MarketKey, MarketSpec, Price, RejectReason, Size};
 use hip3_position::PositionTrackerHandle;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, trace, warn};
+
+/// Time window for trading blackout.
+///
+/// Trading Philosophy: Market open times have different MM behavior.
+/// During these windows, the assumption "MM quotes lag" may not hold.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BlackoutWindow {
+    /// Start time in HH:MM format (UTC).
+    pub start: String,
+    /// End time in HH:MM format (UTC).
+    pub end: String,
+}
+
+impl BlackoutWindow {
+    /// Parse start time as NaiveTime.
+    pub fn start_time(&self) -> Option<NaiveTime> {
+        NaiveTime::parse_from_str(&self.start, "%H:%M").ok()
+    }
+
+    /// Parse end time as NaiveTime.
+    pub fn end_time(&self) -> Option<NaiveTime> {
+        NaiveTime::parse_from_str(&self.end, "%H:%M").ok()
+    }
+
+    /// Check if a given time is within this blackout window.
+    pub fn contains(&self, time: NaiveTime) -> bool {
+        let start = match self.start_time() {
+            Some(t) => t,
+            None => return false,
+        };
+        let end = match self.end_time() {
+            Some(t) => t,
+            None => return false,
+        };
+
+        if start <= end {
+            // Normal case: e.g., 09:00-09:30
+            time >= start && time < end
+        } else {
+            // Wrap around midnight: e.g., 23:00-01:00
+            time >= start || time < end
+        }
+    }
+}
 
 /// Risk gate configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -52,6 +97,13 @@ pub struct RiskGateConfig {
     /// Maximum AssetCtx age in milliseconds (P0-12: monotonic freshness).
     #[serde(default = "default_max_ctx_age_ms")]
     pub max_ctx_age_ms: i64,
+    /// Trading blackout windows (UTC).
+    ///
+    /// Trading Philosophy: During market open times (e.g., US Pre-market 09:00 UTC),
+    /// MM behavior changes and the assumption "MM quotes lag" may not hold.
+    /// Block new entries during these high-risk periods.
+    #[serde(default = "default_blackout_windows")]
+    pub blackout_windows: Vec<BlackoutWindow>,
 }
 
 fn default_max_bbo_age_ms() -> i64 {
@@ -60,6 +112,10 @@ fn default_max_bbo_age_ms() -> i64 {
 
 fn default_max_ctx_age_ms() -> i64 {
     8000
+}
+
+fn default_blackout_windows() -> Vec<BlackoutWindow> {
+    Vec::new() // Empty by default for backwards compatibility
 }
 
 impl Default for RiskGateConfig {
@@ -72,6 +128,7 @@ impl Default for RiskGateConfig {
             max_oi_fraction: Decimal::new(1, 2),   // 0.01 = 1%
             max_bbo_age_ms: 2000,                  // P0-12: 2 seconds
             max_ctx_age_ms: 8000,                  // P0-12: 8 seconds (matches oracle)
+            blackout_windows: Vec::new(),          // Empty by default
         }
     }
 }
@@ -148,6 +205,7 @@ impl RiskGate {
     /// 6. oi_cap - position limits
     /// 7. param_change - market change detection
     /// 8. halt - market status
+    /// 9. time_of_day - blackout windows for high-risk periods
     ///
     /// NOTE: oracle_fresh gate was removed (BUG-002). ctx_update gate now covers
     /// oracle freshness because it checks when we last received an AssetCtx update,
@@ -170,7 +228,7 @@ impl RiskGate {
         bbo_server_time: Option<i64>,
         position_size: Option<Size>,
     ) -> RiskResult<Vec<GateResult>> {
-        let mut results = Vec::with_capacity(8);
+        let mut results = Vec::with_capacity(9);
 
         // P0-2: Phase 1 - Prerequisite gates (early return on block)
         // These gates check data freshness and integrity.
@@ -272,6 +330,17 @@ impl RiskGate {
             });
         }
         results.push(gate8);
+
+        // Gate 9: Time of Day (Blackout Windows)
+        let gate9 = self.check_time_of_day();
+        if let GateResult::Block(reason) = &gate9 {
+            trace!(gate = "time_of_day", reason, "trading blackout");
+            return Err(RiskError::GateBlocked {
+                gate: "time_of_day".to_string(),
+                reason: reason.clone(),
+            });
+        }
+        results.push(gate9);
 
         Ok(results)
     }
@@ -534,6 +603,40 @@ impl RiskGate {
         debug!("Time regression flag reset");
     }
 
+    /// Gate 9: Time of Day (Blackout Windows)
+    ///
+    /// Block new entries during high-risk time windows (e.g., market open).
+    ///
+    /// Trading Philosophy: During market open times, MM behavior changes:
+    /// - High volatility, rapid quote updates
+    /// - The assumption "MM quotes lag" may not hold
+    /// - Better to avoid these periods for new entries
+    ///
+    /// Empty blackout_windows = gate disabled (backwards compatible).
+    pub fn check_time_of_day(&self) -> GateResult {
+        if self.config.blackout_windows.is_empty() {
+            return GateResult::Pass;
+        }
+
+        let now_utc = Utc::now();
+        let current_time =
+            NaiveTime::from_hms_opt(now_utc.hour(), now_utc.minute(), now_utc.second())
+                .unwrap_or_else(|| NaiveTime::from_hms_opt(0, 0, 0).unwrap());
+
+        for window in &self.config.blackout_windows {
+            if window.contains(current_time) {
+                return GateResult::Block(format!(
+                    "Trading blackout: {} UTC is within {}-{} window",
+                    current_time.format("%H:%M"),
+                    window.start,
+                    window.end
+                ));
+            }
+        }
+
+        GateResult::Pass
+    }
+
     /// Check if any critical flag is set.
     pub fn has_critical_block(&self) -> bool {
         self.param_change_detected || self.halt_detected || self.time_regression_detected
@@ -553,6 +656,7 @@ impl RiskGate {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::NaiveTime;
     use hip3_core::{AssetCtx, Bbo, OracleData, Price, Size};
     use rust_decimal_macros::dec;
 
@@ -672,6 +776,94 @@ mod tests {
         assert!(result.is_pass());
     }
 
+    // === Time of Day (Blackout Window) tests ===
+
+    #[test]
+    fn test_time_of_day_gate_disabled_by_default() {
+        let gate = RiskGate::new(RiskGateConfig::default());
+        let result = gate.check_time_of_day();
+        assert!(result.is_pass(), "Should pass when no blackout windows");
+    }
+
+    #[test]
+    fn test_blackout_window_contains() {
+        // Normal window: 09:00-09:30
+        let window = BlackoutWindow {
+            start: "09:00".to_string(),
+            end: "09:30".to_string(),
+        };
+
+        assert!(window.contains(NaiveTime::from_hms_opt(9, 0, 0).unwrap()));
+        assert!(window.contains(NaiveTime::from_hms_opt(9, 15, 0).unwrap()));
+        assert!(!window.contains(NaiveTime::from_hms_opt(9, 30, 0).unwrap())); // End is exclusive
+        assert!(!window.contains(NaiveTime::from_hms_opt(8, 59, 0).unwrap()));
+    }
+
+    #[test]
+    fn test_blackout_window_midnight_wrap() {
+        // Wrap around midnight: 23:00-01:00
+        let window = BlackoutWindow {
+            start: "23:00".to_string(),
+            end: "01:00".to_string(),
+        };
+
+        assert!(window.contains(NaiveTime::from_hms_opt(23, 30, 0).unwrap()));
+        assert!(window.contains(NaiveTime::from_hms_opt(0, 30, 0).unwrap()));
+        assert!(!window.contains(NaiveTime::from_hms_opt(1, 0, 0).unwrap())); // End is exclusive
+        assert!(!window.contains(NaiveTime::from_hms_opt(22, 0, 0).unwrap()));
+    }
+
+    #[test]
+    fn test_time_of_day_gate_blocks_in_window() {
+        use chrono::Utc;
+
+        let now = Utc::now();
+        let current_hour = now.hour();
+        let current_minute = now.minute();
+
+        // Create a window that includes the current time
+        let start = format!("{:02}:{:02}", current_hour, current_minute);
+        let end_minute = (current_minute + 30) % 60;
+        let end_hour = if current_minute + 30 >= 60 {
+            (current_hour + 1) % 24
+        } else {
+            current_hour
+        };
+        let end = format!("{:02}:{:02}", end_hour, end_minute);
+
+        let config = RiskGateConfig {
+            blackout_windows: vec![BlackoutWindow { start, end }],
+            ..Default::default()
+        };
+        let gate = RiskGate::new(config);
+
+        let result = gate.check_time_of_day();
+        assert!(result.is_block(), "Should block during blackout window");
+    }
+
+    #[test]
+    fn test_time_of_day_gate_passes_outside_window() {
+        use chrono::Utc;
+
+        let now = Utc::now();
+        let current_hour = now.hour();
+
+        // Create a window that does NOT include the current time (2 hours ago)
+        let start_hour = (current_hour + 22) % 24; // 2 hours ago
+        let end_hour = (current_hour + 23) % 24; // 1 hour ago
+        let start = format!("{:02}:00", start_hour);
+        let end = format!("{:02}:00", end_hour);
+
+        let config = RiskGateConfig {
+            blackout_windows: vec![BlackoutWindow { start, end }],
+            ..Default::default()
+        };
+        let gate = RiskGate::new(config);
+
+        let result = gate.check_time_of_day();
+        assert!(result.is_pass(), "Should pass outside blackout window");
+    }
+
     // === P0-2: Early Return tests ===
 
     /// P0-2: Verify EWMA is not updated when ctx is stale.
@@ -767,7 +959,7 @@ mod tests {
     }
 
     /// P0-2: Verify all gates pass with valid data.
-    /// BUG-002: oracle_fresh gate was removed; now 8 gates total.
+    /// BUG-002: oracle_fresh gate was removed; now 9 gates total (incl. time_of_day).
     #[test]
     fn test_all_gates_pass_with_valid_data() {
         let config = RiskGateConfig::default();
@@ -781,8 +973,8 @@ mod tests {
         let results = result.unwrap();
         assert_eq!(
             results.len(),
-            8,
-            "Should have 8 gate results (BUG-002: oracle_fresh removed)"
+            9,
+            "Should have 9 gate results (BUG-002: oracle_fresh removed, time_of_day added)"
         );
 
         for r in &results {

@@ -254,6 +254,24 @@ max_oi_fraction = 0.01
 # WebSocket接続状態は ctx_update (8秒) でカバー
 max_bbo_age_ms = 0
 
+# Trading Blackout Windows (UTC)
+#
+# Trading Philosophy: During market open times, MM behavior changes:
+# - High volatility, rapid quote updates
+# - The assumption "MM quotes lag" may not hold
+# - Better to avoid these periods for new entries
+#
+# US Pre-market Open: 09:00 UTC (4:00 AM EST)
+# US Market Open: 14:30 UTC (9:30 AM EST)
+# US Market Close: 21:00 UTC (4:00 PM EST)
+[[risk.blackout_windows]]
+start = "09:00"
+end = "09:15"
+
+[[risk.blackout_windows]]
+start = "14:30"
+end = "14:45"
+
 # Oracle Movement Tracker (P1)
 # オラクルの連続性を追跡し、エントリー/エグジット判断に使用
 [oracle_tracking]

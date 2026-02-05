@@ -154,7 +154,9 @@ threshold_bps = 40
 [[markets]]
 asset_idx = 110026
 coin = "xyz:SILVER"
-threshold_bps = 40
+# 2026-02-05: Increased threshold due to wide spreads and losses
+# Market shows frequent Unchanged oracle direction → structural wide spread
+threshold_bps = 60
 
 [[markets]]
 asset_idx = 110027
@@ -204,7 +206,9 @@ threshold_bps = 40
 [[markets]]
 asset_idx = 110036
 coin = "xyz:USAR"
-threshold_bps = 40
+# 2026-02-05: Wide spread market (85-95 bps consistently)
+# Increased threshold to filter structural spread
+threshold_bps = 80
 
 [[markets]]
 asset_idx = 110037
@@ -214,7 +218,9 @@ threshold_bps = 40
 [[markets]]
 asset_idx = 110038
 coin = "xyz:URNM"
-threshold_bps = 40
+# 2026-02-05: Very wide spread market (141 bps consistently)
+# Essentially disabled - only trade extreme dislocations
+threshold_bps = 120
 
 [[markets]]
 asset_idx = 110039
@@ -287,8 +293,12 @@ normal_book_notional = 5000
 # - Sweet spot (50-500ms): True stale liquidity opportunity
 # - Too stale (>500ms): MM has already adjusted quotes
 #
-min_quote_lag_ms = 0   # 0=disabled, 推奨: 50ms (ノイズフィルタ)
-max_quote_lag_ms = 0   # 0=disabled, 推奨: 500ms (MM追従フィルタ)
+# Quote Lag Gate ENABLED (PR-5): True stale liquidity filter
+# 2026-02-05: Enabling to fix Trading Philosophy violation
+#   Problem: oracle_age_ms = 3000+ ms trades were losing money
+#   Signals with oracle_direction: Unchanged and stale oracle are NOT stale liquidity
+min_quote_lag_ms = 50   # Filter too-fresh oracle moves (noise)
+max_quote_lag_ms = 500  # Filter too-stale oracle moves (MM caught up)
 
 [persistence]
 data_dir = "./data/signals-trading"

@@ -38,7 +38,7 @@ services:
 
     # Environment
     environment:
-      - RUST_LOG=info,hip3_bot=debug,hip3_executor=debug,hip3_ws=info,hip3_registry=info
+      - RUST_LOG=info,hip3_bot=info,hip3_executor=info,hip3_ws=info,hip3_registry=info
       - RUST_BACKTRACE=1
       - HIP3_TRADING_KEY=${HIP3_TRADING_KEY}
 

@@ -1433,7 +1433,7 @@ impl Application {
                                 // Gate: Check WS READY-TRADING before processing signal
                                 if let Some(ref cm) = self.connection_manager {
                                     if !cm.is_ready() {
-                                        debug!(
+                                        warn!(
                                             market = %signal.market_key,
                                             "Signal dropped: not ready for trading"
                                         );
@@ -1451,7 +1451,7 @@ impl Application {
                                     .unwrap_or(Size::new(Decimal::new(1, 4))); // Default 0.0001
                                 let rounded_size = signal.suggested_size.round_to_lot(lot_size);
                                 if rounded_size.is_zero() {
-                                    debug!(
+                                    warn!(
                                         market = %signal.market_key,
                                         suggested_size = %signal.suggested_size,
                                         lot_size = %lot_size,
@@ -1486,8 +1486,11 @@ impl Application {
                                         );
                                     }
 
-                                    debug!(
+                                    info!(
                                         signal_id = %signal.signal_id,
+                                        market = %signal.market_key,
+                                        side = ?signal.side,
+                                        raw_edge_bps = %signal.raw_edge_bps,
                                         result = ?result,
                                         latency_ms = latency_ms,
                                         "Signal execution result"

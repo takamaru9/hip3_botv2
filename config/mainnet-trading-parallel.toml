@@ -116,7 +116,8 @@ threshold_bps = 40
 [[markets]]
 asset_idx = 110018
 coin = "xyz:CRCL"
-threshold_bps = 40
+# 2026-02-06: Edge decay 20.5% (partial), residual structural ~52 bps
+threshold_bps = 60
 
 [[markets]]
 asset_idx = 110019
@@ -141,7 +142,9 @@ threshold_bps = 40
 [[markets]]
 asset_idx = 110023
 coin = "xyz:TSM"
-threshold_bps = 40
+# 2026-02-06: Edge decay analysis shows 36% decay → 41 bps residual structural gap
+# Raising threshold above structural floor
+threshold_bps = 80
 
 [[markets]]
 asset_idx = 110024
@@ -156,9 +159,10 @@ threshold_bps = 40
 [[markets]]
 asset_idx = 110026
 coin = "xyz:SILVER"
-# 2026-02-05: Increased threshold due to wide spreads and losses
-# Market shows frequent Unchanged oracle direction → structural wide spread
-threshold_bps = 60
+# 2026-02-06: Edge decay analysis: 123 bps → 121.5 bps after 5s (1.2% decay)
+# Pure structural oracle-to-quote gap, not stale liquidity
+# Must exceed structural floor significantly to be real edge
+threshold_bps = 150
 
 [[markets]]
 asset_idx = 110027
@@ -203,14 +207,17 @@ threshold_bps = 40
 [[markets]]
 asset_idx = 110035
 coin = "xyz:PLATINUM"
-threshold_bps = 40
+# 2026-02-06: Edge decay analysis: 57.8 → 55.1 bps after 5s (4.4% decay)
+# Pure structural oracle-to-quote gap, not stale liquidity
+threshold_bps = 80
 
 [[markets]]
 asset_idx = 110036
 coin = "xyz:USAR"
-# 2026-02-05: Wide spread market (85-95 bps consistently)
-# Increased threshold to filter structural spread
-threshold_bps = 80
+# 2026-02-06: Edge decay -2.9% (edge INCREASES over 5s!) = pure structural gap
+# Structural edge: 104-107 bps. Must exceed significantly.
+# adaptive_threshold (spread 85 bps * 1.5 = 127 bps) will also help
+threshold_bps = 150
 
 [[markets]]
 asset_idx = 110037

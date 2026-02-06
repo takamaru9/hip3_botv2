@@ -386,3 +386,20 @@ update_interval_ms = 100
 max_connections = 10
 username = ""
 password = ""
+
+# Day 3: Risk Control Gates (Phase 2 - defensive only, no trading behavior change)
+#
+# MaxDrawdownGate: Limit session losses per hour
+# Blocks new entries when cumulative realized losses exceed threshold
+# Existing positions continue to be managed (exits still work)
+[max_drawdown]
+max_hourly_drawdown_usd = 10.0  # Block new entries if $10+ lost in rolling 1-hour window
+reset_interval_secs = 3600       # Rolling window resets after 1 hour
+
+# CorrelationCooldownGate: Detect correlated simultaneous closes
+# When N positions close within a short time window, enter cooldown
+# Protects against US Pre-market open scenario (4 simultaneous losses)
+[correlation_cooldown]
+correlation_close_threshold = 3   # Trigger cooldown if 3+ closes within window
+correlation_window_secs = 30      # Detection window: 30 seconds
+correlation_cooldown_secs = 120   # Cooldown period: 2 minutes (block new entries)

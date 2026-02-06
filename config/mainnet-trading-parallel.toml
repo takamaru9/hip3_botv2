@@ -41,7 +41,8 @@ threshold_bps = 30
 [[markets]]
 asset_idx = 110003
 coin = "xyz:GOLD"
-threshold_bps = 40
+# 2026-02-06: Raised. 1288 signals med=45 bps, 3 trades, net -$0.28
+threshold_bps = 80
 
 [[markets]]
 asset_idx = 110004
@@ -123,7 +124,9 @@ threshold_bps = 100
 [[markets]]
 asset_idx = 110017
 coin = "xyz:MSTR"
-threshold_bps = 40
+# 2026-02-06: DISABLED. 253 signals med=41 bps, 29 trades, net -$3.50
+# Structural spread market - edge IS the spread, not stale liquidity
+threshold_bps = 999
 
 [[markets]]
 asset_idx = 110018
@@ -200,7 +203,8 @@ threshold_bps = 40
 [[markets]]
 asset_idx = 110030
 coin = "xyz:COPPER"
-threshold_bps = 40
+# 2026-02-06: Raised. 43 signals, 3 trades, net -$0.27
+threshold_bps = 80
 
 [[markets]]
 asset_idx = 110031
@@ -240,7 +244,9 @@ threshold_bps = 150
 [[markets]]
 asset_idx = 110037
 coin = "xyz:CRWV"
-threshold_bps = 40
+# 2026-02-06: DISABLED. 903 signals med=55 bps, 73 trades, net -$3.75
+# Structural spread market - biggest single-market loser
+threshold_bps = 999
 
 [[markets]]
 asset_idx = 110038

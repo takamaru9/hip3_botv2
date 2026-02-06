@@ -99,7 +99,10 @@ threshold_bps = 40
 [[markets]]
 asset_idx = 110015
 coin = "xyz:MU"
-threshold_bps = 40
+# 2026-02-06: Structural spread - 1.7% decay@1s, 4.1%@5s (pure structural)
+# 99 signals all SELL-side, actual P&L: -$0.81 from 27 trades
+# adaptive_threshold (spread~48 * 1.5 = 72) will also filter
+threshold_bps = 80
 
 [[markets]]
 asset_idx = 110016
@@ -142,9 +145,10 @@ threshold_bps = 40
 [[markets]]
 asset_idx = 110023
 coin = "xyz:TSM"
-# 2026-02-06: Edge decay analysis shows 36% decay → 41 bps residual structural gap
-# Raising threshold above structural floor
-threshold_bps = 80
+# 2026-02-06: PURE STRUCTURAL - 0.3% decay@1s, 1.3%@5s
+# 794 signals nearly all BUY-side, actual P&L: -$0.78 from 16 trades
+# Avg edge 51.8 bps = structural spread. Raising above structural ceiling.
+threshold_bps = 120
 
 [[markets]]
 asset_idx = 110024
@@ -169,7 +173,9 @@ threshold_bps = 80
 [[markets]]
 asset_idx = 110027
 coin = "xyz:RIVN"
-threshold_bps = 40
+# 2026-02-06: Structural spread - 2.8% decay@1s, 14.2%@5s
+# 95 signals all SELL-side, actual P&L: -$0.37 from 8 trades (0 wins)
+threshold_bps = 80
 
 [[markets]]
 asset_idx = 110028

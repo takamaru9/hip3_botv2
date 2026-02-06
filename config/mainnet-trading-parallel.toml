@@ -159,10 +159,12 @@ threshold_bps = 40
 [[markets]]
 asset_idx = 110026
 coin = "xyz:SILVER"
-# 2026-02-06: Edge decay analysis: 123 bps → 121.5 bps after 5s (1.2% decay)
-# Pure structural oracle-to-quote gap, not stale liquidity
-# Must exceed structural floor significantly to be real edge
-threshold_bps = 150
+# 2026-02-06: Detailed profitability analysis (Feb 5 data, 709 signals):
+#   thresh=80: N=143/day, WR=99.3%@1s, AvgProfit=69.4 bps, P/hr=447 bps
+#   thresh=150: N=8/day, WR=100%@1s, AvgProfit=118 bps, P/hr=42 bps (10x less)
+# Structural gap exists but genuine stale liquidity IS present.
+# Edges hold well at 1s (-5 bps decay), 80 bps is the quality/volume sweet spot.
+threshold_bps = 80
 
 [[markets]]
 asset_idx = 110027

@@ -404,6 +404,12 @@ exit_threshold_bps = 25         # 30 → 25 bps: Tighter exit to capture smaller
 check_interval_ms = 100
 min_holding_time_ms = 2000      # 300ms → 2s: Filter noise, wait for true regression signal
 slippage_bps = 50
+# P2-6: Time-decay exit threshold
+# As position ages, exit threshold decreases (stale liquidity edge decays quickly)
+# Schedule: 0-2s: min_holding, 2-5s: full 25 bps, 5-60s: decays to 5 bps, 60s: time_stop
+time_decay_enabled = true
+decay_start_ms = 5000           # Start decay after 5s (genuine edge should have resolved)
+min_decay_factor = 0.2          # Threshold drops to 20% (25 bps → 5 bps) at time_stop
 
 [executor]
 batch_interval_ms = 20          # 100ms → 20ms: Reduce latency (avg 50ms → 10ms)

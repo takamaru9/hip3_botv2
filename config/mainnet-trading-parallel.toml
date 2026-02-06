@@ -296,8 +296,12 @@ start = "09:00"
 end = "09:15"
 
 [[risk.blackout_windows]]
+# 2026-02-06: Shortened from 14:45 to 14:33 based on Feb 5 signal analysis:
+# - 12 signals during 14:30-14:45 blackout, ALL profitable @1s (+29 to +48 bps)
+# - Oracle exit captures edge within 1-2s, so @1s profitability is what matters
+# - First 3 min still blocked for extreme opening volatility
 start = "14:30"
-end = "14:45"
+end = "14:33"
 
 # Oracle Movement Tracker (P1)
 # オラクルの連続性を追跡し、エントリー/エグジット判断に使用

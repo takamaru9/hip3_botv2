@@ -31,6 +31,10 @@ struct EdgeStats {
     update_count: u32,
     /// All positive edge observations for percentile calculation.
     edge_samples: Vec<f64>,
+    /// Latest spread EWMA for this market (from adaptive threshold).
+    spread_ewma_bps: Decimal,
+    /// Latest effective threshold for this market (max of config + adaptive).
+    effective_threshold_bps: Decimal,
 }
 
 impl EdgeStats {
@@ -40,6 +44,8 @@ impl EdgeStats {
             max_sell_edge_bps: Decimal::ZERO,
             update_count: 0,
             edge_samples: Vec::new(),
+            spread_ewma_bps: Decimal::ZERO,
+            effective_threshold_bps: Decimal::ZERO,
         }
     }
 
@@ -142,6 +148,20 @@ impl EdgeTracker {
         }
     }
 
+    /// Record spread EWMA and effective threshold for a market.
+    ///
+    /// Called from app.rs after detector.check() to capture adaptive threshold state.
+    pub fn record_threshold_info(
+        &mut self,
+        key: MarketKey,
+        spread_ewma_bps: Decimal,
+        effective_threshold_bps: Decimal,
+    ) {
+        let stats = self.stats.entry(key).or_insert_with(EdgeStats::new);
+        stats.spread_ewma_bps = spread_ewma_bps;
+        stats.effective_threshold_bps = effective_threshold_bps;
+    }
+
     /// Check if it's time to log and do so if needed.
     ///
     /// Call this periodically (e.g., after each market check cycle).
@@ -191,6 +211,8 @@ impl EdgeTracker {
                     p90 = format!("{:.1}", p90),
                     p99 = format!("{:.1}", p99),
                     samples = stats.edge_samples.len(),
+                    spread_ewma_bps = %stats.spread_ewma_bps,
+                    effective_threshold_bps = %stats.effective_threshold_bps,
                     threshold_bps = %self.threshold_bps,
                     threshold_pct = %threshold_ratio,
                     updates = stats.update_count,
@@ -202,6 +224,8 @@ impl EdgeTracker {
                     max_buy_edge_bps = %stats.max_buy_edge_bps,
                     max_sell_edge_bps = %stats.max_sell_edge_bps,
                     max_edge_bps = %max_edge,
+                    spread_ewma_bps = %stats.spread_ewma_bps,
+                    effective_threshold_bps = %stats.effective_threshold_bps,
                     threshold_bps = %self.threshold_bps,
                     threshold_pct = %threshold_ratio,
                     updates = stats.update_count,
@@ -278,5 +302,21 @@ mod tests {
 
         // No data recorded
         assert!(tracker.stats.get(&key).is_none());
+    }
+
+    #[test]
+    fn test_threshold_info_recording() {
+        let mut tracker = EdgeTracker::new(60, dec!(40));
+        let key = MarketKey::new(DexId::XYZ, AssetId::new(0));
+
+        // Record edge first to create the stats entry
+        tracker.record_edge(key, dec!(10), dec!(5));
+
+        // Record threshold info
+        tracker.record_threshold_info(key, dec!(22), dec!(33));
+
+        let stats = tracker.stats.get(&key).unwrap();
+        assert_eq!(stats.spread_ewma_bps, dec!(22));
+        assert_eq!(stats.effective_threshold_bps, dec!(33));
     }
 }

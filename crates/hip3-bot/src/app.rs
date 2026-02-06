@@ -2194,6 +2194,17 @@ impl Application {
                     // Get oracle age for quote lag gate
                     let oracle_age_ms = self.market_state.get_oracle_age_ms(&key);
 
+                    // Record adaptive threshold info for edge tracker visibility
+                    let spread_ewma = self.detector.spread_ewma(&key);
+                    let adaptive_th =
+                        spread_ewma * self.detector.config().spread_threshold_multiplier;
+                    let eff_threshold = match threshold_override {
+                        Some(ovr) => ovr.max(adaptive_th),
+                        None => adaptive_th,
+                    };
+                    self.edge_tracker
+                        .record_threshold_info(key, spread_ewma, eff_threshold);
+
                     // All gates passed, check for dislocation
                     if let Some(signal) = self.detector.check(
                         key,

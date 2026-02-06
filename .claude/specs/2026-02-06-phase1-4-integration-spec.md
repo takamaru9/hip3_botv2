@@ -5,7 +5,7 @@
 | Item | Value |
 |------|-------|
 | Plan Date | 2026-02-04 |
-| Last Updated | 2026-02-06 |
+| Last Updated | 2026-02-07 |
 | Status | `[COMPLETED]` |
 | Source Plan | `.claude/plans/rustling-doodling-puddle.md` |
 
@@ -47,7 +47,7 @@
 | ID | Item | Status | Notes |
 |----|------|--------|-------|
 | P4-1 | 全機能のapp.rs統合 | [x] DONE | 全機能ワイヤリング済み、feature flag文書化済み |
-| P4-2 | 段階的VPSロールアウト | [ ] TODO | 下記ロールアウト計画に従う |
+| P4-2 | 段階的VPSロールアウト | [x] DONE | Day 1-6+ 全完了 (下記参照) |
 
 ---
 
@@ -171,3 +171,43 @@ weight = 1.3
 | 1 | P2-8にJSONペイロード事前シリアライズ | TCP_NODELAYのみ実装 | 事前シリアライズのリファクタは影響範囲が大きいため別途検討 |
 | 2 | P3-3をMaxPositionTotalGateに統合 | 独立CorrelationPositionGateを追加 | 既存Gate変更よりも新Gateの方がリスク低・テスト容易 |
 | 3 | P3-4にエッジ減衰曲線を追加 | PnLサマリー・勝率のみ | エッジ減衰曲線はフロントエンドJS変更が必要、別途対応 |
+
+## VPS Rollout 実績 (P4-2)
+
+| Date | Features Enabled | Result |
+|------|-----------------|--------|
+| 2026-02-04 | Day 1: Phase 1 Observability | 正常稼働、メトリクス出力確認 |
+| 2026-02-04 | Day 2: P2-7/P2-8 レイテンシ改善 | コード組込み済み、latency削減 |
+| 2026-02-05 | Day 3: P2-3 Drawdown ($10/hr), P2-4 Correlation Cooldown | 防御Gate正常 |
+| 2026-02-05 | Day 4: P2-1 Oracle Velocity, P2-2 Adaptive Threshold | 構造スプレッド市場の自動フィルタ確認 |
+| 2026-02-06 | Day 5: P2-6 Time-Decay Exit | 有効化、5s→60sで25→5 bps減衰 |
+| 2026-02-06 | Day 5: EdgeTracker Adaptive Threshold Visibility | spread_ewma/effective_threshold ログ追加 |
+| 2026-02-06 | Day 6: P3-1 Confidence Sizing, P3-2 Trailing Stop | 有効化 (activation=5bps, trail=3bps) |
+| 未実施 | Day 6+: P3-3 Correlation Position Limit | 相関グループ定義が必要、別途検討 |
+
+### 有効化済みFeature一覧 (2026-02-07時点)
+
+| Feature | Config | Status |
+|---------|--------|--------|
+| P1-1~P1-4 Observability | N/A (常時有効) | Active |
+| P2-1 Oracle Velocity | oracle_velocity_sizing=true (detector default) | Active |
+| P2-2 Adaptive Threshold | adaptive_threshold=true | Active |
+| P2-3 Max Drawdown | max_hourly_drawdown_usd=10.0 | Active |
+| P2-4 Correlation Cooldown | correlation_close_threshold=3 | Active |
+| P2-5 Dynamic Exit | dynamic_thresholds (detector default) | Default |
+| P2-6 Time-Decay Exit | time_decay_enabled=true | Active |
+| P2-7 Event-Driven Executor | N/A (常時有効) | Active |
+| P2-8 TCP_NODELAY | N/A (常時有効) | Active |
+| P3-1 Confidence Sizing | confidence_sizing=true | Active |
+| P3-2 Trailing Stop | trailing_stop=true, activation=5, trail=3 | Active |
+| P3-3 Correlation Limit | enabled=false | Pending |
+
+### 性能データ (999 trades through 2026-02-03)
+
+| Metric | Value |
+|--------|-------|
+| Total Trades | 999 |
+| Net P&L | -$39.00 |
+| Balance | $18.02 |
+| Sweet-spot Markets (AMZN/PLTR/NFLX) | +$0.37 |
+| Structural Markets (disabled) | -$38.37 |

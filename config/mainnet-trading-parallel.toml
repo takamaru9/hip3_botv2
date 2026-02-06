@@ -104,7 +104,9 @@ threshold_bps = 40
 [[markets]]
 asset_idx = 110016
 coin = "xyz:SNDK"
-threshold_bps = 40
+# 2026-02-06: Analysis showed 23.2% of all signals came from structural spread
+# Raising threshold; adaptive_threshold will further auto-adjust
+threshold_bps = 100
 
 [[markets]]
 asset_idx = 110017
@@ -218,9 +220,9 @@ threshold_bps = 40
 [[markets]]
 asset_idx = 110038
 coin = "xyz:URNM"
-# 2026-02-05: Very wide spread market (141 bps consistently)
-# Essentially disabled - only trade extreme dislocations
-threshold_bps = 120
+# 2026-02-06: DISABLED. Analysis: 58.4% of all signals from structural 141 bps spread
+# Not stale liquidity - pure structural spread generating false signals
+threshold_bps = 999
 
 [[markets]]
 asset_idx = 110039
@@ -301,6 +303,17 @@ sizing_alpha = 0.10
 max_notional = 50
 min_book_notional = 50
 normal_book_notional = 5000
+#
+# Adaptive Threshold (P2-2): Auto-filter structurally wide spread markets
+# 2026-02-06: ENABLED based on signal analysis findings
+#   Problem: 81.6% of signals came from URNM/SNDK with structural spreads
+#   Solution: Track spread EWMA per market, use max(fixed_threshold, spread_ewma * 1.5)
+#   Effect: Wide-spread markets auto-filtered without manual threshold tuning
+#     URNM (spread ~141 bps): adaptive = 211 bps → auto-disabled
+#     USAR (spread ~85 bps): adaptive = 127 bps → auto-filtered
+#     AAPL (spread ~5 bps): adaptive = 7.5 bps < fee_cost → no effect
+adaptive_threshold = true
+spread_threshold_multiplier = 1.5  # effective_threshold = spread_ewma × 1.5
 #
 # Quote Lag Gate (PR-5: True Stale Liquidity)
 # Only generate signals when oracle changed within this time window.

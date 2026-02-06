@@ -29,12 +29,14 @@ threshold_bps = 40
 [[markets]]
 asset_idx = 110001
 coin = "xyz:TSLA"
-threshold_bps = 40
+# 2026-02-06: Tight spread (~8 bps), lower threshold to capture more genuine signals
+threshold_bps = 30
 
 [[markets]]
 asset_idx = 110002
 coin = "xyz:NVDA"
-threshold_bps = 40
+# 2026-02-06: Tight spread (~6 bps), 1 winning trade. Lower threshold.
+threshold_bps = 30
 
 [[markets]]
 asset_idx = 110003
@@ -54,7 +56,8 @@ threshold_bps = 40
 [[markets]]
 asset_idx = 110006
 coin = "xyz:PLTR"
-threshold_bps = 40
+# 2026-02-06: Tight spread (~5 bps), +$0.105 P&L, 83.6% decay@5s = genuine edge
+threshold_bps = 30
 
 [[markets]]
 asset_idx = 110007
@@ -64,17 +67,20 @@ threshold_bps = 50  # Higher spread market
 [[markets]]
 asset_idx = 110008
 coin = "xyz:META"
-threshold_bps = 40
+# 2026-02-06: Tight spread (~6 bps), lower threshold for major equity
+threshold_bps = 30
 
 [[markets]]
 asset_idx = 110009
 coin = "xyz:AAPL"
-threshold_bps = 40
+# 2026-02-06: Very tight spread (~3 bps), major equity
+threshold_bps = 30
 
 [[markets]]
 asset_idx = 110010
 coin = "xyz:MSFT"
-threshold_bps = 40
+# 2026-02-06: Very tight spread (~3 bps), major equity
+threshold_bps = 30
 
 [[markets]]
 asset_idx = 110011
@@ -84,17 +90,20 @@ threshold_bps = 40
 [[markets]]
 asset_idx = 110012
 coin = "xyz:GOOGL"
-threshold_bps = 40
+# 2026-02-06: Tight spread (~5 bps), 70.6% decay@5s = genuine edge
+threshold_bps = 30
 
 [[markets]]
 asset_idx = 110013
 coin = "xyz:AMZN"
-threshold_bps = 40
+# 2026-02-06: Tight spread (~4 bps), +$0.197 P&L (most profitable market)
+threshold_bps = 30
 
 [[markets]]
 asset_idx = 110014
 coin = "xyz:AMD"
-threshold_bps = 40
+# 2026-02-06: Tight spread (~8 bps), major equity
+threshold_bps = 30
 
 [[markets]]
 asset_idx = 110015
@@ -125,7 +134,8 @@ threshold_bps = 60
 [[markets]]
 asset_idx = 110019
 coin = "xyz:NFLX"
-threshold_bps = 40
+# 2026-02-06: Tight spread (~3 bps), +$0.070 P&L, 37.7% decay@5s
+threshold_bps = 30
 
 [[markets]]
 asset_idx = 110020

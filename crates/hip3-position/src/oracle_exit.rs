@@ -38,6 +38,8 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 use tracing::{debug, info, trace, warn};
 
+use rust_decimal::Decimal;
+
 use hip3_core::types::MarketSnapshot;
 use hip3_core::{MarketKey, OrderSide, PendingOrder};
 use hip3_feed::OracleMovementTracker;
@@ -59,6 +61,16 @@ struct OracleBaseline {
     consecutive_with: u32,
     /// Consecutive count moving AGAINST our position side at entry.
     consecutive_against: u32,
+    /// P2-5: Entry edge in basis points (for dynamic exit thresholds).
+    /// None if unknown (e.g., position opened before feature was enabled).
+    entry_edge_bps: Option<Decimal>,
+    /// P3-2: Oracle price at entry time (for trailing stop PnL calculation).
+    /// None if unknown (e.g., position synced at startup without oracle data).
+    entry_oracle_px: Option<Decimal>,
+    /// P3-2: Best favorable PnL in bps since entry (for trailing stop).
+    best_pnl_bps: Decimal,
+    /// P3-2: Whether trailing stop has been activated.
+    trail_activated: bool,
 }
 
 // ============================================================================
@@ -92,6 +104,42 @@ pub struct OracleExitConfig {
     /// Slippage in basis points for flatten orders.
     #[serde(default = "default_slippage_bps")]
     pub slippage_bps: u64,
+
+    /// P2-5: Enable dynamic exit thresholds based on entry edge.
+    /// When enabled, high-edge entries get more tolerance (exit_against_moves + 1),
+    /// while low-edge entries keep the default (faster loss cut).
+    #[serde(default)]
+    pub dynamic_thresholds: bool,
+
+    /// P2-5: Entry edge threshold for "high edge" classification (bps).
+    /// Entries above this get exit_against_moves + 1 for loss cut.
+    #[serde(default = "default_high_edge_bps")]
+    pub high_edge_bps: u32,
+
+    /// P2-5: Entry edge threshold for "low edge" classification (bps).
+    /// Entries below this keep default exit_against_moves (fastest loss cut).
+    #[serde(default = "default_low_edge_bps")]
+    pub low_edge_bps: u32,
+
+    /// P3-2: Enable trailing stop exit.
+    ///
+    /// When enabled, tracks the best oracle PnL since entry.
+    /// After oracle moves `activation_bps` in our favor, trailing stop activates.
+    /// If oracle then retraces `trail_bps` from the best, exit is triggered.
+    ///
+    /// This replaces fixed `exit_with_moves` profit-take with dynamic trailing.
+    #[serde(default)]
+    pub trailing_stop: bool,
+
+    /// P3-2: Trailing stop activation threshold (bps).
+    /// Trailing stop activates after oracle PnL reaches this level.
+    #[serde(default = "default_activation_bps")]
+    pub activation_bps: u32,
+
+    /// P3-2: Trailing stop trail distance (bps).
+    /// Exit when oracle retraces this much from best PnL since entry.
+    #[serde(default = "default_trail_bps")]
+    pub trail_bps: u32,
 }
 
 fn default_enabled() -> bool {
@@ -114,6 +162,22 @@ fn default_slippage_bps() -> u64 {
     50 // 50 bps slippage for flatten
 }
 
+fn default_high_edge_bps() -> u32 {
+    40 // High edge: > 40 bps
+}
+
+fn default_low_edge_bps() -> u32 {
+    25 // Low edge: < 25 bps
+}
+
+fn default_activation_bps() -> u32 {
+    5 // Activate trailing stop after 5 bps favorable oracle move
+}
+
+fn default_trail_bps() -> u32 {
+    3 // Exit after 3 bps retrace from best oracle PnL
+}
+
 impl Default for OracleExitConfig {
     fn default() -> Self {
         Self {
@@ -122,6 +186,12 @@ impl Default for OracleExitConfig {
             exit_with_moves: default_exit_with_moves(),
             min_holding_time_ms: default_min_holding_time_ms(),
             slippage_bps: default_slippage_bps(),
+            dynamic_thresholds: false,
+            high_edge_bps: default_high_edge_bps(),
+            low_edge_bps: default_low_edge_bps(),
+            trailing_stop: false,
+            activation_bps: default_activation_bps(),
+            trail_bps: default_trail_bps(),
         }
     }
 }
@@ -146,6 +216,15 @@ pub enum OracleExitReason {
         /// Number of consecutive moves with position.
         moves: u32,
     },
+
+    /// P3-2: Trailing stop triggered.
+    /// Oracle reached activation threshold, then retraced beyond trail distance.
+    TrailingStop {
+        /// Best PnL in bps reached since entry.
+        best_pnl_bps: Decimal,
+        /// Current PnL in bps when trail triggered.
+        current_pnl_bps: Decimal,
+    },
 }
 
 impl std::fmt::Display for OracleExitReason {
@@ -156,6 +235,16 @@ impl std::fmt::Display for OracleExitReason {
             }
             Self::OracleCatchup { moves } => {
                 write!(f, "OracleCatchup({} moves with)", moves)
+            }
+            Self::TrailingStop {
+                best_pnl_bps,
+                current_pnl_bps,
+            } => {
+                write!(
+                    f,
+                    "TrailingStop(best={} bps, current={} bps)",
+                    best_pnl_bps, current_pnl_bps
+                )
             }
         }
     }
@@ -251,13 +340,25 @@ impl OracleExitWatcher {
     /// # Arguments
     /// * `key` - Market key
     /// * `side` - Position side (Buy = long, Sell = short)
-    pub fn on_position_opened(&self, key: MarketKey, side: OrderSide) {
+    /// * `entry_edge_bps` - P2-5: Entry edge in basis points (None if unknown)
+    /// * `entry_oracle_px` - P3-2: Oracle price at entry (None if unknown, e.g. startup sync)
+    pub fn on_position_opened(
+        &self,
+        key: MarketKey,
+        side: OrderSide,
+        entry_edge_bps: Option<Decimal>,
+        entry_oracle_px: Option<Decimal>,
+    ) {
         let consecutive_with = self.oracle_tracker.consecutive_with(&key, side);
         let consecutive_against = self.oracle_tracker.consecutive_against(&key, side);
 
         let baseline = OracleBaseline {
             consecutive_with,
             consecutive_against,
+            entry_edge_bps,
+            entry_oracle_px,
+            best_pnl_bps: Decimal::ZERO,
+            trail_activated: false,
         };
 
         debug!(
@@ -265,6 +366,8 @@ impl OracleExitWatcher {
             side = ?side,
             baseline_with = consecutive_with,
             baseline_against = consecutive_against,
+            entry_edge_bps = ?entry_edge_bps,
+            entry_oracle_px = ?entry_oracle_px,
             "OracleExitWatcher: recorded position baseline"
         );
 
@@ -327,17 +430,90 @@ impl OracleExitWatcher {
             return;
         }
 
-        // 5. Check oracle-based exit condition
+        // 5. P3-2: Update trailing stop state and check for trail exit
+        if self.config.trailing_stop {
+            if let Some(reason) = self.update_trailing_state(&key, &position, snapshot) {
+                {
+                    let mut flattening = self.local_flattening.write();
+                    flattening.insert(key);
+                }
+                self.trigger_exit(&position, reason, snapshot, now_ms);
+                return;
+            }
+        }
+
+        // 6. Check oracle-based exit condition (consecutive moves)
         if let Some(reason) = self.check_oracle_exit(&position) {
-            // 6. Mark as flattening BEFORE sending to prevent duplicates
+            // 7. Mark as flattening BEFORE sending to prevent duplicates
             {
                 let mut flattening = self.local_flattening.write();
                 flattening.insert(key);
             }
 
-            // 7. Trigger exit
+            // 8. Trigger exit
             self.trigger_exit(&position, reason, snapshot, now_ms);
         }
+    }
+
+    /// P3-2: Update trailing stop state and check for trail exit.
+    ///
+    /// Updates best PnL tracking and checks activation/exit conditions.
+    /// Returns exit reason if trailing stop fires.
+    fn update_trailing_state(
+        &self,
+        key: &MarketKey,
+        position: &Position,
+        snapshot: &MarketSnapshot,
+    ) -> Option<OracleExitReason> {
+        let oracle_px = snapshot.ctx.oracle.oracle_px.inner();
+        if oracle_px.is_zero() {
+            return None;
+        }
+
+        let mut baselines = self.position_baselines.write();
+        let baseline = baselines.get_mut(key)?;
+
+        let entry_oracle = match baseline.entry_oracle_px {
+            Some(px) if !px.is_zero() => px,
+            _ => return None, // No entry oracle, can't track trail
+        };
+
+        // Calculate current PnL in bps
+        let current_pnl_bps = match position.side {
+            OrderSide::Buy => (oracle_px - entry_oracle) / entry_oracle * Decimal::from(10000),
+            OrderSide::Sell => (entry_oracle - oracle_px) / entry_oracle * Decimal::from(10000),
+        };
+
+        // Update best PnL
+        if current_pnl_bps > baseline.best_pnl_bps {
+            baseline.best_pnl_bps = current_pnl_bps;
+        }
+
+        // Check activation
+        if !baseline.trail_activated {
+            if baseline.best_pnl_bps >= Decimal::from(self.config.activation_bps) {
+                baseline.trail_activated = true;
+                info!(
+                    market = %key,
+                    side = ?position.side,
+                    best_pnl_bps = %baseline.best_pnl_bps,
+                    activation_bps = self.config.activation_bps,
+                    "OracleExitWatcher: trailing stop activated"
+                );
+            }
+            return None; // Not yet activated
+        }
+
+        // Check trail exit: retrace from best
+        let retrace_bps = baseline.best_pnl_bps - current_pnl_bps;
+        if retrace_bps >= Decimal::from(self.config.trail_bps) {
+            return Some(OracleExitReason::TrailingStop {
+                best_pnl_bps: baseline.best_pnl_bps,
+                current_pnl_bps,
+            });
+        }
+
+        None
     }
 
     /// Check if position should exit based on oracle movements since entry.
@@ -387,8 +563,26 @@ impl OracleExitWatcher {
             "OracleExitWatcher: checking exit condition"
         );
 
+        // P2-5: Compute effective exit_against_moves based on entry edge
+        let effective_exit_against = if self.config.dynamic_thresholds {
+            if let Some(edge) = baseline.entry_edge_bps {
+                if edge >= Decimal::from(self.config.high_edge_bps) {
+                    // High edge entry → more tolerant (allow extra move)
+                    self.config.exit_against_moves + 1
+                } else {
+                    // Normal or low edge → use default (fast loss cut)
+                    self.config.exit_against_moves
+                }
+            } else {
+                // Unknown edge → use default
+                self.config.exit_against_moves
+            }
+        } else {
+            self.config.exit_against_moves
+        };
+
         // Check for loss cut: oracle moving against us since entry
-        if delta_against >= self.config.exit_against_moves {
+        if delta_against >= effective_exit_against {
             return Some(OracleExitReason::OracleReversal {
                 moves: delta_against,
             });
@@ -434,6 +628,42 @@ impl OracleExitWatcher {
             OracleExitReason::OracleCatchup { .. } => {
                 self.catchup_count.fetch_add(1, Ordering::Relaxed);
             }
+            OracleExitReason::TrailingStop { .. } => {
+                // Trailing stop counts as a catchup (profit-take variant)
+                self.catchup_count.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+
+        // P1-4: Record exit metrics
+        let exit_reason_str = match reason {
+            OracleExitReason::OracleReversal { .. } => "OracleReversal",
+            OracleExitReason::OracleCatchup { .. } => "OracleCatchup",
+            OracleExitReason::TrailingStop { .. } => "TrailingStop",
+        };
+        let market_str = position.market.to_string();
+        hip3_telemetry::Metrics::position_holding_time(
+            &market_str,
+            exit_reason_str,
+            held_ms as f64,
+        );
+
+        // Estimate PnL in bps from entry price vs current oracle
+        let oracle_px = snapshot.ctx.oracle.oracle_px.inner();
+        if !position.entry_price.inner().is_zero() && !oracle_px.is_zero() {
+            use rust_decimal::prelude::ToPrimitive;
+            let pnl_bps = match position.side {
+                OrderSide::Buy => {
+                    (oracle_px - position.entry_price.inner()) / position.entry_price.inner()
+                        * Decimal::from(10000)
+                }
+                OrderSide::Sell => {
+                    (position.entry_price.inner() - oracle_px) / position.entry_price.inner()
+                        * Decimal::from(10000)
+                }
+            };
+            if let Some(pnl) = pnl_bps.to_f64() {
+                hip3_telemetry::Metrics::trade_pnl(&market_str, exit_reason_str, pnl);
+            }
         }
 
         info!(
@@ -441,6 +671,7 @@ impl OracleExitWatcher {
             side = ?position.side,
             reason = %reason,
             held_ms = held_ms,
+            exit_reason = exit_reason_str,
             cloid = %order.cloid,
             reversal_count = self.reversal_count.load(Ordering::Relaxed),
             catchup_count = self.catchup_count.load(Ordering::Relaxed),
@@ -570,6 +801,7 @@ pub fn new_oracle_exit_watcher(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rust_decimal_macros::dec;
 
     #[test]
     fn test_default_config() {
@@ -579,6 +811,14 @@ mod tests {
         assert_eq!(config.exit_with_moves, 3);
         assert_eq!(config.min_holding_time_ms, 1000);
         assert_eq!(config.slippage_bps, 50);
+        // P2-5 defaults
+        assert!(!config.dynamic_thresholds);
+        assert_eq!(config.high_edge_bps, 40);
+        assert_eq!(config.low_edge_bps, 25);
+        // P3-2 defaults
+        assert!(!config.trailing_stop);
+        assert_eq!(config.activation_bps, 5);
+        assert_eq!(config.trail_bps, 3);
     }
 
     #[test]
@@ -588,6 +828,15 @@ mod tests {
 
         let catchup = OracleExitReason::OracleCatchup { moves: 4 };
         assert_eq!(format!("{}", catchup), "OracleCatchup(4 moves with)");
+
+        let trail = OracleExitReason::TrailingStop {
+            best_pnl_bps: dec!(8),
+            current_pnl_bps: dec!(4),
+        };
+        assert_eq!(
+            format!("{}", trail),
+            "TrailingStop(best=8 bps, current=4 bps)"
+        );
     }
 
     #[test]
@@ -597,5 +846,91 @@ mod tests {
             catchup_count: 3,
         };
         assert_eq!(metrics.total(), 8);
+    }
+
+    #[test]
+    fn test_dynamic_threshold_config_serde() {
+        // Verify dynamic_thresholds defaults to false and doesn't break existing TOML
+        let toml = r#"
+            enabled = true
+            exit_against_moves = 2
+            exit_with_moves = 3
+        "#;
+        let config: OracleExitConfig = toml::from_str(toml).unwrap();
+        assert!(!config.dynamic_thresholds);
+        assert_eq!(config.high_edge_bps, 40);
+        assert_eq!(config.low_edge_bps, 25);
+    }
+
+    #[test]
+    fn test_dynamic_threshold_config_enabled() {
+        let toml = r#"
+            enabled = true
+            exit_against_moves = 2
+            exit_with_moves = 3
+            dynamic_thresholds = true
+            high_edge_bps = 50
+            low_edge_bps = 20
+        "#;
+        let config: OracleExitConfig = toml::from_str(toml).unwrap();
+        assert!(config.dynamic_thresholds);
+        assert_eq!(config.high_edge_bps, 50);
+        assert_eq!(config.low_edge_bps, 20);
+    }
+
+    #[test]
+    fn test_oracle_baseline_with_entry_edge() {
+        let baseline = OracleBaseline {
+            consecutive_with: 0,
+            consecutive_against: 1,
+            entry_edge_bps: Some(Decimal::from(45)),
+            entry_oracle_px: Some(dec!(100)),
+            best_pnl_bps: Decimal::ZERO,
+            trail_activated: false,
+        };
+        assert_eq!(baseline.entry_edge_bps, Some(Decimal::from(45)));
+        assert_eq!(baseline.entry_oracle_px, Some(dec!(100)));
+        assert!(!baseline.trail_activated);
+
+        let baseline_no_edge = OracleBaseline {
+            consecutive_with: 2,
+            consecutive_against: 0,
+            entry_edge_bps: None,
+            entry_oracle_px: None,
+            best_pnl_bps: Decimal::ZERO,
+            trail_activated: false,
+        };
+        assert_eq!(baseline_no_edge.entry_edge_bps, None);
+        assert_eq!(baseline_no_edge.entry_oracle_px, None);
+    }
+
+    #[test]
+    fn test_trailing_stop_config_serde_backward_compat() {
+        // Existing TOML without trailing_stop fields should work
+        let toml = r#"
+            enabled = true
+            exit_against_moves = 2
+            exit_with_moves = 3
+        "#;
+        let config: OracleExitConfig = toml::from_str(toml).unwrap();
+        assert!(!config.trailing_stop);
+        assert_eq!(config.activation_bps, 5);
+        assert_eq!(config.trail_bps, 3);
+    }
+
+    #[test]
+    fn test_trailing_stop_config_enabled() {
+        let toml = r#"
+            enabled = true
+            exit_against_moves = 2
+            exit_with_moves = 3
+            trailing_stop = true
+            activation_bps = 8
+            trail_bps = 4
+        "#;
+        let config: OracleExitConfig = toml::from_str(toml).unwrap();
+        assert!(config.trailing_stop);
+        assert_eq!(config.activation_bps, 8);
+        assert_eq!(config.trail_bps, 4);
     }
 }

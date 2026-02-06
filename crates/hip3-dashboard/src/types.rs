@@ -22,6 +22,8 @@ pub struct DashboardSnapshot {
     pub risk: RiskStatus,
     /// Recent signals (newest first).
     pub recent_signals: Vec<SignalSnapshot>,
+    /// P3-4: PnL summary (session stats + per-market stats).
+    pub pnl_summary: PnlSummary,
 }
 
 /// Market data snapshot for a single market.
@@ -138,6 +140,9 @@ pub enum DashboardMessage {
         /// Updated pending orders count (if changed).
         #[serde(skip_serializing_if = "Option::is_none")]
         pending_orders: Option<usize>,
+        /// P3-4: PnL summary.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pnl_summary: Option<PnlSummary>,
     },
     /// New signal detected.
     Signal(SignalSnapshot),
@@ -150,6 +155,69 @@ pub enum DashboardMessage {
         /// Alert message.
         message: String,
     },
+}
+
+/// P3-4: Completed trade record.
+#[derive(Debug, Clone, Serialize)]
+pub struct CompletedTrade {
+    /// Market key.
+    pub market: String,
+    /// Side: "long" or "short".
+    pub side: String,
+    /// Entry price.
+    pub entry_price: f64,
+    /// Exit price.
+    pub exit_price: f64,
+    /// Position size.
+    pub size: f64,
+    /// Realized PnL (USD).
+    pub pnl: f64,
+    /// Realized PnL (bps).
+    pub pnl_bps: f64,
+    /// Hold time (milliseconds).
+    pub hold_time_ms: u64,
+    /// Exit reason (e.g., "TimeStop", "OracleReversal", "MarkRegression").
+    pub exit_reason: String,
+    /// Close timestamp (Unix milliseconds).
+    pub closed_at_ms: i64,
+}
+
+/// P3-4: Per-market PnL statistics.
+#[derive(Debug, Clone, Serialize, Default)]
+pub struct MarketPnlStats {
+    /// Market key.
+    pub market: String,
+    /// Realized PnL (USD).
+    pub realized_pnl: f64,
+    /// Total trades.
+    pub trade_count: u32,
+    /// Winning trades.
+    pub win_count: u32,
+    /// Losing trades.
+    pub loss_count: u32,
+}
+
+/// P3-4: Session PnL summary.
+#[derive(Debug, Clone, Serialize, Default)]
+pub struct PnlSummary {
+    /// Session realized PnL (USD) from closed trades.
+    pub session_realized_pnl: f64,
+    /// Current unrealized PnL (USD) from open positions.
+    pub current_unrealized_pnl: f64,
+    /// Total PnL (realized + unrealized).
+    pub total_pnl: f64,
+    /// Total completed trades.
+    pub total_trades: u32,
+    /// Winning trades (pnl > 0).
+    pub winning_trades: u32,
+    /// Losing trades (pnl <= 0).
+    pub losing_trades: u32,
+    /// Win rate percentage (0-100).
+    pub win_rate_pct: f64,
+    /// Per-market statistics.
+    pub market_stats: Vec<MarketPnlStats>,
+    /// Recent completed trades (newest first, max 50).
+    pub recent_trades: Vec<CompletedTrade>,
 }
 
 /// Risk alert types.
@@ -183,6 +251,7 @@ mod tests {
                 trading_allowed: true,
             },
             recent_signals: vec![],
+            pnl_summary: PnlSummary::default(),
         };
 
         let json = serde_json::to_string(&snapshot).unwrap();

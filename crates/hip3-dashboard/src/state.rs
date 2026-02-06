@@ -19,7 +19,8 @@ use hip3_persistence::SignalRecord;
 use hip3_position::PositionTrackerHandle;
 
 use crate::types::{
-    DashboardSnapshot, MarketDataSnapshot, PositionSnapshot, RiskStatus, SignalSnapshot,
+    CompletedTrade, DashboardSnapshot, MarketDataSnapshot, MarketPnlStats, PnlSummary,
+    PositionSnapshot, RiskStatus, SignalSnapshot,
 };
 
 /// Sender type for pushing signals in real-time to the dashboard.
@@ -51,6 +52,8 @@ pub struct DashboardState {
     signal_tx: SignalSender,
     /// Signal receiver wrapped in Arc<Mutex> for one-time extraction by broadcaster.
     signal_rx: Arc<tokio::sync::Mutex<Option<SignalReceiver>>>,
+    /// P3-4: Completed trade history for PnL tracking.
+    completed_trades: Arc<RwLock<VecDeque<CompletedTrade>>>,
 }
 
 impl DashboardState {
@@ -72,6 +75,7 @@ impl DashboardState {
             observation_mode: false,
             signal_tx,
             signal_rx: Arc::new(tokio::sync::Mutex::new(Some(signal_rx))),
+            completed_trades: Arc::new(RwLock::new(VecDeque::new())),
         }
     }
 
@@ -96,6 +100,7 @@ impl DashboardState {
             observation_mode: true,
             signal_tx,
             signal_rx: Arc::new(tokio::sync::Mutex::new(Some(signal_rx))),
+            completed_trades: Arc::new(RwLock::new(VecDeque::new())),
         }
     }
 
@@ -143,6 +148,9 @@ impl DashboardState {
         // Collect recent signals
         let recent_signals = self.collect_recent_signals();
 
+        // P3-4: Collect PnL summary
+        let pnl_summary = self.collect_pnl_summary(&positions);
+
         DashboardSnapshot {
             timestamp_ms,
             markets,
@@ -150,6 +158,7 @@ impl DashboardState {
             pending_orders,
             risk,
             recent_signals,
+            pnl_summary,
         }
     }
 
@@ -348,6 +357,76 @@ impl DashboardState {
                 signal_id: s.signal_id.clone(),
             })
             .collect()
+    }
+
+    /// P3-4: Report a completed trade for PnL tracking.
+    pub fn report_completed_trade(&self, trade: CompletedTrade) {
+        let mut trades = self.completed_trades.write();
+        trades.push_back(trade);
+        // Keep at most 500 trades in memory.
+        while trades.len() > 500 {
+            trades.pop_front();
+        }
+    }
+
+    /// P3-4: Collect PnL summary from completed trades and open positions.
+    fn collect_pnl_summary(&self, positions: &[PositionSnapshot]) -> PnlSummary {
+        let trades = self.completed_trades.read();
+
+        // Compute session realized PnL.
+        let session_realized_pnl: f64 = trades.iter().map(|t| t.pnl).sum();
+        let total_trades = trades.len() as u32;
+        let winning_trades = trades.iter().filter(|t| t.pnl > 0.0).count() as u32;
+        let losing_trades = total_trades - winning_trades;
+        let win_rate_pct = if total_trades > 0 {
+            winning_trades as f64 / total_trades as f64 * 100.0
+        } else {
+            0.0
+        };
+
+        // Compute per-market stats.
+        let mut market_map: HashMap<String, MarketPnlStats> = HashMap::new();
+        for trade in trades.iter() {
+            let stats = market_map
+                .entry(trade.market.clone())
+                .or_insert_with(|| MarketPnlStats {
+                    market: trade.market.clone(),
+                    ..Default::default()
+                });
+            stats.realized_pnl += trade.pnl;
+            stats.trade_count += 1;
+            if trade.pnl > 0.0 {
+                stats.win_count += 1;
+            } else {
+                stats.loss_count += 1;
+            }
+        }
+        let mut market_stats: Vec<MarketPnlStats> = market_map.into_values().collect();
+        market_stats.sort_by(|a, b| b.trade_count.cmp(&a.trade_count));
+
+        // Current unrealized PnL from open positions.
+        let current_unrealized_pnl: f64 = positions
+            .iter()
+            .filter_map(|p| {
+                p.unrealized_pnl
+                    .map(|pnl| pnl.to_string().parse::<f64>().unwrap_or(0.0))
+            })
+            .sum();
+
+        // Recent trades (newest first, max 50).
+        let recent_trades: Vec<CompletedTrade> = trades.iter().rev().take(50).cloned().collect();
+
+        PnlSummary {
+            session_realized_pnl,
+            current_unrealized_pnl,
+            total_pnl: session_realized_pnl + current_unrealized_pnl,
+            total_trades,
+            winning_trades,
+            losing_trades,
+            win_rate_pct,
+            market_stats,
+            recent_trades,
+        }
     }
 
     /// Check if hard stop is triggered (for alerts).

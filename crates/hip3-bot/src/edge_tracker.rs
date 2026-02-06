@@ -12,6 +12,7 @@
 //! - How often edge opportunities occur
 //! - Whether threshold is appropriately calibrated
 //! - Market activity patterns over time
+//! - Edge percentiles (P50/P75/P90/P99) for adaptive threshold tuning
 
 use hip3_core::MarketKey;
 use rust_decimal::Decimal;
@@ -28,6 +29,8 @@ struct EdgeStats {
     max_sell_edge_bps: Decimal,
     /// Count of updates in this window.
     update_count: u32,
+    /// All positive edge observations for percentile calculation.
+    edge_samples: Vec<f64>,
 }
 
 impl EdgeStats {
@@ -36,6 +39,7 @@ impl EdgeStats {
             max_buy_edge_bps: Decimal::ZERO,
             max_sell_edge_bps: Decimal::ZERO,
             update_count: 0,
+            edge_samples: Vec::new(),
         }
     }
 
@@ -53,8 +57,39 @@ impl EdgeStats {
         self.update_count += 1;
     }
 
+    fn record_sample(&mut self, edge_bps: f64) {
+        self.edge_samples.push(edge_bps);
+    }
+
     fn max_edge(&self) -> Decimal {
         std::cmp::max(self.max_buy_edge_bps, self.max_sell_edge_bps)
+    }
+
+    /// Calculate percentile from sorted samples.
+    /// Returns None if no samples.
+    fn percentile(&self, sorted: &[f64], p: f64) -> Option<f64> {
+        if sorted.is_empty() {
+            return None;
+        }
+        let idx = (p / 100.0 * (sorted.len() as f64 - 1.0)).round() as usize;
+        let idx = idx.min(sorted.len() - 1);
+        Some(sorted[idx])
+    }
+
+    /// Compute percentiles (P50, P75, P90, P99).
+    /// Returns (p50, p75, p90, p99) or None if no samples.
+    fn percentiles(&self) -> Option<(f64, f64, f64, f64)> {
+        if self.edge_samples.is_empty() {
+            return None;
+        }
+        let mut sorted = self.edge_samples.clone();
+        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        Some((
+            self.percentile(&sorted, 50.0).unwrap_or(0.0),
+            self.percentile(&sorted, 75.0).unwrap_or(0.0),
+            self.percentile(&sorted, 90.0).unwrap_or(0.0),
+            self.percentile(&sorted, 99.0).unwrap_or(0.0),
+        ))
     }
 }
 
@@ -93,9 +128,17 @@ impl EdgeTracker {
 
         if buy_edge_bps > Decimal::ZERO {
             stats.update_buy(buy_edge_bps);
+            use rust_decimal::prelude::ToPrimitive;
+            if let Some(v) = buy_edge_bps.to_f64() {
+                stats.record_sample(v);
+            }
         }
         if sell_edge_bps > Decimal::ZERO {
             stats.update_sell(sell_edge_bps);
+            use rust_decimal::prelude::ToPrimitive;
+            if let Some(v) = sell_edge_bps.to_f64() {
+                stats.record_sample(v);
+            }
         }
     }
 
@@ -128,7 +171,7 @@ impl EdgeTracker {
             .max()
             .unwrap_or(Decimal::ZERO);
 
-        // Log per-market stats
+        // Log per-market stats with percentiles
         for (key, stats) in &self.stats {
             let max_edge = stats.max_edge();
             let threshold_ratio = if !self.threshold_bps.is_zero() {
@@ -137,16 +180,34 @@ impl EdgeTracker {
                 Decimal::ZERO
             };
 
-            info!(
-                market = %key,
-                max_buy_edge_bps = %stats.max_buy_edge_bps,
-                max_sell_edge_bps = %stats.max_sell_edge_bps,
-                max_edge_bps = %max_edge,
-                threshold_bps = %self.threshold_bps,
-                threshold_pct = %threshold_ratio,
-                updates = stats.update_count,
-                "EdgeTracker: Market edge summary"
-            );
+            if let Some((p50, p75, p90, p99)) = stats.percentiles() {
+                info!(
+                    market = %key,
+                    max_buy_edge_bps = %stats.max_buy_edge_bps,
+                    max_sell_edge_bps = %stats.max_sell_edge_bps,
+                    max_edge_bps = %max_edge,
+                    p50 = format!("{:.1}", p50),
+                    p75 = format!("{:.1}", p75),
+                    p90 = format!("{:.1}", p90),
+                    p99 = format!("{:.1}", p99),
+                    samples = stats.edge_samples.len(),
+                    threshold_bps = %self.threshold_bps,
+                    threshold_pct = %threshold_ratio,
+                    updates = stats.update_count,
+                    "EdgeTracker: Market edge summary"
+                );
+            } else {
+                info!(
+                    market = %key,
+                    max_buy_edge_bps = %stats.max_buy_edge_bps,
+                    max_sell_edge_bps = %stats.max_sell_edge_bps,
+                    max_edge_bps = %max_edge,
+                    threshold_bps = %self.threshold_bps,
+                    threshold_pct = %threshold_ratio,
+                    updates = stats.update_count,
+                    "EdgeTracker: Market edge summary (no samples)"
+                );
+            }
         }
 
         // Log summary
@@ -186,5 +247,36 @@ mod tests {
         assert_eq!(stats.max_buy_edge_bps, dec!(15));
         assert_eq!(stats.max_sell_edge_bps, dec!(20));
         assert_eq!(stats.max_edge(), dec!(20));
+    }
+
+    #[test]
+    fn test_percentiles() {
+        let mut tracker = EdgeTracker::new(60, dec!(40));
+        let key = MarketKey::new(DexId::XYZ, AssetId::new(0));
+
+        // Record 10 edges with known distribution
+        for i in 1..=10 {
+            let edge = Decimal::from(i * 5); // 5, 10, 15, 20, 25, 30, 35, 40, 45, 50
+            tracker.record_edge(key, edge, Decimal::ZERO);
+        }
+
+        let stats = tracker.stats.get(&key).unwrap();
+        let (p50, p75, p90, p99) = stats.percentiles().unwrap();
+
+        // With 10 samples [5,10,15,20,25,30,35,40,45,50]
+        // P50 = index 4.5 -> 30 (rounded)
+        assert!(p50 >= 25.0 && p50 <= 30.0, "P50={}", p50);
+        assert!(p75 >= 35.0 && p75 <= 40.0, "P75={}", p75);
+        assert!(p90 >= 45.0 && p90 <= 50.0, "P90={}", p90);
+        assert!((p99 - 50.0).abs() < 1.0, "P99={}", p99);
+    }
+
+    #[test]
+    fn test_empty_percentiles() {
+        let tracker = EdgeTracker::new(60, dec!(40));
+        let key = MarketKey::new(DexId::XYZ, AssetId::new(0));
+
+        // No data recorded
+        assert!(tracker.stats.get(&key).is_none());
     }
 }

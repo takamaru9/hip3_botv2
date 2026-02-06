@@ -37,7 +37,7 @@ use hip3_core::types::MarketSnapshot;
 use hip3_core::{MarketKey, OrderSide, PendingOrder};
 
 use crate::mark_regression::MarkRegressionConfig;
-use crate::time_stop::FlattenOrderBuilder;
+use crate::time_stop::{FlattenOrderBuilder, TIME_STOP_MS};
 use crate::tracker::{Position, PositionTrackerHandle};
 
 // ============================================================================
@@ -164,8 +164,11 @@ impl ExitWatcher {
             return None;
         }
 
-        // 3. Calculate threshold factor
-        let threshold_factor = self.config.exit_threshold_bps / Decimal::from(10000);
+        // 3. Calculate threshold factor with optional time decay (P2-6)
+        let decay = self.config.decay_factor(held_ms, TIME_STOP_MS);
+        let effective_threshold_bps =
+            self.config.exit_threshold_bps * Decimal::try_from(decay).unwrap_or(Decimal::ONE);
+        let threshold_factor = effective_threshold_bps / Decimal::from(10000);
 
         // 4. Check exit condition based on position side
         match position.side {
@@ -225,11 +228,40 @@ impl ExitWatcher {
             .exit_count
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
+        // P1-4: Record exit metrics for MarkRegression
+        let market_str = position.market.to_string();
+        let exit_reason_str = "MarkRegression";
+        hip3_telemetry::Metrics::position_holding_time(
+            &market_str,
+            exit_reason_str,
+            held_ms as f64,
+        );
+
+        // Estimate PnL in bps from entry price vs current oracle
+        let oracle_px = snapshot.ctx.oracle.oracle_px.inner();
+        if !position.entry_price.inner().is_zero() && !oracle_px.is_zero() {
+            use rust_decimal::prelude::ToPrimitive;
+            let pnl_bps = match position.side {
+                OrderSide::Buy => {
+                    (oracle_px - position.entry_price.inner()) / position.entry_price.inner()
+                        * Decimal::from(10000)
+                }
+                OrderSide::Sell => {
+                    (position.entry_price.inner() - oracle_px) / position.entry_price.inner()
+                        * Decimal::from(10000)
+                }
+            };
+            if let Some(pnl) = pnl_bps.to_f64() {
+                hip3_telemetry::Metrics::trade_pnl(&market_str, exit_reason_str, pnl);
+            }
+        }
+
         info!(
             market = %position.market,
             side = ?position.side,
             edge_bps = %edge_bps,
             held_ms = held_ms,
+            exit_reason = exit_reason_str,
             cloid = %order.cloid,
             exit_count = count + 1,
             "ExitWatcher: WS-driven exit triggered"
@@ -320,10 +352,12 @@ mod tests {
     use hip3_core::{AssetCtx, AssetId, Bbo, DexId, OracleData, Price, Size};
     use rust_decimal_macros::dec;
 
+    #[allow(dead_code)]
     fn test_market() -> MarketKey {
         MarketKey::new(DexId::XYZ, AssetId::new(0))
     }
 
+    #[allow(dead_code)]
     fn test_snapshot(bid: Decimal, ask: Decimal, oracle: Decimal) -> MarketSnapshot {
         let bbo = Bbo::new(
             Price::new(bid),
@@ -343,6 +377,9 @@ mod tests {
             check_interval_ms: 200,       // Not used in ExitWatcher
             min_holding_time_ms: 0,       // No minimum for tests
             slippage_bps: 50,
+            time_decay_enabled: false,
+            decay_start_ms: 5000,
+            min_decay_factor: 0.2,
         }
     }
 

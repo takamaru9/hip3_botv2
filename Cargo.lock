@@ -2060,6 +2060,7 @@ dependencies = [
  "hip3-core",
  "hip3-position",
  "hip3-registry",
+ "hip3-risk",
  "hip3-ws",
  "parking_lot",
  "rmp-serde",
@@ -2116,6 +2117,7 @@ dependencies = [
  "dashmap",
  "hip3-core",
  "hip3-feed",
+ "hip3-telemetry",
  "parking_lot",
  "rust_decimal",
  "rust_decimal_macros",
@@ -2123,6 +2125,7 @@ dependencies = [
  "thiserror 1.0.69",
  "tokio",
  "tokio-test",
+ "toml",
  "tracing",
 ]
 

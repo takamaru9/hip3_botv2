@@ -65,6 +65,8 @@ pub struct DislocationDetector {
     /// Previous oracle prices per market for direction detection.
     /// Uses RefCell for interior mutability since check() takes &self.
     prev_oracle: RefCell<HashMap<MarketKey, Price>>,
+    /// P2-2: Per-market spread EWMA for adaptive threshold.
+    spread_ewma: RefCell<HashMap<MarketKey, Decimal>>,
 }
 
 impl DislocationDetector {
@@ -85,6 +87,7 @@ impl DislocationDetector {
             config,
             fee_calculator,
             prev_oracle: RefCell::new(HashMap::new()),
+            spread_ewma: RefCell::new(HashMap::new()),
         })
     }
 
@@ -105,6 +108,7 @@ impl DislocationDetector {
             config,
             fee_calculator,
             prev_oracle: RefCell::new(HashMap::new()),
+            spread_ewma: RefCell::new(HashMap::new()),
         })
     }
 
@@ -183,6 +187,41 @@ impl DislocationDetector {
         }
     }
 
+    /// P2-2: Update spread EWMA for a market and return adaptive threshold.
+    ///
+    /// Returns `Some(threshold_bps)` if adaptive threshold is enabled and
+    /// the spread-based threshold exceeds the base cost threshold.
+    /// Returns `None` if adaptive threshold is disabled.
+    fn update_spread_ewma(&self, key: MarketKey, snapshot: &MarketSnapshot) -> Option<Decimal> {
+        if !self.config.adaptive_threshold {
+            return None;
+        }
+
+        let spread_bps = snapshot.bbo.spread_bps()?;
+
+        let mut ewma_map = self.spread_ewma.borrow_mut();
+        let ewma = ewma_map.entry(key).or_insert(Decimal::ZERO);
+
+        if ewma.is_zero() {
+            *ewma = spread_bps;
+        } else {
+            let alpha = self.config.spread_ewma_alpha;
+            *ewma = alpha * spread_bps + (Decimal::ONE - alpha) * *ewma;
+        }
+
+        let spread_threshold = *ewma * self.config.spread_threshold_multiplier;
+        Some(spread_threshold)
+    }
+
+    /// P2-2: Get current spread EWMA for a market (for metrics/debugging).
+    pub fn spread_ewma(&self, key: &MarketKey) -> Decimal {
+        self.spread_ewma
+            .borrow()
+            .get(key)
+            .copied()
+            .unwrap_or(Decimal::ZERO)
+    }
+
     /// Check for dislocation opportunity.
     ///
     /// Returns Some(signal) if a valid opportunity is detected.
@@ -208,11 +247,29 @@ impl DislocationDetector {
         let oracle = snapshot.ctx.oracle.oracle_px;
         let movement = Self::get_oracle_movement(self, key, oracle);
 
+        // P2-2: Update spread EWMA and compute adaptive threshold
+        let adaptive_threshold = self.update_spread_ewma(key, snapshot);
+
+        // Effective threshold: max(explicit_override or fee_cost, adaptive_spread_threshold)
+        let effective_threshold = match (threshold_override_bps, adaptive_threshold) {
+            (Some(override_bps), Some(spread_th)) => Some(override_bps.max(spread_th)),
+            (Some(override_bps), None) => Some(override_bps),
+            (None, Some(spread_th)) => {
+                let base = self.fee_calculator.total_cost_bps();
+                if spread_th > base {
+                    Some(spread_th)
+                } else {
+                    None // Use fee_calculator default
+                }
+            }
+            (None, None) => None,
+        };
+
         // Check buy opportunity: ask below oracle
         if let Some(signal) = self.check_buy(
             key,
             snapshot,
-            threshold_override_bps,
+            effective_threshold,
             movement,
             oracle_tracker,
             oracle_age_ms,
@@ -224,7 +281,7 @@ impl DislocationDetector {
         if let Some(signal) = self.check_sell(
             key,
             snapshot,
-            threshold_override_bps,
+            effective_threshold,
             movement,
             oracle_tracker,
             oracle_age_ms,
@@ -362,8 +419,49 @@ impl DislocationDetector {
             }
         }
 
-        // Calculate suggested size (may return ZERO if liquidity too low)
-        let suggested_size = self.calculate_size(snapshot, OrderSide::Buy);
+        // P2-1: Calculate velocity multiplier for sizing
+        let velocity_multiplier = self.config.velocity_multiplier(oracle_movement.change_bps);
+
+        // P3-1: Calculate confidence multiplier for sizing
+        let consecutive_up = oracle_tracker
+            .map(|t| t.consecutive(&key, MoveDirection::Up))
+            .unwrap_or(0);
+        // First pass: get liquidity_factor from calculate_size with confidence=1.0
+        let (preliminary_size, liquidity_factor) =
+            self.calculate_size(snapshot, OrderSide::Buy, velocity_multiplier, Decimal::ONE);
+        if preliminary_size.is_zero() {
+            tracing::debug!(
+                %key,
+                side = "buy",
+                raw_edge_bps = %raw_edge_bps,
+                "Signal skipped due to low liquidity"
+            );
+            return None;
+        }
+
+        let confidence = self.confidence_score(
+            raw_edge_bps,
+            total_cost,
+            oracle_movement.change_bps,
+            consecutive_up,
+            liquidity_factor,
+            &key,
+        );
+
+        // P3-1: confidence_multiplier = 0.5 + 0.5 * confidence (range: 0.5-1.0)
+        let confidence_multiplier = if self.config.confidence_sizing {
+            Decimal::new(5, 1) + Decimal::new(5, 1) * confidence
+        } else {
+            Decimal::ONE
+        };
+
+        // Calculate final size with all multipliers
+        let (suggested_size, _) = self.calculate_size(
+            snapshot,
+            OrderSide::Buy,
+            velocity_multiplier,
+            confidence_multiplier,
+        );
 
         // Skip signal if size is zero (low liquidity)
         if suggested_size.is_zero() {
@@ -390,6 +488,8 @@ impl DislocationDetector {
             ask = %ask,
             oracle_direction = ?oracle_movement.direction,
             oracle_change_bps = %oracle_movement.change_bps,
+            %velocity_multiplier,
+            %confidence,
             ?oracle_age_ms,
             "Dislocation detected (P0-24: HIP-3 2x fee applied)"
         );
@@ -405,6 +505,8 @@ impl DislocationDetector {
             ask,
             ask_size,
             fee_metadata,
+            oracle_movement.change_bps,
+            confidence,
         ))
     }
 
@@ -535,8 +637,46 @@ impl DislocationDetector {
             }
         }
 
-        // Calculate suggested size (may return ZERO if liquidity too low)
-        let suggested_size = self.calculate_size(snapshot, OrderSide::Sell);
+        // P2-1: Calculate velocity multiplier for sizing
+        let velocity_multiplier = self.config.velocity_multiplier(oracle_movement.change_bps);
+
+        // P3-1: Calculate confidence multiplier for sizing
+        let consecutive_down = oracle_tracker
+            .map(|t| t.consecutive(&key, MoveDirection::Down))
+            .unwrap_or(0);
+        let (preliminary_size, liquidity_factor) =
+            self.calculate_size(snapshot, OrderSide::Sell, velocity_multiplier, Decimal::ONE);
+        if preliminary_size.is_zero() {
+            tracing::debug!(
+                %key,
+                side = "sell",
+                raw_edge_bps = %raw_edge_bps,
+                "Signal skipped due to low liquidity"
+            );
+            return None;
+        }
+
+        let confidence = self.confidence_score(
+            raw_edge_bps,
+            total_cost,
+            oracle_movement.change_bps,
+            consecutive_down,
+            liquidity_factor,
+            &key,
+        );
+
+        let confidence_multiplier = if self.config.confidence_sizing {
+            Decimal::new(5, 1) + Decimal::new(5, 1) * confidence
+        } else {
+            Decimal::ONE
+        };
+
+        let (suggested_size, _) = self.calculate_size(
+            snapshot,
+            OrderSide::Sell,
+            velocity_multiplier,
+            confidence_multiplier,
+        );
 
         // Skip signal if size is zero (low liquidity)
         if suggested_size.is_zero() {
@@ -563,6 +703,8 @@ impl DislocationDetector {
             bid = %bid,
             oracle_direction = ?oracle_movement.direction,
             oracle_change_bps = %oracle_movement.change_bps,
+            %velocity_multiplier,
+            %confidence,
             ?oracle_age_ms,
             "Dislocation detected (P0-24: HIP-3 2x fee applied)"
         );
@@ -578,7 +720,77 @@ impl DislocationDetector {
             bid,
             bid_size,
             fee_metadata,
+            oracle_movement.change_bps,
+            confidence,
         ))
+    }
+
+    /// P3-1: Calculate multi-factor confidence score (0.0-1.0).
+    ///
+    /// Factors and weights:
+    /// - Edge magnitude (0.30): larger edge = higher confidence
+    /// - Oracle velocity (0.20): faster oracle move = more reliable dislocation
+    /// - Consecutive moves (0.20): more consecutive moves = stronger trend
+    /// - Book depth (0.15): deeper book = more reliable fill
+    /// - Spread tightness (0.15): tighter spread = healthier market
+    fn confidence_score(
+        &self,
+        raw_edge_bps: Decimal,
+        total_cost_bps: Decimal,
+        velocity_bps: Decimal,
+        consecutive_moves: u32,
+        liquidity_factor: Decimal,
+        key: &MarketKey,
+    ) -> Decimal {
+        // 1. Edge factor: linear from 0 at threshold to 1 at 3x threshold
+        let edge_excess = raw_edge_bps - total_cost_bps;
+        let edge_factor = if edge_excess <= Decimal::ZERO {
+            Decimal::ZERO
+        } else {
+            (edge_excess / (total_cost_bps * Decimal::from(2))).min(Decimal::ONE)
+        };
+
+        // 2. Velocity factor: linear from 0 at min_change to 1 at 4x min_change
+        let min_change = self.config.min_oracle_change_bps;
+        let velocity_factor = if min_change.is_zero() || velocity_bps <= min_change {
+            Decimal::ZERO
+        } else {
+            let max_vel = min_change * Decimal::from(4);
+            ((velocity_bps - min_change) / (max_vel - min_change)).min(Decimal::ONE)
+        };
+
+        // 3. Consecutive factor: 0=0.0, 1=0.33, 2=0.67, 3+=1.0
+        let consecutive_factor = Decimal::from(consecutive_moves.min(3)) / Decimal::from(3);
+
+        // 4. Book depth factor: reuse liquidity_factor directly (already 0.0-1.0)
+        let book_factor = liquidity_factor;
+
+        // 5. Spread tightness: use spread_ewma relative to total_cost
+        //    Tight spread (spread < cost) = 1.0, wide spread (spread > 3x cost) = 0.0
+        let spread_ewma = self.spread_ewma(key);
+        let spread_factor = if spread_ewma.is_zero() || total_cost_bps.is_zero() {
+            Decimal::new(5, 1) // 0.5 default when no data
+        } else {
+            let ratio = spread_ewma / total_cost_bps;
+            if ratio <= Decimal::ONE {
+                Decimal::ONE
+            } else if ratio >= Decimal::from(3) {
+                Decimal::ZERO
+            } else {
+                // Linear from 1.0 at ratio=1 to 0.0 at ratio=3
+                (Decimal::from(3) - ratio) / Decimal::from(2)
+            }
+        };
+
+        // Weighted sum
+        let score = edge_factor * Decimal::new(30, 2)       // 0.30
+            + velocity_factor * Decimal::new(20, 2)          // 0.20
+            + consecutive_factor * Decimal::new(20, 2)       // 0.20
+            + book_factor * Decimal::new(15, 2)              // 0.15
+            + spread_factor * Decimal::new(15, 2); // 0.15
+
+        // Clamp to [0.0, 1.0]
+        score.min(Decimal::ONE).max(Decimal::ZERO)
     }
 
     /// Calculate liquidity adjustment factor (0.0 ~ 1.0).
@@ -600,16 +812,22 @@ impl DislocationDetector {
         }
     }
 
-    /// Calculate suggested trade size with liquidity adjustment.
+    /// Calculate suggested trade size with liquidity, velocity, and confidence adjustment.
     ///
-    /// size = clamp(alpha * liquidity_factor * top_of_book_size, min_notional, max_notional) / mid_price
+    /// size = clamp(alpha * liquidity_factor * velocity_multiplier * confidence_multiplier * top_of_book_size, min_notional, max_notional) / mid_price
     ///
-    /// Returns Size::ZERO if liquidity is below minimum threshold.
-    fn calculate_size(&self, snapshot: &MarketSnapshot, side: OrderSide) -> Size {
+    /// Returns `(Size, liquidity_factor)`. Size::ZERO if liquidity is below minimum threshold.
+    fn calculate_size(
+        &self,
+        snapshot: &MarketSnapshot,
+        side: OrderSide,
+        velocity_multiplier: Decimal,
+        confidence_multiplier: Decimal,
+    ) -> (Size, Decimal) {
         // P0-14: mid_price() now returns Option<Price>
         let mid = match snapshot.bbo.mid_price() {
             Some(m) if !m.is_zero() => m,
-            _ => return Size::ZERO,
+            _ => return (Size::ZERO, Decimal::ZERO),
         };
 
         // Side-aware book size and price
@@ -633,17 +851,22 @@ impl DislocationDetector {
                 %liquidity_factor,
                 "Liquidity too low, skipping signal"
             );
-            return Size::ZERO;
+            return (Size::ZERO, liquidity_factor);
         }
 
-        // Adjusted alpha (scaled by liquidity)
-        let adjusted_alpha = self.config.sizing_alpha * liquidity_factor;
+        // Adjusted alpha (scaled by liquidity, velocity, and confidence)
+        let adjusted_alpha = self.config.sizing_alpha
+            * liquidity_factor
+            * velocity_multiplier
+            * confidence_multiplier;
 
         tracing::debug!(
             %book_notional,
             %liquidity_factor,
+            %velocity_multiplier,
+            %confidence_multiplier,
             %adjusted_alpha,
-            "Liquidity factor applied"
+            "Liquidity, velocity, and confidence factors applied"
         );
 
         // Alpha-scaled book size
@@ -675,7 +898,7 @@ impl DislocationDetector {
             alpha_size
         };
 
-        clamped_size
+        (clamped_size, liquidity_factor)
     }
 
     /// Get current configuration.
@@ -822,7 +1045,8 @@ mod tests {
         // Max size = 1000 * 0.99 / 50000 = 0.0198 BTC (with 1% buffer)
         // Result should be 0.0198 (clamped to max)
         let snapshot = make_snapshot(dec!(50000), dec!(49990), dec!(50010));
-        let size = detector.calculate_size(&snapshot, OrderSide::Buy);
+        let (size, _lf) =
+            detector.calculate_size(&snapshot, OrderSide::Buy, Decimal::ONE, Decimal::ONE);
 
         assert_eq!(size.inner(), dec!(0.0198));
     }
@@ -1034,7 +1258,8 @@ mod tests {
             dec!(0.055),
         );
 
-        let size = detector.calculate_size(&snapshot, OrderSide::Buy);
+        let (size, _lf) =
+            detector.calculate_size(&snapshot, OrderSide::Buy, Decimal::ONE, Decimal::ONE);
 
         // Expected: approximately 0.00275 (within 1% tolerance due to price-based calculation)
         let expected = dec!(0.00275);
@@ -1072,7 +1297,8 @@ mod tests {
             dec!(0.055),
         );
 
-        let size = detector.calculate_size(&snapshot, OrderSide::Sell);
+        let (size, _lf) =
+            detector.calculate_size(&snapshot, OrderSide::Sell, Decimal::ONE, Decimal::ONE);
 
         // Expected: approximately 0.00275 (similar to buy but using bid_price)
         let expected = dec!(0.00275);
@@ -1105,7 +1331,8 @@ mod tests {
         let snapshot =
             make_snapshot_with_size(dec!(50000), dec!(49990), dec!(50010), dec!(0.2), dec!(0.2));
 
-        let size = detector.calculate_size(&snapshot, OrderSide::Buy);
+        let (size, _lf) =
+            detector.calculate_size(&snapshot, OrderSide::Buy, Decimal::ONE, Decimal::ONE);
 
         // Expected: 0.2 * 0.10 * 1.0 = 0.02
         assert_eq!(size.inner(), dec!(0.02));

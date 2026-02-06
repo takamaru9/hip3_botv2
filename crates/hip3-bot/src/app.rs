@@ -102,8 +102,8 @@ pub struct Application {
     // P0-15: Discovered xyz DEX ID
     xyz_dex_id: Option<DexId>,
     // BUG-003: Track gate block state per (market, gate) for state-change logging
-    // Key: (MarketKey, gate_name), Value: was_blocked_last_tick
-    gate_block_state: HashMap<(MarketKey, String), bool>,
+    // Key: (MarketKey, gate_name), Value: (was_blocked_last_tick, block_start_instant)
+    gate_block_state: HashMap<(MarketKey, String), (bool, Instant)>,
     // Per-market threshold overrides in basis points.
     // Key: asset_idx (from MarketConfig), Value: threshold_bps
     market_threshold_map: HashMap<u32, Decimal>,
@@ -122,6 +122,8 @@ pub struct Application {
     recent_signals: Arc<RwLock<VecDeque<SignalRecord>>>,
     /// Signal sender for real-time dashboard updates.
     dashboard_signal_tx: Option<SignalSender>,
+    /// P3-4: Dashboard state for trade reporting.
+    dashboard_state: Option<DashboardState>,
     /// Deduplication: track last persisted signal time per (market_key, side).
     /// Signals within DEDUP_INTERVAL_MS of the last one are skipped.
     last_persisted_signals: HashMap<(String, String), i64>,
@@ -133,6 +135,13 @@ pub struct Application {
     oracle_exit_watcher: Option<OracleExitWatcherHandle>,
     /// Edge distribution tracker for threshold calibration.
     edge_tracker: EdgeTracker,
+    /// P2-3: MaxDrawdownGate for hourly drawdown control.
+    max_drawdown_gate: Option<Arc<hip3_risk::MaxDrawdownGate>>,
+    /// P2-4: CorrelationCooldownGate for correlated close cooldown.
+    correlation_cooldown_gate: Option<Arc<hip3_risk::CorrelationCooldownGate>>,
+    /// P2-5: Cache of last signal edge_bps per market for dynamic exit thresholds.
+    /// Populated at signal time, consumed at fill time for on_position_opened.
+    last_signal_edge: RwLock<HashMap<MarketKey, Decimal>>,
 }
 
 impl Application {
@@ -202,6 +211,7 @@ impl Application {
             recent_signals: Arc::new(RwLock::new(VecDeque::with_capacity(50))),
             // Dashboard: Signal sender (set when dashboard is enabled)
             dashboard_signal_tx: None,
+            dashboard_state: None,
             // Deduplication: Initialize empty map
             last_persisted_signals: HashMap::new(),
             // WS-driven exit watcher (initialized in Trading mode only)
@@ -212,6 +222,11 @@ impl Application {
             oracle_exit_watcher: None,
             // Edge tracker for threshold calibration (60s log interval)
             edge_tracker: EdgeTracker::new(60, Decimal::from(40)),
+            // P2-3/P2-4: Gates initialized in Trading mode only
+            max_drawdown_gate: None,
+            correlation_cooldown_gate: None,
+            // P2-5: Signal edge cache for dynamic exit thresholds
+            last_signal_edge: RwLock::new(HashMap::new()),
         })
     }
 
@@ -608,7 +623,7 @@ impl Application {
         // market state when the position was originally opened.
         if let Some(ref oracle_exit) = self.oracle_exit_watcher {
             for position in &positions_to_sync {
-                oracle_exit.on_position_opened(position.market, position.side);
+                oracle_exit.on_position_opened(position.market, position.side, None, None);
             }
         }
 
@@ -823,7 +838,16 @@ impl Application {
                 )
                 .unwrap_or(Decimal::new(10, 2)), // Default 0.10 (10%)
             };
-            let executor = Arc::new(hip3_executor::Executor::new(
+            // P2-3: MaxDrawdownGate
+            let max_drawdown_gate = Arc::new(hip3_risk::MaxDrawdownGate::new(
+                self.config.max_drawdown.clone(),
+            ));
+            // P2-4: CorrelationCooldownGate
+            let correlation_cooldown_gate = Arc::new(hip3_risk::CorrelationCooldownGate::new(
+                self.config.correlation_cooldown.clone(),
+            ));
+
+            let mut executor = hip3_executor::Executor::new(
                 position_tracker.clone(),
                 batch_scheduler.clone(),
                 ready_checker.clone(),
@@ -831,7 +855,76 @@ impl Application {
                 action_budget.clone(),
                 executor_config,
                 Arc::new(MarketStateCache::default()),
-            ));
+            );
+            if max_drawdown_gate.is_enabled() {
+                info!(
+                    max_hourly_drawdown_usd = self.config.max_drawdown.max_hourly_drawdown_usd,
+                    "MaxDrawdownGate enabled"
+                );
+                executor = executor.with_max_drawdown_gate(max_drawdown_gate.clone());
+            }
+            if correlation_cooldown_gate.is_enabled() {
+                info!(
+                    threshold = self.config.correlation_cooldown.correlation_close_threshold,
+                    window_secs = self.config.correlation_cooldown.correlation_window_secs,
+                    cooldown_secs = self.config.correlation_cooldown.correlation_cooldown_secs,
+                    "CorrelationCooldownGate enabled"
+                );
+                executor =
+                    executor.with_correlation_cooldown_gate(correlation_cooldown_gate.clone());
+            }
+            // P3-3: CorrelationPositionGate
+            if self.config.correlation_position.enabled {
+                let dex_id = self.get_dex_id();
+                let resolved_groups: Vec<hip3_risk::ResolvedCorrelationGroup> = self
+                    .config
+                    .correlation_position
+                    .groups
+                    .iter()
+                    .filter_map(|g| {
+                        let markets: std::collections::HashSet<MarketKey> = g
+                            .markets
+                            .iter()
+                            .filter_map(|coin| self.coin_to_market_key(coin, dex_id))
+                            .collect();
+                        if markets.is_empty() {
+                            warn!(group = %g.name, "Correlation group has no resolved markets, skipping");
+                            return None;
+                        }
+                        Some(hip3_risk::ResolvedCorrelationGroup {
+                            name: g.name.clone(),
+                            markets,
+                            weight: Decimal::try_from(g.weight).unwrap_or(Decimal::new(15, 1)),
+                        })
+                    })
+                    .collect();
+
+                if !resolved_groups.is_empty() {
+                    let max_weighted =
+                        Decimal::try_from(self.config.correlation_position.max_weighted_positions)
+                            .unwrap_or(Decimal::from(5));
+                    let gate = Arc::new(hip3_risk::CorrelationPositionGate::new(
+                        resolved_groups,
+                        position_tracker.clone(),
+                        max_weighted,
+                    ));
+                    info!(
+                        groups = self.config.correlation_position.groups.len(),
+                        max_weighted = %max_weighted,
+                        "CorrelationPositionGate enabled"
+                    );
+                    executor = executor.with_correlation_position_gate(gate);
+                }
+            }
+            let executor = Arc::new(executor);
+
+            // Store gate references for PnL/close reporting in handle_user_fill
+            if max_drawdown_gate.is_enabled() {
+                self.max_drawdown_gate = Some(max_drawdown_gate);
+            }
+            if correlation_cooldown_gate.is_enabled() {
+                self.correlation_cooldown_gate = Some(correlation_cooldown_gate);
+            }
 
             // 7. KeyManager (uses KeySource struct variant)
             let key_source = self.config.private_key.as_ref().map(|_| {
@@ -883,12 +976,24 @@ impl Application {
             let executor_loop = Arc::new(executor_loop);
             self.executor_loop = Some(executor_loop.clone());
 
-            // 12. Spawn ExecutorLoop tick task (100ms interval)
+            // 12. Spawn ExecutorLoop tick task (P2-7: event-driven with cooldown)
             let tick_executor_loop = executor_loop.clone();
+            let notify = batch_scheduler.notify().clone();
+            let tick_interval_ms = batch_scheduler.interval().as_millis() as u64;
             let tick_handle = tokio::spawn(async move {
-                let mut interval = tokio::time::interval(Duration::from_millis(100));
+                let mut interval = tokio::time::interval(Duration::from_millis(tick_interval_ms));
+                let cooldown = Duration::from_millis(5);
                 loop {
-                    interval.tick().await;
+                    // Wait for either the timer tick OR a notify signal
+                    tokio::select! {
+                        _ = interval.tick() => {}
+                        _ = notify.notified() => {
+                            // Brief cooldown to batch rapid-fire signals
+                            tokio::time::sleep(cooldown).await;
+                            // Reset interval so it doesn't fire immediately after
+                            interval.reset();
+                        }
+                    }
                     tick_executor_loop.tick(current_time_ms()).await;
                 }
             });
@@ -960,6 +1065,9 @@ impl Application {
                         check_interval_ms: self.config.mark_regression.check_interval_ms,
                         min_holding_time_ms: self.config.mark_regression.min_holding_time_ms,
                         slippage_bps: self.config.mark_regression.slippage_bps,
+                        time_decay_enabled: self.config.mark_regression.time_decay_enabled,
+                        decay_start_ms: self.config.mark_regression.decay_start_ms,
+                        min_decay_factor: self.config.mark_regression.min_decay_factor,
                     };
 
                     let mark_regression_monitor = MarkRegressionMonitor::new(
@@ -1201,6 +1309,8 @@ impl Application {
                 );
                 // Store signal sender for real-time signal push
                 self.dashboard_signal_tx = Some(dashboard_state.signal_sender());
+                // P3-4: Store dashboard state for trade reporting
+                self.dashboard_state = Some(dashboard_state.clone());
                 let dashboard_config = self.config.dashboard.clone();
                 tokio::spawn(async move {
                     if let Err(e) =
@@ -1301,6 +1411,14 @@ impl Application {
                                 &format!("{:?}", signal.strength),
                             );
 
+                            // P1-4: Record entry edge at signal detection
+                            if let Ok(edge_f64) = signal.raw_edge_bps.to_string().parse::<f64>() {
+                                Metrics::entry_edge(
+                                    &signal.market_key.to_string(),
+                                    edge_f64,
+                                );
+                            }
+
                             // Persist signal (with deduplication)
                             let persisted = self.persist_signal(&signal)?;
 
@@ -1351,9 +1469,27 @@ impl Application {
                                         rounded_size, // Use rounded size instead of suggested_size
                                         current_time_ms(),
                                     );
+
+                                    // P1-4: Record signal-to-order latency
+                                    let latency_ms = (chrono::Utc::now() - signal.detected_at)
+                                        .num_milliseconds() as f64;
+                                    Metrics::signal_to_order_latency(
+                                        &signal.market_key.to_string(),
+                                        latency_ms,
+                                    );
+
+                                    // P2-5: Cache entry edge for dynamic exit thresholds
+                                    if result.is_queued() {
+                                        self.last_signal_edge.write().insert(
+                                            signal.market_key,
+                                            signal.raw_edge_bps,
+                                        );
+                                    }
+
                                     debug!(
                                         signal_id = %signal.signal_id,
                                         result = ?result,
+                                        latency_ms = latency_ms,
                                         "Signal execution result"
                                     );
                                 }
@@ -1771,8 +1907,96 @@ impl Application {
         //   - Exit triggers when delta >= threshold (correct!)
         if !tracker.has_position(&market) {
             // New position will be created - record baseline
+            // P2-5: Pass cached entry edge for dynamic exit thresholds
+            let entry_edge = self.last_signal_edge.write().remove(&market);
+            // P3-2: Pass current oracle price for trailing stop tracking
+            let entry_oracle = self
+                .market_state
+                .get_snapshot(&market)
+                .map(|s| s.ctx.oracle.oracle_px.inner());
             if let Some(ref oracle_exit) = self.oracle_exit_watcher {
-                oracle_exit.on_position_opened(market, side);
+                oracle_exit.on_position_opened(market, side, entry_edge, entry_oracle);
+            }
+        }
+
+        // P2-3/P2-4: Report PnL and close events when a position is being closed
+        // (fill side opposite to position side = reduce-only direction)
+        if let Some(existing_pos) = tracker.get_position(&market) {
+            let is_closing = existing_pos.side != side;
+            if is_closing {
+                // P2-3: Report realized PnL estimate to MaxDrawdownGate
+                if let Some(ref gate) = self.max_drawdown_gate {
+                    use rust_decimal::prelude::ToPrimitive;
+                    let pnl_bps = match existing_pos.side {
+                        OrderSide::Buy => {
+                            (price.inner() - existing_pos.entry_price.inner())
+                                / existing_pos.entry_price.inner()
+                                * Decimal::from(10000)
+                        }
+                        OrderSide::Sell => {
+                            (existing_pos.entry_price.inner() - price.inner())
+                                / existing_pos.entry_price.inner()
+                                * Decimal::from(10000)
+                        }
+                    };
+                    // Convert bps to USD: pnl_usd = pnl_bps / 10000 * notional
+                    let notional = size.inner() * price.inner();
+                    let pnl_usd = pnl_bps / Decimal::from(10000) * notional;
+                    if let Some(pnl) = pnl_usd.to_f64() {
+                        gate.report_pnl(pnl);
+                        debug!(
+                            market = %market,
+                            pnl_usd = pnl,
+                            cumulative = gate.cumulative_pnl_usd(),
+                            "MaxDrawdownGate: reported PnL"
+                        );
+                    }
+                }
+
+                // P2-4: Report close event to CorrelationCooldownGate
+                if let Some(ref gate) = self.correlation_cooldown_gate {
+                    gate.report_close();
+                    debug!(
+                        market = %market,
+                        "CorrelationCooldownGate: reported position close"
+                    );
+                }
+
+                // P3-4: Report completed trade to dashboard for PnL summary
+                if let Some(ref ds) = self.dashboard_state {
+                    use rust_decimal::prelude::ToPrimitive;
+                    let pnl_bps = match existing_pos.side {
+                        OrderSide::Buy => {
+                            (price.inner() - existing_pos.entry_price.inner())
+                                / existing_pos.entry_price.inner()
+                                * Decimal::from(10000)
+                        }
+                        OrderSide::Sell => {
+                            (existing_pos.entry_price.inner() - price.inner())
+                                / existing_pos.entry_price.inner()
+                                * Decimal::from(10000)
+                        }
+                    };
+                    let notional = size.inner() * price.inner();
+                    let pnl_usd = pnl_bps / Decimal::from(10000) * notional;
+                    let now_ms = chrono::Utc::now().timestamp_millis();
+                    let hold_time = (now_ms as u64).saturating_sub(existing_pos.entry_timestamp_ms);
+                    ds.report_completed_trade(hip3_dashboard::CompletedTrade {
+                        market: market.to_string(),
+                        side: match existing_pos.side {
+                            OrderSide::Buy => "long".to_string(),
+                            OrderSide::Sell => "short".to_string(),
+                        },
+                        entry_price: existing_pos.entry_price.inner().to_f64().unwrap_or(0.0),
+                        exit_price: price.inner().to_f64().unwrap_or(0.0),
+                        size: size.inner().to_f64().unwrap_or(0.0),
+                        pnl: pnl_usd.to_f64().unwrap_or(0.0),
+                        pnl_bps: pnl_bps.to_f64().unwrap_or(0.0),
+                        hold_time_ms: hold_time,
+                        exit_reason: String::new(), // Exit reason not available here
+                        closed_at_ms: now_ms,
+                    });
+                }
             }
         }
 
@@ -1936,7 +2160,20 @@ impl Application {
             ) {
                 Ok(_results) => {
                     // BUG-003 fix: Clear block state when gates pass
-                    // This allows state-change logging when block resumes
+                    // P1-3: Record block duration before clearing
+                    let cleared: Vec<_> = self
+                        .gate_block_state
+                        .iter()
+                        .filter(|((k, _), _)| *k == key)
+                        .map(|((_, g), (_, start))| (g.clone(), start.elapsed()))
+                        .collect();
+                    for (gate, dur) in &cleared {
+                        Metrics::gate_block_duration(
+                            gate,
+                            &key.to_string(),
+                            dur.as_millis() as f64,
+                        );
+                    }
                     self.gate_block_state.retain(|(k, _), _| *k != key);
 
                     // Edge tracking: Calculate and record edge for threshold calibration
@@ -1988,7 +2225,7 @@ impl Application {
                     let was_blocked = self
                         .gate_block_state
                         .get(&state_key)
-                        .copied()
+                        .map(|(b, _)| *b)
                         .unwrap_or(false);
 
                     if !was_blocked {
@@ -1999,10 +2236,10 @@ impl Application {
                             reason = %reason,
                             "Gate block started"
                         );
+                        // Record block start time
+                        self.gate_block_state
+                            .insert(state_key, (true, Instant::now()));
                     }
-
-                    // Update state to blocked
-                    self.gate_block_state.insert(state_key, true);
 
                     // Always record metrics (no spam, just counters)
                     Metrics::gate_blocked(&gate_name, &key.to_string());

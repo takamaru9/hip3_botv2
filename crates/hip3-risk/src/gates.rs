@@ -23,12 +23,12 @@
 //! - Halt: Market not halted
 //! - BufferLow: Liquidation buffer adequate
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::error::{RiskError, RiskResult};
 use chrono::{NaiveTime, Timelike, Utc};
 use hip3_core::types::MarketSnapshot;
-use hip3_core::{MarketKey, MarketSpec, Price, RejectReason, Size};
+use hip3_core::{MarketKey, MarketSpec, OrderSide, Price, RejectReason, Size};
 use hip3_position::PositionTrackerHandle;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
@@ -1170,6 +1170,189 @@ impl MaxPositionTotalGate {
 }
 
 // ============================================================================
+// CorrelationPositionGate (P3-3)
+// ============================================================================
+
+fn default_correlation_weight() -> f64 {
+    1.5
+}
+
+fn default_max_weighted_positions() -> f64 {
+    5.0
+}
+
+/// A single correlation group definition from config.
+///
+/// Example TOML:
+/// ```toml
+/// [[correlation_position.groups]]
+/// name = "precious_metals"
+/// markets = ["GOLD", "SILVER", "PLATINUM"]
+/// weight = 1.5
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CorrelationGroupDef {
+    /// Human-readable group name (e.g., "precious_metals").
+    pub name: String,
+    /// Coin names in this group (e.g., ["GOLD", "SILVER", "PLATINUM"]).
+    pub markets: Vec<String>,
+    /// Correlation weight applied when ≥2 same-direction positions exist.
+    /// Default: 1.5
+    #[serde(default = "default_correlation_weight")]
+    pub weight: f64,
+}
+
+/// P3-3: Configuration for correlation-weighted position limits.
+///
+/// When enabled, replaces the simple `max_concurrent_positions` check (Gate 5)
+/// with correlation-aware weighted counting.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CorrelationPositionConfig {
+    /// Whether correlation position limits are enabled. Default: false.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Correlation group definitions.
+    #[serde(default)]
+    pub groups: Vec<CorrelationGroupDef>,
+    /// Maximum weighted position count. Replaces max_concurrent_positions when enabled.
+    /// Default: 5.0
+    #[serde(default = "default_max_weighted_positions")]
+    pub max_weighted_positions: f64,
+}
+
+impl Default for CorrelationPositionConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            groups: Vec::new(),
+            max_weighted_positions: default_max_weighted_positions(),
+        }
+    }
+}
+
+/// A resolved correlation group with `MarketKey`s (runtime representation).
+///
+/// Created at startup by resolving coin names from config to `MarketKey`s.
+#[derive(Debug)]
+pub struct ResolvedCorrelationGroup {
+    /// Group name.
+    pub name: String,
+    /// Resolved `MarketKey`s for markets in this group.
+    pub markets: HashSet<MarketKey>,
+    /// Correlation weight.
+    pub weight: Decimal,
+}
+
+/// P3-3: Correlation-weighted position limit gate.
+///
+/// Trading Philosophy: `max_concurrent_positions=10→5` is a blunt instrument.
+/// Correlated same-direction positions (e.g., GOLD+SILVER both long) carry
+/// amplified risk and should "count for more" toward the position limit.
+///
+/// When ≥2 positions in the same correlation group share the same direction,
+/// each position in that (group, direction) cluster counts as `group.weight`
+/// instead of 1.0 toward the total weighted position count.
+pub struct CorrelationPositionGate {
+    /// Resolved correlation groups.
+    groups: Vec<ResolvedCorrelationGroup>,
+    /// Position tracker handle.
+    position_handle: PositionTrackerHandle,
+    /// Maximum weighted position count.
+    max_weighted: Decimal,
+}
+
+impl CorrelationPositionGate {
+    /// Create a new `CorrelationPositionGate`.
+    #[must_use]
+    pub fn new(
+        groups: Vec<ResolvedCorrelationGroup>,
+        position_handle: PositionTrackerHandle,
+        max_weighted: Decimal,
+    ) -> Self {
+        Self {
+            groups,
+            position_handle,
+            max_weighted,
+        }
+    }
+
+    /// Check if adding a position at `market` with `side` would exceed the weighted limit.
+    ///
+    /// # Algorithm
+    ///
+    /// 1. Get current positions and virtually add the proposed entry.
+    /// 2. For each position, determine its weight:
+    ///    - If in a correlation group with ≥2 same-direction positions → `group.weight`
+    ///    - Otherwise → 1.0
+    /// 3. Sum all weights. If sum > `max_weighted` → reject.
+    pub fn check(&self, market: &MarketKey, side: OrderSide) -> Result<(), RejectReason> {
+        let positions = self.position_handle.positions_snapshot();
+
+        // Build list of (market, side) including the proposed entry.
+        let mut all_entries: Vec<(MarketKey, OrderSide)> =
+            positions.iter().map(|p| (p.market, p.side)).collect();
+        all_entries.push((*market, side));
+
+        // Calculate weighted count.
+        let mut total_weighted = Decimal::ZERO;
+        for &(m, s) in &all_entries {
+            total_weighted += self.position_weight(m, s, &all_entries);
+        }
+
+        if total_weighted > self.max_weighted {
+            debug!(
+                market = %market,
+                side = ?side,
+                total_weighted = %total_weighted,
+                max_weighted = %self.max_weighted,
+                "CorrelationPositionGate blocked"
+            );
+            return Err(RejectReason::CorrelationPositionLimit);
+        }
+
+        trace!(
+            market = %market,
+            total_weighted = %total_weighted,
+            max_weighted = %self.max_weighted,
+            "CorrelationPositionGate passed"
+        );
+
+        Ok(())
+    }
+
+    /// Calculate the weight for a single position.
+    ///
+    /// If the position is in a correlation group and there are ≥2 same-direction
+    /// positions in that group, the weight is `group.weight` (e.g., 1.5).
+    /// Otherwise, the weight is 1.0.
+    fn position_weight(
+        &self,
+        market: MarketKey,
+        side: OrderSide,
+        all_entries: &[(MarketKey, OrderSide)],
+    ) -> Decimal {
+        for group in &self.groups {
+            if !group.markets.contains(&market) {
+                continue;
+            }
+            // Count same-direction positions in this group.
+            let same_dir_count = all_entries
+                .iter()
+                .filter(|&&(m, s)| group.markets.contains(&m) && s == side)
+                .count();
+
+            if same_dir_count >= 2 {
+                return group.weight;
+            }
+            // In a group but only 1 same-direction position → weight 1.0.
+            return Decimal::ONE;
+        }
+        // Not in any group → weight 1.0.
+        Decimal::ONE
+    }
+}
+
+// ============================================================================
 // MaxPosition Gate Tests
 // ============================================================================
 
@@ -1389,6 +1572,623 @@ mod max_position_tests {
             Price::new(dec!(50000)),
         );
         assert_eq!(result, Err(RejectReason::MaxPositionPerMarket));
+
+        handle.shutdown().await;
+    }
+}
+
+// ============================================================================
+// MaxDrawdownGate (P2-3)
+// ============================================================================
+
+/// Configuration for the MaxDrawdown gate.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MaxDrawdownConfig {
+    /// Maximum hourly drawdown in USD before blocking new entries.
+    /// Set to 0 to disable this gate.
+    #[serde(default)]
+    pub max_hourly_drawdown_usd: f64,
+}
+
+impl Default for MaxDrawdownConfig {
+    fn default() -> Self {
+        Self {
+            max_hourly_drawdown_usd: 0.0, // Disabled by default
+        }
+    }
+}
+
+/// MaxDrawdownGate: Blocks new entries when session drawdown exceeds threshold.
+///
+/// Tracks cumulative PnL within a rolling time window. When losses exceed
+/// the configured threshold, new entries are blocked while existing position
+/// management continues.
+///
+/// Thread-safe: Uses AtomicI64 for PnL tracking (units = cents, i.e. USD * 100).
+pub struct MaxDrawdownGate {
+    config: MaxDrawdownConfig,
+    /// Cumulative PnL in cents (USD * 100) for the current window.
+    /// Negative = loss. Using AtomicI64 for lock-free thread safety.
+    cumulative_pnl_cents: std::sync::atomic::AtomicI64,
+    /// Timestamp (ms) when the current window started.
+    window_start_ms: std::sync::atomic::AtomicU64,
+    /// Window duration in milliseconds (1 hour = 3_600_000).
+    window_duration_ms: u64,
+}
+
+impl MaxDrawdownGate {
+    /// Create a new MaxDrawdownGate.
+    #[must_use]
+    pub fn new(config: MaxDrawdownConfig) -> Self {
+        let now_ms = chrono::Utc::now().timestamp_millis() as u64;
+        Self {
+            config,
+            cumulative_pnl_cents: std::sync::atomic::AtomicI64::new(0),
+            window_start_ms: std::sync::atomic::AtomicU64::new(now_ms),
+            window_duration_ms: 3_600_000, // 1 hour
+        }
+    }
+
+    /// Report a realized PnL from a closed position.
+    ///
+    /// # Arguments
+    /// - `pnl_usd`: PnL in USD (positive = profit, negative = loss)
+    pub fn report_pnl(&self, pnl_usd: f64) {
+        self.maybe_reset_window();
+        let pnl_cents = (pnl_usd * 100.0) as i64;
+        self.cumulative_pnl_cents
+            .fetch_add(pnl_cents, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Check if new entries should be blocked due to drawdown.
+    ///
+    /// Returns `Ok(())` if allowed, `Err(RejectReason::MaxDrawdown)` if blocked.
+    pub fn check(&self) -> Result<(), RejectReason> {
+        // Gate disabled when threshold is 0
+        if self.config.max_hourly_drawdown_usd <= 0.0 {
+            return Ok(());
+        }
+
+        self.maybe_reset_window();
+
+        let pnl_cents = self
+            .cumulative_pnl_cents
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let threshold_cents = (self.config.max_hourly_drawdown_usd * -100.0) as i64;
+
+        if pnl_cents <= threshold_cents {
+            debug!(
+                pnl_usd = pnl_cents as f64 / 100.0,
+                threshold_usd = self.config.max_hourly_drawdown_usd,
+                "MaxDrawdownGate blocked: drawdown exceeded"
+            );
+            return Err(RejectReason::MaxDrawdown);
+        }
+
+        Ok(())
+    }
+
+    /// Reset window if expired.
+    fn maybe_reset_window(&self) {
+        let now_ms = chrono::Utc::now().timestamp_millis() as u64;
+        let window_start = self
+            .window_start_ms
+            .load(std::sync::atomic::Ordering::Relaxed);
+
+        if now_ms.saturating_sub(window_start) >= self.window_duration_ms {
+            // Reset window (compare-and-swap to handle concurrent resets)
+            if self
+                .window_start_ms
+                .compare_exchange(
+                    window_start,
+                    now_ms,
+                    std::sync::atomic::Ordering::SeqCst,
+                    std::sync::atomic::Ordering::Relaxed,
+                )
+                .is_ok()
+            {
+                self.cumulative_pnl_cents
+                    .store(0, std::sync::atomic::Ordering::Relaxed);
+                debug!("MaxDrawdownGate: window reset");
+            }
+        }
+    }
+
+    /// Get current cumulative PnL in USD.
+    #[must_use]
+    pub fn cumulative_pnl_usd(&self) -> f64 {
+        let cents = self
+            .cumulative_pnl_cents
+            .load(std::sync::atomic::Ordering::Relaxed);
+        cents as f64 / 100.0
+    }
+
+    /// Check if the gate is enabled.
+    #[must_use]
+    pub fn is_enabled(&self) -> bool {
+        self.config.max_hourly_drawdown_usd > 0.0
+    }
+}
+
+// ============================================================================
+// CorrelationCooldownGate (P2-4)
+// ============================================================================
+
+/// Configuration for the CorrelationCooldown gate.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CorrelationCooldownConfig {
+    /// Number of position closes within window to trigger cooldown.
+    /// Set to 0 to disable this gate.
+    #[serde(default)]
+    pub correlation_close_threshold: u32,
+    /// Window in seconds to count position closes.
+    #[serde(default = "default_correlation_window_secs")]
+    pub correlation_window_secs: u64,
+    /// Cooldown duration in seconds after threshold is breached.
+    #[serde(default = "default_correlation_cooldown_secs")]
+    pub correlation_cooldown_secs: u64,
+}
+
+fn default_correlation_window_secs() -> u64 {
+    30
+}
+
+fn default_correlation_cooldown_secs() -> u64 {
+    60
+}
+
+impl Default for CorrelationCooldownConfig {
+    fn default() -> Self {
+        Self {
+            correlation_close_threshold: 0, // Disabled by default
+            correlation_window_secs: default_correlation_window_secs(),
+            correlation_cooldown_secs: default_correlation_cooldown_secs(),
+        }
+    }
+}
+
+/// CorrelationCooldownGate: Blocks new entries after correlated position closes.
+///
+/// When N or more positions close within a short time window, it suggests
+/// a correlated market event (e.g., US Pre-market at 09:00 UTC causing
+/// multiple simultaneous losses). During cooldown, new entries are blocked.
+///
+/// Thread-safe: Uses Mutex for close event tracking.
+pub struct CorrelationCooldownGate {
+    config: CorrelationCooldownConfig,
+    /// Timestamps (ms) of recent position closes.
+    close_timestamps: parking_lot::Mutex<Vec<u64>>,
+    /// When cooldown expires (0 = not in cooldown).
+    cooldown_until_ms: std::sync::atomic::AtomicU64,
+}
+
+impl CorrelationCooldownGate {
+    /// Create a new CorrelationCooldownGate.
+    #[must_use]
+    pub fn new(config: CorrelationCooldownConfig) -> Self {
+        Self {
+            config,
+            close_timestamps: parking_lot::Mutex::new(Vec::new()),
+            cooldown_until_ms: std::sync::atomic::AtomicU64::new(0),
+        }
+    }
+
+    /// Report a position close event.
+    pub fn report_close(&self) {
+        if self.config.correlation_close_threshold == 0 {
+            return;
+        }
+
+        let now_ms = chrono::Utc::now().timestamp_millis() as u64;
+        let window_ms = self.config.correlation_window_secs * 1000;
+
+        let mut timestamps = self.close_timestamps.lock();
+
+        // Add new close event
+        timestamps.push(now_ms);
+
+        // Remove events outside the window
+        timestamps.retain(|&t| now_ms.saturating_sub(t) < window_ms);
+
+        // Check if threshold breached
+        if timestamps.len() >= self.config.correlation_close_threshold as usize {
+            let cooldown_until = now_ms + self.config.correlation_cooldown_secs * 1000;
+            self.cooldown_until_ms
+                .store(cooldown_until, std::sync::atomic::Ordering::Relaxed);
+
+            warn!(
+                close_count = timestamps.len(),
+                window_secs = self.config.correlation_window_secs,
+                cooldown_secs = self.config.correlation_cooldown_secs,
+                "CorrelationCooldownGate: cooldown triggered"
+            );
+
+            // Clear timestamps to prevent re-triggering
+            timestamps.clear();
+        }
+    }
+
+    /// Check if new entries should be blocked due to cooldown.
+    ///
+    /// Returns `Ok(())` if allowed, `Err(RejectReason::CorrelationCooldown)` if blocked.
+    pub fn check(&self) -> Result<(), RejectReason> {
+        // Gate disabled when threshold is 0
+        if self.config.correlation_close_threshold == 0 {
+            return Ok(());
+        }
+
+        let now_ms = chrono::Utc::now().timestamp_millis() as u64;
+        let cooldown_until = self
+            .cooldown_until_ms
+            .load(std::sync::atomic::Ordering::Relaxed);
+
+        if now_ms < cooldown_until {
+            let remaining_secs = (cooldown_until - now_ms) / 1000;
+            debug!(
+                remaining_secs,
+                "CorrelationCooldownGate blocked: cooldown active"
+            );
+            return Err(RejectReason::CorrelationCooldown);
+        }
+
+        Ok(())
+    }
+
+    /// Check if the gate is enabled.
+    #[must_use]
+    pub fn is_enabled(&self) -> bool {
+        self.config.correlation_close_threshold > 0
+    }
+
+    /// Check if currently in cooldown.
+    #[must_use]
+    pub fn is_in_cooldown(&self) -> bool {
+        let now_ms = chrono::Utc::now().timestamp_millis() as u64;
+        let cooldown_until = self
+            .cooldown_until_ms
+            .load(std::sync::atomic::Ordering::Relaxed);
+        now_ms < cooldown_until
+    }
+}
+
+// ============================================================================
+// P2-3/P2-4 Gate Tests
+// ============================================================================
+
+#[cfg(test)]
+mod drawdown_tests {
+    use super::*;
+
+    #[test]
+    fn test_drawdown_gate_disabled_by_default() {
+        let gate = MaxDrawdownGate::new(MaxDrawdownConfig::default());
+        assert!(!gate.is_enabled());
+        assert!(gate.check().is_ok());
+    }
+
+    #[test]
+    fn test_drawdown_gate_blocks_on_loss() {
+        let config = MaxDrawdownConfig {
+            max_hourly_drawdown_usd: 10.0,
+        };
+        let gate = MaxDrawdownGate::new(config);
+
+        // Report $5 loss
+        gate.report_pnl(-5.0);
+        assert!(gate.check().is_ok());
+
+        // Report another $6 loss (total -$11 > -$10 threshold)
+        gate.report_pnl(-6.0);
+        assert_eq!(gate.check(), Err(RejectReason::MaxDrawdown));
+    }
+
+    #[test]
+    fn test_drawdown_gate_profits_offset_losses() {
+        let config = MaxDrawdownConfig {
+            max_hourly_drawdown_usd: 10.0,
+        };
+        let gate = MaxDrawdownGate::new(config);
+
+        // Report $8 loss
+        gate.report_pnl(-8.0);
+        assert!(gate.check().is_ok());
+
+        // Report $5 profit (net = -$3)
+        gate.report_pnl(5.0);
+        assert!(gate.check().is_ok());
+
+        // Report $8 loss (net = -$11 > -$10 threshold)
+        gate.report_pnl(-8.0);
+        assert_eq!(gate.check(), Err(RejectReason::MaxDrawdown));
+    }
+
+    #[test]
+    fn test_drawdown_gate_cumulative_pnl() {
+        let config = MaxDrawdownConfig {
+            max_hourly_drawdown_usd: 10.0,
+        };
+        let gate = MaxDrawdownGate::new(config);
+
+        gate.report_pnl(-3.5);
+        gate.report_pnl(1.0);
+        assert!((gate.cumulative_pnl_usd() - (-2.5)).abs() < 0.01);
+    }
+}
+
+#[cfg(test)]
+mod cooldown_tests {
+    use super::*;
+
+    #[test]
+    fn test_cooldown_gate_disabled_by_default() {
+        let gate = CorrelationCooldownGate::new(CorrelationCooldownConfig::default());
+        assert!(!gate.is_enabled());
+        assert!(gate.check().is_ok());
+    }
+
+    #[test]
+    fn test_cooldown_gate_triggers_on_threshold() {
+        let config = CorrelationCooldownConfig {
+            correlation_close_threshold: 3,
+            correlation_window_secs: 30,
+            correlation_cooldown_secs: 60,
+        };
+        let gate = CorrelationCooldownGate::new(config);
+
+        // Two closes - not enough
+        gate.report_close();
+        gate.report_close();
+        assert!(gate.check().is_ok());
+        assert!(!gate.is_in_cooldown());
+
+        // Third close - triggers cooldown
+        gate.report_close();
+        assert_eq!(gate.check(), Err(RejectReason::CorrelationCooldown));
+        assert!(gate.is_in_cooldown());
+    }
+}
+
+// ============================================================================
+// CorrelationPositionGate Tests (P3-3)
+// ============================================================================
+
+#[cfg(test)]
+mod correlation_position_tests {
+    use super::*;
+    use hip3_core::{AssetId, DexId, OrderSide};
+    use hip3_position::spawn_position_tracker;
+    use rust_decimal_macros::dec;
+
+    fn market(idx: u32) -> MarketKey {
+        MarketKey::new(DexId::XYZ, AssetId::new(idx))
+    }
+
+    fn make_group(name: &str, indices: &[u32], weight: Decimal) -> ResolvedCorrelationGroup {
+        ResolvedCorrelationGroup {
+            name: name.to_string(),
+            markets: indices.iter().map(|&i| market(i)).collect(),
+            weight,
+        }
+    }
+
+    #[test]
+    fn test_config_default() {
+        let config = CorrelationPositionConfig::default();
+        assert!(!config.enabled);
+        assert!(config.groups.is_empty());
+        assert!((config.max_weighted_positions - 5.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_config_backward_compat() {
+        // Default config should have all features disabled.
+        let config = CorrelationPositionConfig::default();
+        assert!(!config.enabled);
+        assert!(config.groups.is_empty());
+        // max_weighted_positions should have a sensible default.
+        assert!(config.max_weighted_positions > 0.0);
+    }
+
+    #[tokio::test]
+    async fn test_no_positions_passes() {
+        let (handle, _join) = spawn_position_tracker(100);
+        let groups = vec![make_group("metals", &[0, 1, 2], dec!(1.5))];
+        let gate = CorrelationPositionGate::new(groups, handle.clone(), dec!(5));
+
+        // Adding first position → weight 1.0 (single in group), total 1.0 ≤ 5
+        assert!(gate.check(&market(0), OrderSide::Buy).is_ok());
+
+        handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn test_uncorrelated_positions_count_as_one() {
+        let (handle, _join) = spawn_position_tracker(100);
+
+        // Fill 4 positions in unrelated markets (no groups)
+        for idx in 10..14 {
+            handle
+                .fill(
+                    market(idx),
+                    OrderSide::Buy,
+                    Price::new(dec!(100)),
+                    Size::new(dec!(1)),
+                    1000,
+                    None,
+                )
+                .await;
+        }
+        tokio::time::sleep(tokio::time::Duration::from_millis(20)).await;
+
+        let groups = vec![make_group("metals", &[0, 1, 2], dec!(1.5))];
+        let gate = CorrelationPositionGate::new(groups, handle.clone(), dec!(5));
+
+        // 4 existing (1.0 each) + 1 proposed = 5.0 = max → pass (> not >=)
+        assert!(gate.check(&market(20), OrderSide::Buy).is_ok());
+
+        handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn test_correlated_same_direction_applies_weight() {
+        let (handle, _join) = spawn_position_tracker(100);
+
+        // Position in GOLD (idx 0) long
+        handle
+            .fill(
+                market(0),
+                OrderSide::Buy,
+                Price::new(dec!(100)),
+                Size::new(dec!(1)),
+                1000,
+                None,
+            )
+            .await;
+        tokio::time::sleep(tokio::time::Duration::from_millis(20)).await;
+
+        // Group: GOLD(0), SILVER(1), PLATINUM(2), weight=1.5
+        let groups = vec![make_group("metals", &[0, 1, 2], dec!(1.5))];
+        let gate = CorrelationPositionGate::new(groups, handle.clone(), dec!(5));
+
+        // Propose SILVER(1) long → 2 same-direction in group → each 1.5
+        // Total: 1.5 + 1.5 = 3.0 ≤ 5 → pass
+        assert!(gate.check(&market(1), OrderSide::Buy).is_ok());
+
+        handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn test_correlated_blocks_when_over_limit() {
+        let (handle, _join) = spawn_position_tracker(100);
+
+        // Fill GOLD(0) and SILVER(1) long
+        for idx in [0, 1] {
+            handle
+                .fill(
+                    market(idx),
+                    OrderSide::Buy,
+                    Price::new(dec!(100)),
+                    Size::new(dec!(1)),
+                    1000,
+                    None,
+                )
+                .await;
+        }
+        // Fill two unrelated positions
+        for idx in [10, 11] {
+            handle
+                .fill(
+                    market(idx),
+                    OrderSide::Buy,
+                    Price::new(dec!(100)),
+                    Size::new(dec!(1)),
+                    1000,
+                    None,
+                )
+                .await;
+        }
+        tokio::time::sleep(tokio::time::Duration::from_millis(20)).await;
+
+        // Group: metals {0,1,2} weight=1.5, max_weighted=5.0
+        let groups = vec![make_group("metals", &[0, 1, 2], dec!(1.5))];
+        let gate = CorrelationPositionGate::new(groups, handle.clone(), dec!(5));
+
+        // Current: GOLD(0) + SILVER(1) same-dir → each 1.5 = 3.0
+        //          mkt(10) + mkt(11) = 2.0
+        //          Total existing weighted = 5.0
+        // Propose PLATINUM(2) Buy → 3 in metals same-dir → each 1.5
+        //   metals: 1.5*3 = 4.5, unrelated: 2.0, total = 6.5 > 5.0
+        assert_eq!(
+            gate.check(&market(2), OrderSide::Buy),
+            Err(RejectReason::CorrelationPositionLimit)
+        );
+
+        handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn test_opposite_direction_not_correlated() {
+        let (handle, _join) = spawn_position_tracker(100);
+
+        // GOLD(0) long
+        handle
+            .fill(
+                market(0),
+                OrderSide::Buy,
+                Price::new(dec!(100)),
+                Size::new(dec!(1)),
+                1000,
+                None,
+            )
+            .await;
+        tokio::time::sleep(tokio::time::Duration::from_millis(20)).await;
+
+        let groups = vec![make_group("metals", &[0, 1, 2], dec!(1.5))];
+        let gate = CorrelationPositionGate::new(groups, handle.clone(), dec!(5));
+
+        // Propose SILVER(1) short → different direction → each counts 1.0
+        // Total: 1.0 (GOLD long) + 1.0 (SILVER short) = 2.0 ≤ 5
+        assert!(gate.check(&market(1), OrderSide::Sell).is_ok());
+
+        handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn test_multiple_groups() {
+        let (handle, _join) = spawn_position_tracker(100);
+
+        // GOLD(0) long, EUR(10) long
+        handle
+            .fill(
+                market(0),
+                OrderSide::Buy,
+                Price::new(dec!(100)),
+                Size::new(dec!(1)),
+                1000,
+                None,
+            )
+            .await;
+        handle
+            .fill(
+                market(10),
+                OrderSide::Buy,
+                Price::new(dec!(100)),
+                Size::new(dec!(1)),
+                1000,
+                None,
+            )
+            .await;
+        tokio::time::sleep(tokio::time::Duration::from_millis(20)).await;
+
+        let groups = vec![
+            make_group("metals", &[0, 1, 2], dec!(1.5)),
+            make_group("fx", &[10, 11, 12], dec!(2.0)),
+        ];
+        let gate = CorrelationPositionGate::new(groups, handle.clone(), dec!(5));
+
+        // Propose JPY(11) long → fx group has EUR(10)+JPY(11) same-dir → each 2.0
+        // metals: GOLD(0) alone → 1.0
+        // fx: EUR(10) 2.0 + JPY(11) 2.0 = 4.0
+        // Total: 1.0 + 4.0 = 5.0 → pass (not >)
+        assert!(gate.check(&market(11), OrderSide::Buy).is_ok());
+
+        // Propose DXY(12) long → fx group has 3 same-dir → each 2.0
+        // metals: 1.0, fx: 2.0*3 = 6.0, total = 7.0 > 5.0 → block
+        handle
+            .fill(
+                market(11),
+                OrderSide::Buy,
+                Price::new(dec!(100)),
+                Size::new(dec!(1)),
+                1000,
+                None,
+            )
+            .await;
+        tokio::time::sleep(tokio::time::Duration::from_millis(20)).await;
+        assert_eq!(
+            gate.check(&market(12), OrderSide::Buy),
+            Err(RejectReason::CorrelationPositionLimit)
+        );
 
         handle.shutdown().await;
     }

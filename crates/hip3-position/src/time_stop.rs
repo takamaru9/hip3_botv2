@@ -470,6 +470,37 @@ impl<P: PriceProvider + 'static> TimeStopMonitor<P> {
                     now_ms,
                 );
 
+                // P1-4: Record TimeStop exit metrics
+                let held_ms = now_ms.saturating_sub(position.entry_timestamp_ms);
+                let market_str = market.to_string();
+                let exit_reason_str = "TimeStop";
+                hip3_telemetry::Metrics::position_holding_time(
+                    &market_str,
+                    exit_reason_str,
+                    held_ms as f64,
+                );
+
+                // Estimate PnL in bps from entry price vs current price
+                let current_px = price.inner();
+                if !position.entry_price.inner().is_zero() && !current_px.is_zero() {
+                    use rust_decimal::prelude::ToPrimitive;
+                    let pnl_bps = match position.side {
+                        OrderSide::Buy => {
+                            (current_px - position.entry_price.inner())
+                                / position.entry_price.inner()
+                                * Decimal::from(10000)
+                        }
+                        OrderSide::Sell => {
+                            (position.entry_price.inner() - current_px)
+                                / position.entry_price.inner()
+                                * Decimal::from(10000)
+                        }
+                    };
+                    if let Some(pnl) = pnl_bps.to_f64() {
+                        hip3_telemetry::Metrics::trade_pnl(&market_str, exit_reason_str, pnl);
+                    }
+                }
+
                 debug!(
                     "TimeStop triggered for market {}: creating flatten order cloid={}, side={:?}, size={}, price={}",
                     market, order.cloid, order.side, order.size, order.price

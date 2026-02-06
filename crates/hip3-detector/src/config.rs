@@ -85,6 +85,63 @@ pub struct DetectorConfig {
     /// Set to 0 to disable (no upper bound on oracle age).
     #[serde(default = "default_max_quote_lag_ms")]
     pub max_quote_lag_ms: i64,
+
+    /// Enable oracle velocity-based sizing (P2-1).
+    ///
+    /// When enabled, higher oracle velocity (bps/tick) increases the
+    /// sizing multiplier up to `velocity_multiplier_cap`.
+    ///
+    /// Rationale: Faster oracle moves create larger dislocations that
+    /// MMs take longer to catch up with, providing more reliable edge.
+    #[serde(default)]
+    pub oracle_velocity_sizing: bool,
+
+    /// Maximum sizing multiplier from oracle velocity (P2-1).
+    ///
+    /// Multiplier is linearly interpolated from 1.0 at min_oracle_change_bps
+    /// to this cap at 4x min_oracle_change_bps.
+    ///
+    /// Example: cap=1.5, min_change=3bps
+    ///   - 3bps velocity → 1.0x
+    ///   - 6bps velocity → 1.25x
+    ///   - 9bps velocity → 1.5x (capped)
+    ///   - 12bps+ velocity → 1.5x (capped)
+    #[serde(default = "default_velocity_multiplier_cap")]
+    pub velocity_multiplier_cap: Decimal,
+
+    /// Enable adaptive threshold based on spread EWMA (P2-2).
+    ///
+    /// When enabled, the effective signal threshold is:
+    ///   `max(total_cost_bps, spread_ewma * spread_threshold_multiplier)`
+    ///
+    /// This automatically filters structurally wide-spread markets
+    /// (e.g., USAR 85bps, URNM 141bps) without manual per-market config.
+    #[serde(default)]
+    pub adaptive_threshold: bool,
+
+    /// Multiplier applied to spread EWMA for adaptive threshold (P2-2).
+    ///
+    /// Higher values = more conservative (require larger edge vs spread).
+    /// Example: multiplier=1.5, spread_ewma=80bps → threshold=120bps
+    #[serde(default = "default_spread_threshold_multiplier")]
+    pub spread_threshold_multiplier: Decimal,
+
+    /// EWMA alpha for spread tracking (P2-2).
+    ///
+    /// Smaller values = slower adaptation (more smoothing).
+    /// 0.05 = ~20 ticks half-life.
+    #[serde(default = "default_spread_ewma_alpha")]
+    pub spread_ewma_alpha: Decimal,
+
+    /// Enable confidence-based sizing (P3-1).
+    ///
+    /// When enabled, a multi-factor confidence score (0.0-1.0) adjusts sizing:
+    ///   `final_size = base_size * (0.5 + 0.5 * confidence)`
+    ///
+    /// Factors: edge magnitude (0.3), oracle velocity (0.2),
+    /// consecutive moves (0.2), book depth (0.15), spread tightness (0.15).
+    #[serde(default)]
+    pub confidence_sizing: bool,
 }
 
 fn default_min_order_notional() -> Decimal {
@@ -119,6 +176,18 @@ fn default_max_quote_lag_ms() -> i64 {
     0 // Disabled by default for backwards compatibility
 }
 
+fn default_velocity_multiplier_cap() -> Decimal {
+    Decimal::new(15, 1) // 1.5x
+}
+
+fn default_spread_threshold_multiplier() -> Decimal {
+    Decimal::new(15, 1) // 1.5x
+}
+
+fn default_spread_ewma_alpha() -> Decimal {
+    Decimal::new(5, 2) // 0.05 = slow adaptation (~20 tick half-life)
+}
+
 impl Default for DetectorConfig {
     fn default() -> Self {
         Self {
@@ -135,6 +204,12 @@ impl Default for DetectorConfig {
             min_consecutive_oracle_moves: default_min_consecutive_oracle_moves(), // 2 consecutive
             min_quote_lag_ms: default_min_quote_lag_ms(),               // 0 = disabled
             max_quote_lag_ms: default_max_quote_lag_ms(),               // 0 = disabled
+            oracle_velocity_sizing: false,                              // Disabled by default
+            velocity_multiplier_cap: default_velocity_multiplier_cap(), // 1.5x
+            adaptive_threshold: false,                                  // Disabled by default
+            spread_threshold_multiplier: default_spread_threshold_multiplier(), // 1.5x
+            spread_ewma_alpha: default_spread_ewma_alpha(),             // 0.05
+            confidence_sizing: false,                                   // Disabled by default
         }
     }
 }
@@ -189,6 +264,33 @@ impl DetectorConfig {
     /// Sell when: bid >= oracle * (1 + threshold/10000)
     pub fn sell_threshold(&self) -> Decimal {
         Decimal::ONE + self.total_cost_bps() / Decimal::from(10000)
+    }
+
+    /// Calculate velocity-based sizing multiplier (P2-1).
+    ///
+    /// Returns a multiplier in range [1.0, velocity_multiplier_cap].
+    /// Linear interpolation from 1.0 at `min_oracle_change_bps` to cap at 4x.
+    ///
+    /// Returns 1.0 if velocity sizing is disabled or velocity is below minimum.
+    pub fn velocity_multiplier(&self, velocity_bps: Decimal) -> Decimal {
+        if !self.oracle_velocity_sizing {
+            return Decimal::ONE;
+        }
+
+        let min_vel = self.min_oracle_change_bps;
+        if min_vel.is_zero() || velocity_bps <= min_vel {
+            return Decimal::ONE;
+        }
+
+        // Linear interpolation: 1.0 at min_vel, cap at 4x min_vel
+        let max_vel = min_vel * Decimal::from(4);
+        let progress = if velocity_bps >= max_vel {
+            Decimal::ONE
+        } else {
+            (velocity_bps - min_vel) / (max_vel - min_vel)
+        };
+
+        Decimal::ONE + (self.velocity_multiplier_cap - Decimal::ONE) * progress
     }
 }
 

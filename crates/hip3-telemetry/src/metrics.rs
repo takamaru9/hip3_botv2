@@ -93,6 +93,17 @@ pub static GATE_BLOCKED_TOTAL: Lazy<CounterVec> = Lazy::new(|| {
     .unwrap()
 });
 
+/// Risk gate block duration in milliseconds (recorded when block ends).
+pub static GATE_BLOCK_DURATION_MS: Lazy<HistogramVec> = Lazy::new(|| {
+    register_histogram_vec!(
+        "hip3_gate_block_duration_ms",
+        "Duration of continuous gate block periods in milliseconds",
+        &["gate", "market_key"],
+        vec![10.0, 50.0, 100.0, 500.0, 1000.0, 5000.0, 10000.0, 30000.0, 60000.0]
+    )
+    .unwrap()
+});
+
 /// Oracle stale rate (fraction of time oracle is stale).
 pub static ORACLE_STALE_RATE: Lazy<GaugeVec> = Lazy::new(|| {
     register_gauge_vec!(
@@ -309,6 +320,58 @@ pub static BBO_NULL_TOTAL: Lazy<CounterVec> = Lazy::new(|| {
     .unwrap()
 });
 
+// =============================================================================
+// P1-1: Trade PnL & Position Observability Metrics
+// =============================================================================
+
+/// Trade PnL in basis points per closed position.
+/// Labels: market, exit_reason (OracleReversal/OracleCatchup/MarkRegression/TimeStop/Unknown)
+pub static TRADE_PNL_BPS: Lazy<HistogramVec> = Lazy::new(|| {
+    register_histogram_vec!(
+        "hip3_trade_pnl_bps",
+        "Trade PnL in basis points per closed position",
+        &["market", "exit_reason"],
+        vec![
+            -100.0, -50.0, -30.0, -20.0, -10.0, -5.0, 0.0, 5.0, 10.0, 20.0, 30.0, 50.0, 100.0,
+            200.0,
+        ]
+    )
+    .unwrap()
+});
+
+/// Position holding time in milliseconds.
+pub static POSITION_HOLDING_TIME_MS: Lazy<HistogramVec> = Lazy::new(|| {
+    register_histogram_vec!(
+        "hip3_position_holding_time_ms",
+        "Position holding time in milliseconds",
+        &["market", "exit_reason"],
+        vec![100.0, 500.0, 1000.0, 2000.0, 5000.0, 10000.0, 15000.0, 20000.0, 30000.0, 60000.0,]
+    )
+    .unwrap()
+});
+
+/// Entry edge in basis points at signal detection time.
+pub static ENTRY_EDGE_BPS: Lazy<HistogramVec> = Lazy::new(|| {
+    register_histogram_vec!(
+        "hip3_entry_edge_bps",
+        "Entry edge in basis points at signal detection time",
+        &["market"],
+        vec![5.0, 10.0, 15.0, 20.0, 30.0, 40.0, 50.0, 75.0, 100.0, 150.0, 200.0]
+    )
+    .unwrap()
+});
+
+/// Signal-to-order latency in milliseconds.
+pub static SIGNAL_TO_ORDER_LATENCY_MS: Lazy<HistogramVec> = Lazy::new(|| {
+    register_histogram_vec!(
+        "hip3_signal_to_order_latency_ms",
+        "Latency from signal detection to order submission in milliseconds",
+        &["market"],
+        vec![1.0, 2.0, 5.0, 10.0, 20.0, 50.0, 100.0, 200.0, 500.0]
+    )
+    .unwrap()
+});
+
 /// Metrics facade for easy access.
 pub struct Metrics;
 
@@ -371,6 +434,13 @@ impl Metrics {
         GATE_BLOCKED_TOTAL
             .with_label_values(&[gate, market_key])
             .inc();
+    }
+
+    /// Record gate block duration when block period ends.
+    pub fn gate_block_duration(gate: &str, market_key: &str, duration_ms: f64) {
+        GATE_BLOCK_DURATION_MS
+            .with_label_values(&[gate, market_key])
+            .observe(duration_ms);
     }
 
     /// Update oracle stale rate.
@@ -505,5 +575,37 @@ impl Metrics {
     /// Record BBO null update.
     pub fn bbo_null_update(market_key: &str) {
         BBO_NULL_TOTAL.with_label_values(&[market_key]).inc();
+    }
+
+    // =========================================================================
+    // P1-1: Trade PnL & Position Observability
+    // =========================================================================
+
+    /// Record trade PnL in basis points.
+    pub fn trade_pnl(market: &str, exit_reason: &str, pnl_bps: f64) {
+        TRADE_PNL_BPS
+            .with_label_values(&[market, exit_reason])
+            .observe(pnl_bps);
+    }
+
+    /// Record position holding time in milliseconds.
+    pub fn position_holding_time(market: &str, exit_reason: &str, holding_ms: f64) {
+        POSITION_HOLDING_TIME_MS
+            .with_label_values(&[market, exit_reason])
+            .observe(holding_ms);
+    }
+
+    /// Record entry edge in basis points.
+    pub fn entry_edge(market: &str, edge_bps: f64) {
+        ENTRY_EDGE_BPS
+            .with_label_values(&[market])
+            .observe(edge_bps);
+    }
+
+    /// Record signal-to-order latency in milliseconds.
+    pub fn signal_to_order_latency(market: &str, latency_ms: f64) {
+        SIGNAL_TO_ORDER_LATENCY_MS
+            .with_label_values(&[market])
+            .observe(latency_ms);
     }
 }

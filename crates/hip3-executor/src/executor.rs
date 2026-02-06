@@ -8,16 +8,18 @@
 //!
 //! # Gate Check Order (Strict)
 //!
-//! 1. HardStop               → Rejected(HardStop)
-//! 2. READY-TRADING          → Rejected(NotReady)
-//! 3. MaxPositionPerMarket   → Rejected(MaxPositionPerMarket)
-//! 4. MaxPositionTotal       → Rejected(MaxPositionTotal)
-//! 5. MaxConcurrentPositions → Rejected(MaxConcurrentPositions)
-//! 6. FlattenInProgress      → Skipped(FlattenInProgress)
-//! 7. has_position           → Skipped(AlreadyHasPosition)
-//! 8. PendingOrder           → Skipped(PendingOrderExists)
-//! 9. ActionBudget           → Skipped(BudgetExhausted)
-//! 10. (all passed)          → try_mark_pending_market + enqueue
+//! 1.  HardStop               → Rejected(HardStop)
+//!     1b. MaxDrawdown (P2-3)     → Rejected(MaxDrawdown)
+//!     1c. CorrelationCooldown    → Rejected(CorrelationCooldown)
+//! 2.  READY-TRADING          → Rejected(NotReady)
+//! 3.  MaxPositionPerMarket   → Rejected(MaxPositionPerMarket)
+//! 4.  MaxPositionTotal       → Rejected(MaxPositionTotal)
+//! 5.  MaxConcurrentPositions → Rejected(MaxConcurrentPositions)
+//! 6.  FlattenInProgress      → Skipped(FlattenInProgress)
+//! 7.  has_position           → Skipped(AlreadyHasPosition)
+//! 8.  PendingOrder           → Skipped(PendingOrderExists)
+//! 9.  ActionBudget           → Skipped(BudgetExhausted)
+//! 10. (all passed)           → try_mark_pending_market + enqueue
 
 use std::cell::Cell;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
@@ -32,6 +34,7 @@ use hip3_core::{
     RejectReason, Size, SkipReason, TrackedOrder,
 };
 use hip3_position::PositionTrackerHandle;
+use hip3_risk::{CorrelationCooldownGate, CorrelationPositionGate, MaxDrawdownGate};
 
 use crate::batch::BatchScheduler;
 use crate::ready::TradingReadyChecker;
@@ -366,6 +369,12 @@ pub struct Executor {
     config: ExecutorConfig,
     /// Market state cache for mark price lookups.
     market_state_cache: Arc<MarketStateCache>,
+    /// P2-3: MaxDrawdownGate (optional, None = disabled).
+    max_drawdown_gate: Option<Arc<MaxDrawdownGate>>,
+    /// P2-4: CorrelationCooldownGate (optional, None = disabled).
+    correlation_cooldown_gate: Option<Arc<CorrelationCooldownGate>>,
+    /// P3-3: CorrelationPositionGate (optional, None = disabled).
+    correlation_position_gate: Option<Arc<CorrelationPositionGate>>,
 }
 
 impl Executor {
@@ -388,7 +397,43 @@ impl Executor {
             action_budget,
             config,
             market_state_cache,
+            max_drawdown_gate: None,
+            correlation_cooldown_gate: None,
+            correlation_position_gate: None,
         }
+    }
+
+    /// Set the MaxDrawdownGate (P2-3).
+    #[must_use]
+    pub fn with_max_drawdown_gate(mut self, gate: Arc<MaxDrawdownGate>) -> Self {
+        self.max_drawdown_gate = Some(gate);
+        self
+    }
+
+    /// Set the CorrelationCooldownGate (P2-4).
+    #[must_use]
+    pub fn with_correlation_cooldown_gate(mut self, gate: Arc<CorrelationCooldownGate>) -> Self {
+        self.correlation_cooldown_gate = Some(gate);
+        self
+    }
+
+    /// Set the CorrelationPositionGate (P3-3).
+    #[must_use]
+    pub fn with_correlation_position_gate(mut self, gate: Arc<CorrelationPositionGate>) -> Self {
+        self.correlation_position_gate = Some(gate);
+        self
+    }
+
+    /// Get a reference to the MaxDrawdownGate.
+    #[must_use]
+    pub fn max_drawdown_gate(&self) -> Option<&Arc<MaxDrawdownGate>> {
+        self.max_drawdown_gate.as_ref()
+    }
+
+    /// Get a reference to the CorrelationCooldownGate.
+    #[must_use]
+    pub fn correlation_cooldown_gate(&self) -> Option<&Arc<CorrelationCooldownGate>> {
+        self.correlation_cooldown_gate.as_ref()
     }
 
     /// Calculate the effective maximum notional per market.
@@ -421,16 +466,18 @@ impl Executor {
     ///
     /// # Gate Order (Strict)
     ///
-    /// 1. HardStop               → Rejected::HardStop
-    /// 2. (READY-TRADING)        → Handled by bot, not checked here
-    /// 3. MaxPositionPerMarket   → Rejected::MaxPositionPerMarket
-    /// 4. MaxPositionTotal       → Rejected::MaxPositionTotal
-    /// 5. MaxConcurrentPositions → Rejected::MaxConcurrentPositions
-    /// 6. FlattenInProgress      → Skipped::FlattenInProgress
-    /// 7. has_position           → Skipped::AlreadyHasPosition
-    /// 8. PendingOrder           → Skipped::PendingOrderExists
-    /// 9. ActionBudget           → Skipped::BudgetExhausted
-    /// 10. (all passed)          → try_mark_pending_market + enqueue
+    /// 1.  HardStop               → Rejected::HardStop
+    ///     1b. MaxDrawdown (P2-3)     → Rejected::MaxDrawdown
+    ///     1c. CorrelationCooldown    → Rejected::CorrelationCooldown
+    /// 2.  (READY-TRADING)        → Handled by bot, not checked here
+    /// 3.  MaxPositionPerMarket   → Rejected::MaxPositionPerMarket
+    /// 4.  MaxPositionTotal       → Rejected::MaxPositionTotal
+    /// 5.  MaxConcurrentPositions → Rejected::MaxConcurrentPositions
+    /// 6.  FlattenInProgress      → Skipped::FlattenInProgress
+    /// 7.  has_position           → Skipped::AlreadyHasPosition
+    /// 8.  PendingOrder           → Skipped::PendingOrderExists
+    /// 9.  ActionBudget           → Skipped::BudgetExhausted
+    /// 10. (all passed)           → try_mark_pending_market + enqueue
     ///
     /// # Precondition
     ///
@@ -455,6 +502,29 @@ impl Executor {
         if self.hard_stop_latch.is_triggered() {
             debug!(market = %market, "Signal rejected: HardStop triggered");
             return ExecutionResult::rejected(RejectReason::HardStop);
+        }
+
+        // Gate 1b (P2-3): MaxDrawdown — block new entries when hourly drawdown exceeded
+        if let Some(ref gate) = self.max_drawdown_gate {
+            if let Err(reason) = gate.check() {
+                debug!(
+                    market = %market,
+                    pnl_usd = gate.cumulative_pnl_usd(),
+                    "Signal rejected: MaxDrawdown gate"
+                );
+                return ExecutionResult::rejected(reason);
+            }
+        }
+
+        // Gate 1c (P2-4): CorrelationCooldown — block after correlated mass close
+        if let Some(ref gate) = self.correlation_cooldown_gate {
+            if let Err(reason) = gate.check() {
+                debug!(
+                    market = %market,
+                    "Signal rejected: CorrelationCooldown gate"
+                );
+                return ExecutionResult::rejected(reason);
+            }
         }
 
         // Gate 2: READY-TRADING - Handled by bot via connection_manager.is_ready()
@@ -573,19 +643,31 @@ impl Executor {
             return ExecutionResult::rejected(RejectReason::MaxPositionTotal);
         }
 
-        // Gate 5: MaxConcurrentPositions
+        // Gate 5: MaxConcurrentPositions (with optional P3-3 correlation weighting)
         // Block new positions if already at max concurrent positions limit.
         // Note: This check is before has_position so it only blocks NEW market entries.
         // Existing positions are handled by Gate 6 (AlreadyHasPosition skip).
-        let current_position_count = self.position_tracker.position_count();
-        if current_position_count >= self.config.max_concurrent_positions {
-            debug!(
-                market = %market,
-                current = current_position_count,
-                max = self.config.max_concurrent_positions,
-                "Signal rejected: Max concurrent positions reached"
-            );
-            return ExecutionResult::rejected(RejectReason::MaxConcurrentPositions);
+        if let Some(ref gate) = self.correlation_position_gate {
+            // P3-3: Use correlation-weighted position counting.
+            if let Err(reason) = gate.check(market, side) {
+                debug!(
+                    market = %market,
+                    "Signal rejected by CorrelationPositionGate"
+                );
+                return ExecutionResult::rejected(reason);
+            }
+        } else {
+            // Original simple count check.
+            let current_position_count = self.position_tracker.position_count();
+            if current_position_count >= self.config.max_concurrent_positions {
+                debug!(
+                    market = %market,
+                    current = current_position_count,
+                    max = self.config.max_concurrent_positions,
+                    "Signal rejected: Max concurrent positions reached"
+                );
+                return ExecutionResult::rejected(RejectReason::MaxConcurrentPositions);
+            }
         }
 
         // Gate 6: Flatten in progress
@@ -1092,10 +1174,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_max_position_per_market() {
+    async fn test_max_position_per_market_scaled() {
         let (executor, _pt) = setup_executor();
-
-        // Gate 2 (READY-TRADING) is now handled by bot, not checked in on_signal
         let market = sample_market();
 
         // Set market state with mark price
@@ -1103,14 +1183,52 @@ mod tests {
             .market_state_cache
             .update(&market, Price::new(dec!(50000)), 1234567890);
 
-        // Try to place order that would exceed $50 limit
-        // size * price = 0.002 * 50000 = $100 > $50
+        // Order of $100 exceeds $50 limit but is scaled down (not rejected)
+        // because available_notional ($50) > 0 and scaled_notional ($50) >= min_viable ($5)
         let result = executor.on_signal(
             &market,
             OrderSide::Buy,
             Price::new(dec!(50000)),
             Size::new(dec!(0.002)),
             1234567890,
+        );
+
+        // Size is scaled from 0.002 to 0.001 ($50), so order is queued
+        assert!(result.is_queued());
+    }
+
+    #[tokio::test]
+    async fn test_max_position_per_market_rejected_no_capacity() {
+        let (executor, pt) = setup_executor();
+        let market = sample_market();
+
+        // Set market state with mark price
+        executor
+            .market_state_cache
+            .update(&market, Price::new(dec!(50000)), 1234567890);
+
+        // Fill the entire capacity with an existing position
+        // 0.001 * 50000 = $50 = full max_notional_per_market
+        pt.fill(
+            market,
+            OrderSide::Buy,
+            Price::new(dec!(50000)),
+            Size::new(dec!(0.001)),
+            1234567890,
+            None,
+        )
+        .await;
+
+        // Wait for actor to process the fill and update DashMap
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+
+        // Now try to place another order — no capacity left
+        let result = executor.on_signal(
+            &market,
+            OrderSide::Buy,
+            Price::new(dec!(50000)),
+            Size::new(dec!(0.001)),
+            1234567891,
         );
 
         assert!(matches!(

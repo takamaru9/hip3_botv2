@@ -74,6 +74,9 @@ struct OracleHistory {
     consecutive_up: u32,
     /// Consecutive moves in the Down direction.
     consecutive_down: u32,
+    /// Last recorded oracle change in basis points (absolute value).
+    /// Used for velocity-based sizing (P2-1).
+    last_change_bps: Decimal,
 }
 
 impl OracleHistory {
@@ -82,6 +85,7 @@ impl OracleHistory {
             last_px: initial_px,
             consecutive_up: 0,
             consecutive_down: 0,
+            last_change_bps: Decimal::ZERO,
         }
     }
 }
@@ -182,18 +186,22 @@ impl OracleMovementTracker {
             MoveDirection::Down
         };
 
-        // Update consecutive counts
+        // Update consecutive counts and velocity
         match direction {
             MoveDirection::Up => {
                 history.consecutive_up += 1;
                 history.consecutive_down = 0;
+                history.last_change_bps = change_bps;
             }
             MoveDirection::Down => {
                 history.consecutive_down += 1;
                 history.consecutive_up = 0;
+                history.last_change_bps = change_bps;
             }
             MoveDirection::Unchanged => {
                 // Preserve counts - see design decision above
+                // Reset velocity to 0 since no meaningful movement
+                history.last_change_bps = Decimal::ZERO;
             }
         }
 
@@ -257,6 +265,18 @@ impl OracleMovementTracker {
             .unwrap_or((0, 0))
     }
 
+    /// Get the last oracle change velocity in basis points.
+    ///
+    /// Returns the absolute change in bps from the most recent oracle move.
+    /// Used for velocity-based sizing (P2-1).
+    #[must_use]
+    pub fn velocity_bps(&self, key: &MarketKey) -> Decimal {
+        self.histories
+            .get(key)
+            .map(|h| h.last_change_bps)
+            .unwrap_or(Decimal::ZERO)
+    }
+
     /// Clear tracking data for a market (e.g., on reconnect).
     pub fn clear(&self, key: &MarketKey) {
         self.histories.remove(key);
@@ -303,7 +323,7 @@ mod tests {
         let key = test_key();
 
         // First observation - no previous price to compare
-        let dir = tracker.record_move(key, Price::new(dec!(100)));
+        let _dir = tracker.record_move(key, Price::new(dec!(100)));
 
         // Should be Unchanged (no movement yet)
         // But consecutive counts should still be 0

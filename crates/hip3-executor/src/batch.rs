@@ -202,6 +202,10 @@ pub struct BatchScheduler {
     config: BatchConfig,
     /// Hard stop latch for emergency mode.
     hard_stop_latch: Arc<HardStopLatch>,
+    /// P2-7: Notify handle for event-driven wakeup.
+    /// Signalled when a new item is enqueued so the executor loop
+    /// can wake up immediately instead of waiting for the next tick.
+    notify: Arc<tokio::sync::Notify>,
 }
 
 impl BatchScheduler {
@@ -229,6 +233,7 @@ impl BatchScheduler {
             inflight_tracker,
             config,
             hard_stop_latch,
+            notify: Arc::new(tokio::sync::Notify::new()),
         }
     }
 
@@ -236,6 +241,12 @@ impl BatchScheduler {
     #[must_use]
     pub fn interval(&self) -> Duration {
         self.interval
+    }
+
+    /// Get the Notify handle for event-driven wakeup (P2-7).
+    #[must_use]
+    pub fn notify(&self) -> &Arc<tokio::sync::Notify> {
+        &self.notify
     }
 
     /// Enqueue a new order.
@@ -279,6 +290,11 @@ impl BatchScheduler {
         }
 
         queue.push_back(order);
+        // Drop lock before notify
+        drop(queue);
+
+        // P2-7: Wake executor loop immediately
+        self.notify.notify_one();
 
         // Check for degraded mode
         if inflight >= self.config.inflight_high_watermark {
@@ -346,6 +362,11 @@ impl BatchScheduler {
         }
 
         queue.push_back(order);
+        // Drop lock before notify
+        drop(queue);
+
+        // P2-7: Wake executor loop immediately
+        self.notify.notify_one();
 
         // Check if at inflight limit (order is still queued)
         let inflight = self.inflight_tracker.current();
@@ -380,6 +401,12 @@ impl BatchScheduler {
         }
 
         queue.push_back(cancel);
+        // Drop lock before notify
+        drop(queue);
+
+        // P2-7: Wake executor loop immediately
+        self.notify.notify_one();
+
         EnqueueResult::Queued
     }
 

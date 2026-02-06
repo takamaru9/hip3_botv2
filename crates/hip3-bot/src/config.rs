@@ -3,7 +3,9 @@
 use crate::error::{AppError, AppResult};
 use hip3_dashboard::DashboardConfig;
 use hip3_detector::DetectorConfig;
-use hip3_risk::RiskGateConfig;
+use hip3_risk::{
+    CorrelationCooldownConfig, CorrelationPositionConfig, MaxDrawdownConfig, RiskGateConfig,
+};
 use hip3_ws::{ConnectionConfig, SubscriptionTarget};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
@@ -115,6 +117,26 @@ pub struct MarkRegressionConfig {
     /// Slippage tolerance for flatten orders (bps). Default: 50 bps.
     #[serde(default = "default_mark_regression_slippage_bps")]
     pub slippage_bps: u64,
+
+    // --- Time decay ---
+    /// Enable time-based decay of exit threshold.
+    /// Default: false.
+    #[serde(default)]
+    pub time_decay_enabled: bool,
+    /// Time (ms) after which decay starts. Default: 5000.
+    #[serde(default = "default_mark_regression_decay_start_ms")]
+    pub decay_start_ms: u64,
+    /// Minimum decay factor (0.0-1.0). Default: 0.2.
+    #[serde(default = "default_mark_regression_min_decay_factor")]
+    pub min_decay_factor: f64,
+}
+
+fn default_mark_regression_decay_start_ms() -> u64 {
+    5000
+}
+
+fn default_mark_regression_min_decay_factor() -> f64 {
+    0.2
 }
 
 fn default_mark_regression_enabled() -> bool {
@@ -145,6 +167,9 @@ impl Default for MarkRegressionConfig {
             check_interval_ms: default_mark_regression_check_interval_ms(),
             min_holding_time_ms: default_mark_regression_min_holding_time_ms(),
             slippage_bps: default_mark_regression_slippage_bps(),
+            time_decay_enabled: false,
+            decay_start_ms: default_mark_regression_decay_start_ms(),
+            min_decay_factor: default_mark_regression_min_decay_factor(),
         }
     }
 }
@@ -329,6 +354,15 @@ pub struct AppConfig {
     /// Risk monitor configuration (Trading mode only).
     #[serde(default)]
     pub risk_monitor: RiskMonitorConfig,
+    /// P2-3: MaxDrawdown gate configuration.
+    #[serde(default)]
+    pub max_drawdown: MaxDrawdownConfig,
+    /// P2-4: Correlation cooldown gate configuration.
+    #[serde(default)]
+    pub correlation_cooldown: CorrelationCooldownConfig,
+    /// P3-3: Correlation-weighted position limit configuration.
+    #[serde(default)]
+    pub correlation_position: CorrelationPositionConfig,
     /// Executor configuration (Trading mode only).
     #[serde(default)]
     pub executor: ExecutorConfig,
@@ -532,6 +566,9 @@ impl Default for AppConfig {
             time_stop: TimeStopConfig::default(),
             mark_regression: MarkRegressionConfig::default(),
             risk_monitor: RiskMonitorConfig::default(),
+            max_drawdown: MaxDrawdownConfig::default(),
+            correlation_cooldown: CorrelationCooldownConfig::default(),
+            correlation_position: CorrelationPositionConfig::default(),
             executor: ExecutorConfig::default(),
             dashboard: DashboardConfig::default(),
             position: PositionConfig::default(),

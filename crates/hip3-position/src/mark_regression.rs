@@ -18,7 +18,7 @@ use tracing::{debug, info};
 use hip3_core::{MarketKey, OrderSide, PendingOrder};
 use hip3_feed::MarketState;
 
-use crate::time_stop::FlattenOrderBuilder;
+use crate::time_stop::{FlattenOrderBuilder, TIME_STOP_MS};
 use crate::tracker::{Position, PositionTrackerHandle};
 
 // ============================================================================
@@ -48,6 +48,23 @@ pub struct MarkRegressionConfig {
     /// Default: 50 bps.
     #[serde(default = "default_slippage_bps")]
     pub slippage_bps: u64,
+
+    // --- P2-6: Time decay ---
+    /// Enable time-based decay of exit threshold.
+    /// When enabled, the exit threshold decreases over time, making exits
+    /// more aggressive as the position ages (stale liquidity edge decays).
+    /// Default: false.
+    #[serde(default)]
+    pub time_decay_enabled: bool,
+    /// Time (ms) after which decay starts. Before this, threshold is 100%.
+    /// Default: 5000 (5 seconds).
+    #[serde(default = "default_decay_start_ms")]
+    pub decay_start_ms: u64,
+    /// Minimum decay factor (0.0-1.0). Threshold never drops below
+    /// `base_threshold * min_factor`.
+    /// Default: 0.2 (20%).
+    #[serde(default = "default_min_decay_factor")]
+    pub min_decay_factor: f64,
 }
 
 fn default_enabled() -> bool {
@@ -70,6 +87,14 @@ fn default_slippage_bps() -> u64 {
     50
 }
 
+fn default_decay_start_ms() -> u64 {
+    5000
+}
+
+fn default_min_decay_factor() -> f64 {
+    0.2
+}
+
 impl Default for MarkRegressionConfig {
     fn default() -> Self {
         Self {
@@ -78,7 +103,40 @@ impl Default for MarkRegressionConfig {
             check_interval_ms: default_check_interval_ms(),
             min_holding_time_ms: default_min_holding_time_ms(),
             slippage_bps: default_slippage_bps(),
+            time_decay_enabled: false,
+            decay_start_ms: default_decay_start_ms(),
+            min_decay_factor: default_min_decay_factor(),
         }
+    }
+}
+
+impl MarkRegressionConfig {
+    /// Calculate time decay factor for the given holding time.
+    ///
+    /// Returns a multiplier in [min_factor, 1.0] that should be applied
+    /// to the exit threshold. The threshold decreases linearly from 1.0
+    /// to min_factor as held_ms goes from decay_start_ms to time_stop_ms.
+    ///
+    /// # Arguments
+    /// * `held_ms` - How long the position has been held (milliseconds)
+    /// * `time_stop_ms` - Time stop threshold (30s default)
+    #[must_use]
+    pub fn decay_factor(&self, held_ms: u64, time_stop_ms: u64) -> f64 {
+        if !self.time_decay_enabled || time_stop_ms == 0 {
+            return 1.0;
+        }
+        if held_ms <= self.decay_start_ms {
+            return 1.0;
+        }
+        // Linear decay from 1.0 at decay_start_ms to min_factor at time_stop_ms
+        let elapsed_since_decay = (held_ms - self.decay_start_ms) as f64;
+        let decay_window = time_stop_ms.saturating_sub(self.decay_start_ms) as f64;
+        if decay_window <= 0.0 {
+            return self.min_decay_factor;
+        }
+        let progress = (elapsed_since_decay / decay_window).min(1.0);
+        let factor = 1.0 - (1.0 - self.min_decay_factor) * progress;
+        factor.max(self.min_decay_factor)
     }
 }
 
@@ -211,8 +269,11 @@ impl MarkRegressionMonitor {
             return None;
         }
 
-        // 4. Calculate threshold factor
-        let threshold_factor = self.config.exit_threshold_bps / Decimal::from(10000);
+        // 4. Calculate threshold factor with optional time decay (P2-6)
+        let decay = self.config.decay_factor(held_ms, TIME_STOP_MS);
+        let effective_threshold_bps =
+            self.config.exit_threshold_bps * Decimal::try_from(decay).unwrap_or(Decimal::ONE);
+        let threshold_factor = effective_threshold_bps / Decimal::from(10000);
 
         // 5. Check exit condition based on position side
         match position.side {
@@ -430,5 +491,102 @@ mod tests {
 
         let edge = (oracle - ask) / oracle * dec!(10000);
         assert_eq!(edge, dec!(2)); // 2 bps profit
+    }
+
+    // --- P2-6: Time decay tests ---
+
+    #[test]
+    fn test_decay_factor_disabled() {
+        let config = MarkRegressionConfig::default();
+        assert!(!config.time_decay_enabled);
+        // Decay factor should always be 1.0 when disabled
+        assert_eq!(config.decay_factor(0, 30000), 1.0);
+        assert_eq!(config.decay_factor(15000, 30000), 1.0);
+        assert_eq!(config.decay_factor(30000, 30000), 1.0);
+    }
+
+    #[test]
+    fn test_decay_factor_before_start() {
+        let config = MarkRegressionConfig {
+            time_decay_enabled: true,
+            decay_start_ms: 5000,
+            min_decay_factor: 0.2,
+            ..Default::default()
+        };
+        // Before decay_start_ms, factor is 1.0
+        assert_eq!(config.decay_factor(0, 30000), 1.0);
+        assert_eq!(config.decay_factor(3000, 30000), 1.0);
+        assert_eq!(config.decay_factor(5000, 30000), 1.0); // Exactly at boundary
+    }
+
+    #[test]
+    fn test_decay_factor_linear_progression() {
+        let config = MarkRegressionConfig {
+            time_decay_enabled: true,
+            decay_start_ms: 5000,
+            min_decay_factor: 0.2,
+            ..Default::default()
+        };
+        let time_stop = 30000_u64;
+        // decay_window = 30000 - 5000 = 25000
+        // At 5000ms: factor = 1.0
+        // At 17500ms (midpoint): factor = 1.0 - 0.8 * 0.5 = 0.6
+        // At 30000ms: factor = 0.2
+
+        let mid = config.decay_factor(17500, time_stop);
+        assert!(
+            (mid - 0.6).abs() < 0.001,
+            "Mid-decay should be ~0.6, got {mid}"
+        );
+
+        let end = config.decay_factor(30000, time_stop);
+        assert!(
+            (end - 0.2).abs() < 0.001,
+            "End-decay should be ~0.2, got {end}"
+        );
+    }
+
+    #[test]
+    fn test_decay_factor_clamped_at_min() {
+        let config = MarkRegressionConfig {
+            time_decay_enabled: true,
+            decay_start_ms: 5000,
+            min_decay_factor: 0.2,
+            ..Default::default()
+        };
+        // Beyond time_stop_ms, factor stays at min_factor
+        let beyond = config.decay_factor(50000, 30000);
+        assert!(
+            (beyond - 0.2).abs() < 0.001,
+            "Beyond time_stop should be min_factor, got {beyond}"
+        );
+    }
+
+    #[test]
+    fn test_time_decay_config_serde() {
+        let toml_str = r#"
+            enabled = true
+            exit_threshold_bps = 10
+        "#;
+        let config: MarkRegressionConfig = toml::from_str(toml_str).unwrap();
+        // Defaults preserved for time_decay fields
+        assert!(!config.time_decay_enabled);
+        assert_eq!(config.decay_start_ms, 5000);
+        assert!((config.min_decay_factor - 0.2).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_time_decay_config_serde_enabled() {
+        let toml_str = r#"
+            enabled = true
+            exit_threshold_bps = 10
+            time_decay_enabled = true
+            decay_start_ms = 3000
+            min_decay_factor = 0.3
+        "#;
+        let config: MarkRegressionConfig = toml::from_str(toml_str).unwrap();
+        assert!(config.time_decay_enabled);
+        assert_eq!(config.decay_start_ms, 3000);
+        assert!((config.min_decay_factor - 0.3).abs() < 0.001);
     }
 }

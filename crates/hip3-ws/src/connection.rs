@@ -14,7 +14,7 @@ use parking_lot::RwLock;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{mpsc, Mutex as TokioMutex};
-use tokio_tungstenite::{connect_async, tungstenite::Message};
+use tokio_tungstenite::{connect_async_tls_with_config, tungstenite::Message};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
@@ -229,7 +229,9 @@ impl ConnectionManager {
     async fn try_connect(&self) -> WsResult<()> {
         info!(url = %self.config.url, "Connecting to WebSocket");
 
-        let (ws_stream, _response) = connect_async(&self.config.url).await?;
+        // P2-8: TCP_NODELAY for lower latency (disable Nagle's algorithm)
+        let (ws_stream, _response) =
+            connect_async_tls_with_config(&self.config.url, None, true, None).await?;
         let (mut write, mut read) = ws_stream.split();
 
         *self.state.write() = ConnectionState::Connected;

@@ -21,7 +21,9 @@ pub mod hard_stop;
 
 pub use error::{RiskError, RiskResult};
 pub use gates::{
-    BlackoutWindow, GateResult, MaxPositionPerMarketGate, MaxPositionTotalGate, RiskGate,
+    BlackoutWindow, CorrelationCooldownConfig, CorrelationCooldownGate, CorrelationPositionConfig,
+    CorrelationPositionGate, GateResult, MaxDrawdownConfig, MaxDrawdownGate,
+    MaxPositionPerMarketGate, MaxPositionTotalGate, ResolvedCorrelationGroup, RiskGate,
     RiskGateConfig,
 };
 pub use hard_stop::{

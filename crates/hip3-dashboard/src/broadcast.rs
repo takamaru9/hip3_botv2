@@ -80,6 +80,7 @@ fn send_periodic_update(
         positions: Some(snapshot.positions),
         risk: Some(snapshot.risk),
         pending_orders: Some(snapshot.pending_orders),
+        pnl_summary: Some(snapshot.pnl_summary),
     };
 
     match serde_json::to_string(&msg) {

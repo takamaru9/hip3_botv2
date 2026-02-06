@@ -62,6 +62,15 @@ pub struct DislocationSignal {
     pub signal_id: String,
     /// Fee calculation details for audit trail (P0-24).
     pub fee_metadata: FeeMetadata,
+    /// Oracle velocity at detection time in bps (P2-1).
+    /// Absolute change from previous tick. Used for velocity-based sizing.
+    #[serde(default)]
+    pub oracle_velocity_bps: Decimal,
+    /// Multi-factor confidence score (P3-1).
+    /// Range: 0.0-1.0. Higher = more reliable signal.
+    /// Used for confidence-based sizing when enabled.
+    #[serde(default)]
+    pub confidence_score: Decimal,
 }
 
 impl DislocationSignal {
@@ -78,6 +87,8 @@ impl DislocationSignal {
         best_px: Price,
         book_size: Size,
         fee_metadata: FeeMetadata,
+        oracle_velocity_bps: Decimal,
+        confidence_score: Decimal,
     ) -> Self {
         let now = Utc::now();
         let signal_id = format!("sig_{}_{}_{}", market_key, side, now.timestamp_millis());
@@ -95,6 +106,8 @@ impl DislocationSignal {
             detected_at: now,
             signal_id,
             fee_metadata,
+            oracle_velocity_bps,
+            confidence_score,
         }
     }
 

@@ -65,6 +65,6 @@ pub use config::DashboardConfig;
 pub use server::run_server;
 pub use state::{DashboardState, SignalSender};
 pub use types::{
-    DashboardMessage, DashboardSnapshot, MarketDataSnapshot, PositionSnapshot, RiskAlertType,
-    RiskStatus, SignalSnapshot,
+    CompletedTrade, DashboardMessage, DashboardSnapshot, MarketDataSnapshot, PnlSummary,
+    PositionSnapshot, RiskAlertType, RiskStatus, SignalSnapshot,
 };

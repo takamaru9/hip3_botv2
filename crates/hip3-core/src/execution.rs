@@ -263,6 +263,12 @@ pub enum RejectReason {
     InflightFull,
     /// Required market data (mark price) is unavailable.
     MarketDataUnavailable,
+    /// Hourly drawdown limit exceeded (P2-3).
+    MaxDrawdown,
+    /// Correlation cooldown active (P2-4).
+    CorrelationCooldown,
+    /// Correlation-weighted position limit exceeded (P3-3).
+    CorrelationPositionLimit,
 }
 
 /// Reason for skipping signal processing.

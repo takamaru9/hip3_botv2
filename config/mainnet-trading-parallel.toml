@@ -350,6 +350,14 @@ normal_book_notional = 5000
 adaptive_threshold = true
 spread_threshold_multiplier = 1.5  # effective_threshold = spread_ewma × 1.5
 #
+# P3-1: Confidence-based sizing
+# Multi-factor confidence score (0.0-1.0) adjusts position size:
+#   final_size = base_size * (0.5 + 0.5 * confidence)
+# Factors: edge magnitude (0.30), oracle velocity (0.20),
+#   consecutive moves (0.20), book depth (0.15), market profile (0.15)
+# Low-confidence signals get 50% size, high-confidence get full size
+confidence_sizing = true
+#
 # Quote Lag Gate (PR-5: True Stale Liquidity)
 # Only generate signals when oracle changed within this time window.
 # Both set to 0 = disabled (backwards compatible)
@@ -388,6 +396,15 @@ exit_with_moves = 3
 min_holding_time_ms = 0
 # スリッページ
 slippage_bps = 50
+# P3-2: Trailing Stop (dynamic profit-take replacing fixed exit_with_moves)
+# After oracle moves activation_bps in our favor, trailing stop activates.
+# If oracle then retraces trail_bps from best, exit is triggered.
+# Works alongside exit_with_moves (whichever triggers first).
+# activation=5: Low enough to catch most winning trades (strategy edge 30-80+ bps)
+# trail=3: Tight trail to protect profit on fast-decaying stale liquidity edge
+trailing_stop = true
+activation_bps = 5
+trail_bps = 3
 
 [time_stop]
 # Oracle-driven exitがメイン、TimeStopはバックアップ（非常用ハードリミット）

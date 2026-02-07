@@ -4,7 +4,8 @@ use crate::error::{AppError, AppResult};
 use hip3_dashboard::DashboardConfig;
 use hip3_detector::DetectorConfig;
 use hip3_risk::{
-    CorrelationCooldownConfig, CorrelationPositionConfig, MaxDrawdownConfig, RiskGateConfig,
+    BurstSignalConfig, CorrelationCooldownConfig, CorrelationPositionConfig, MaxDrawdownConfig,
+    RiskGateConfig,
 };
 use hip3_ws::{ConnectionConfig, SubscriptionTarget};
 use rust_decimal::Decimal;
@@ -363,6 +364,9 @@ pub struct AppConfig {
     /// P3-3: Correlation-weighted position limit configuration.
     #[serde(default)]
     pub correlation_position: CorrelationPositionConfig,
+    /// Burst signal rate limiting configuration.
+    #[serde(default)]
+    pub burst_signal: BurstSignalConfig,
     /// Executor configuration (Trading mode only).
     #[serde(default)]
     pub executor: ExecutorConfig,
@@ -569,6 +573,7 @@ impl Default for AppConfig {
             max_drawdown: MaxDrawdownConfig::default(),
             correlation_cooldown: CorrelationCooldownConfig::default(),
             correlation_position: CorrelationPositionConfig::default(),
+            burst_signal: BurstSignalConfig::default(),
             executor: ExecutorConfig::default(),
             dashboard: DashboardConfig::default(),
             position: PositionConfig::default(),

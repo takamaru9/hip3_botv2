@@ -63,7 +63,8 @@ threshold_bps = 30
 [[markets]]
 asset_idx = 110007
 coin = "xyz:COIN"
-threshold_bps = 50  # Higher spread market
+# 2026-02-07: DISABLED. 0% WR in backtest, -$0.27 net PnL
+threshold_bps = 999
 
 [[markets]]
 asset_idx = 110008
@@ -91,8 +92,8 @@ threshold_bps = 40
 [[markets]]
 asset_idx = 110012
 coin = "xyz:GOOGL"
-# 2026-02-06: Tight spread (~5 bps), 70.6% decay@5s = genuine edge
-threshold_bps = 30
+# 2026-02-07: DISABLED. 0% WR in backtest, -$0.22 net PnL despite good edge decay
+threshold_bps = 999
 
 [[markets]]
 asset_idx = 110013
@@ -131,8 +132,8 @@ threshold_bps = 999
 [[markets]]
 asset_idx = 110018
 coin = "xyz:CRCL"
-# 2026-02-06: Edge decay 20.5% (partial), residual structural ~52 bps
-threshold_bps = 60
+# 2026-02-07: Raised. Partial structural spread, mixed WR, marginal edge
+threshold_bps = 80
 
 [[markets]]
 asset_idx = 110019
@@ -189,9 +190,8 @@ threshold_bps = 80
 [[markets]]
 asset_idx = 110027
 coin = "xyz:RIVN"
-# 2026-02-06: Structural spread - 2.8% decay@1s, 14.2%@5s
-# 95 signals all SELL-side, actual P&L: -$0.37 from 8 trades (0 wins)
-threshold_bps = 80
+# 2026-02-07: DISABLED. Structural spread, 0% WR, all SELL-side signals
+threshold_bps = 999
 
 [[markets]]
 asset_idx = 110028
@@ -212,7 +212,8 @@ threshold_bps = 80
 [[markets]]
 asset_idx = 110031
 coin = "xyz:NATGAS"
-threshold_bps = 40
+# 2026-02-07: DISABLED. 0% WR (0/3 trades), all BUY into downtrend
+threshold_bps = 999
 
 [[markets]]
 asset_idx = 110032
@@ -232,9 +233,8 @@ threshold_bps = 40
 [[markets]]
 asset_idx = 110035
 coin = "xyz:PLATINUM"
-# 2026-02-06: Edge decay analysis: 57.8 → 55.1 bps after 5s (4.4% decay)
-# Pure structural oracle-to-quote gap, not stale liquidity
-threshold_bps = 80
+# 2026-02-07: Raised. Structural spread (4.4% decay@5s), 22.9% WR, -$1.24
+threshold_bps = 120
 
 [[markets]]
 asset_idx = 110036
@@ -477,3 +477,13 @@ reset_interval_secs = 3600       # Rolling window resets after 1 hour
 correlation_close_threshold = 3   # Trigger cooldown if 3+ closes within window
 correlation_window_secs = 30      # Detection window: 30 seconds
 correlation_cooldown_secs = 120   # Cooldown period: 2 minutes (block new entries)
+
+# BurstSignalGate: Per-market signal rate limiting
+# Backtest (Feb 4-6): burst trades (3+/30min) = 84% of trades, losing
+# Non-burst (isolated) trades: 127 trades, 33.9% WR, only profitable segment
+# Max 3 signals per market per 30 minutes, 5 min cooldown after burst
+[burst_signal]
+enabled = true
+burst_window_secs = 1800         # 30-minute rolling window
+burst_max_signals = 3            # Max 3 signals per market in window
+burst_cooldown_secs = 300        # 5-minute cooldown after burst limit hit

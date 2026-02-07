@@ -1852,6 +1852,173 @@ impl CorrelationCooldownGate {
 }
 
 // ============================================================================
+// BurstSignalGate (Sprint 1 - Strategy Evolution)
+// ============================================================================
+
+/// Configuration for the BurstSignal gate.
+///
+/// Limits the number of signals per market within a rolling time window.
+/// Prevents over-trading during burst activity periods which have significantly
+/// worse win rates (backtest: burst trades = losing, isolated trades = +$0.20).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BurstSignalConfig {
+    /// Enable burst signal rate limiting.
+    /// Set to false to disable this gate entirely.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Rolling window in seconds for counting signals per market.
+    /// Default: 1800 (30 minutes).
+    #[serde(default = "default_burst_window_secs")]
+    pub burst_window_secs: u64,
+    /// Maximum number of signals allowed per market within the window.
+    /// Default: 3.
+    #[serde(default = "default_burst_max_signals")]
+    pub burst_max_signals: u32,
+    /// Cooldown in seconds after burst limit is hit for a market.
+    /// During cooldown, all signals for that market are blocked.
+    /// Default: 300 (5 minutes).
+    #[serde(default = "default_burst_cooldown_secs")]
+    pub burst_cooldown_secs: u64,
+}
+
+fn default_burst_window_secs() -> u64 {
+    1800 // 30 minutes
+}
+
+fn default_burst_max_signals() -> u32 {
+    3
+}
+
+fn default_burst_cooldown_secs() -> u64 {
+    300 // 5 minutes
+}
+
+impl Default for BurstSignalConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false, // Disabled by default
+            burst_window_secs: default_burst_window_secs(),
+            burst_max_signals: default_burst_max_signals(),
+            burst_cooldown_secs: default_burst_cooldown_secs(),
+        }
+    }
+}
+
+/// BurstSignalGate: Limits per-market signal frequency within a rolling window.
+///
+/// Backtest analysis (Feb 4-6) showed that burst trading (3+ signals in same
+/// market within 30 min) accounts for 84% of trades but has significantly
+/// worse performance. Non-burst (isolated/normal) trades: 127 trades, 33.9% WR.
+///
+/// Thread-safe: Uses `parking_lot::Mutex` for per-market signal tracking.
+pub struct BurstSignalGate {
+    config: BurstSignalConfig,
+    /// Per-market signal timestamps (ms).
+    market_signals: parking_lot::Mutex<std::collections::HashMap<MarketKey, Vec<u64>>>,
+    /// Per-market cooldown-until timestamps (ms). 0 = no cooldown.
+    market_cooldowns: parking_lot::Mutex<std::collections::HashMap<MarketKey, u64>>,
+}
+
+impl BurstSignalGate {
+    /// Create a new BurstSignalGate.
+    #[must_use]
+    pub fn new(config: BurstSignalConfig) -> Self {
+        Self {
+            config,
+            market_signals: parking_lot::Mutex::new(std::collections::HashMap::new()),
+            market_cooldowns: parking_lot::Mutex::new(std::collections::HashMap::new()),
+        }
+    }
+
+    /// Record a signal for a market and check if it should be allowed.
+    ///
+    /// Returns `Ok(())` if the signal is allowed, or `Err(RejectReason::BurstSignal)`
+    /// if the burst limit is exceeded or cooldown is active.
+    pub fn check_and_record(&self, market: &MarketKey) -> Result<(), RejectReason> {
+        if !self.config.enabled {
+            return Ok(());
+        }
+
+        let now_ms = chrono::Utc::now().timestamp_millis() as u64;
+
+        // Check cooldown first
+        {
+            let cooldowns = self.market_cooldowns.lock();
+            if let Some(&cooldown_until) = cooldowns.get(market) {
+                if now_ms < cooldown_until {
+                    debug!(
+                        market = %market,
+                        remaining_secs = (cooldown_until - now_ms) / 1000,
+                        "BurstSignalGate blocked: cooldown active"
+                    );
+                    return Err(RejectReason::BurstSignal);
+                }
+            }
+        }
+
+        let window_ms = self.config.burst_window_secs * 1000;
+
+        let mut signals = self.market_signals.lock();
+        let market_signals = signals.entry(*market).or_default();
+
+        // Remove signals outside the window
+        market_signals.retain(|&t| now_ms.saturating_sub(t) < window_ms);
+
+        // Check if adding this signal would exceed the limit
+        if market_signals.len() >= self.config.burst_max_signals as usize {
+            // Trigger cooldown for this market
+            let cooldown_until = now_ms + self.config.burst_cooldown_secs * 1000;
+            self.market_cooldowns.lock().insert(*market, cooldown_until);
+
+            warn!(
+                market = %market,
+                signals_in_window = market_signals.len(),
+                window_secs = self.config.burst_window_secs,
+                cooldown_secs = self.config.burst_cooldown_secs,
+                "BurstSignalGate: burst limit hit, cooldown triggered"
+            );
+
+            // Clear signals for this market to prevent repeated triggering
+            market_signals.clear();
+
+            return Err(RejectReason::BurstSignal);
+        }
+
+        // Record the signal
+        market_signals.push(now_ms);
+        Ok(())
+    }
+
+    /// Check if the gate is enabled.
+    #[must_use]
+    pub fn is_enabled(&self) -> bool {
+        self.config.enabled
+    }
+
+    /// Check if a specific market is in cooldown.
+    #[must_use]
+    pub fn is_market_in_cooldown(&self, market: &MarketKey) -> bool {
+        let now_ms = chrono::Utc::now().timestamp_millis() as u64;
+        let cooldowns = self.market_cooldowns.lock();
+        cooldowns.get(market).is_some_and(|&until| now_ms < until)
+    }
+
+    /// Get the number of signals recorded for a market in the current window.
+    #[must_use]
+    pub fn signal_count(&self, market: &MarketKey) -> usize {
+        let now_ms = chrono::Utc::now().timestamp_millis() as u64;
+        let window_ms = self.config.burst_window_secs * 1000;
+        let signals = self.market_signals.lock();
+        signals.get(market).map_or(0, |timestamps| {
+            timestamps
+                .iter()
+                .filter(|&&t| now_ms.saturating_sub(t) < window_ms)
+                .count()
+        })
+    }
+}
+
+// ============================================================================
 // P2-3/P2-4 Gate Tests
 // ============================================================================
 
@@ -2191,5 +2358,162 @@ mod correlation_position_tests {
         );
 
         handle.shutdown().await;
+    }
+}
+
+// ============================================================================
+// BurstSignalGate Tests
+// ============================================================================
+
+#[cfg(test)]
+mod burst_signal_tests {
+    use super::*;
+    use hip3_core::{AssetId, DexId};
+
+    fn market(idx: u32) -> MarketKey {
+        MarketKey::new(DexId::XYZ, AssetId::new(idx))
+    }
+
+    #[test]
+    fn test_burst_gate_disabled_by_default() {
+        let gate = BurstSignalGate::new(BurstSignalConfig::default());
+        assert!(!gate.is_enabled());
+        // Should always pass when disabled
+        assert!(gate.check_and_record(&market(0)).is_ok());
+        assert!(gate.check_and_record(&market(0)).is_ok());
+        assert!(gate.check_and_record(&market(0)).is_ok());
+        assert!(gate.check_and_record(&market(0)).is_ok());
+    }
+
+    #[test]
+    fn test_burst_gate_allows_within_limit() {
+        let config = BurstSignalConfig {
+            enabled: true,
+            burst_window_secs: 1800,
+            burst_max_signals: 3,
+            burst_cooldown_secs: 300,
+        };
+        let gate = BurstSignalGate::new(config);
+
+        // First 3 signals should pass
+        assert!(gate.check_and_record(&market(0)).is_ok());
+        assert_eq!(gate.signal_count(&market(0)), 1);
+        assert!(gate.check_and_record(&market(0)).is_ok());
+        assert_eq!(gate.signal_count(&market(0)), 2);
+        assert!(gate.check_and_record(&market(0)).is_ok());
+        assert_eq!(gate.signal_count(&market(0)), 3);
+    }
+
+    #[test]
+    fn test_burst_gate_blocks_on_limit() {
+        let config = BurstSignalConfig {
+            enabled: true,
+            burst_window_secs: 1800,
+            burst_max_signals: 3,
+            burst_cooldown_secs: 300,
+        };
+        let gate = BurstSignalGate::new(config);
+
+        // Use up all 3 signals
+        assert!(gate.check_and_record(&market(0)).is_ok());
+        assert!(gate.check_and_record(&market(0)).is_ok());
+        assert!(gate.check_and_record(&market(0)).is_ok());
+
+        // 4th signal should be blocked (3 already recorded = at limit)
+        assert_eq!(
+            gate.check_and_record(&market(0)),
+            Err(RejectReason::BurstSignal)
+        );
+        assert!(gate.is_market_in_cooldown(&market(0)));
+    }
+
+    #[test]
+    fn test_burst_gate_per_market_isolation() {
+        let config = BurstSignalConfig {
+            enabled: true,
+            burst_window_secs: 1800,
+            burst_max_signals: 2,
+            burst_cooldown_secs: 300,
+        };
+        let gate = BurstSignalGate::new(config);
+
+        // Market 0: use up limit
+        assert!(gate.check_and_record(&market(0)).is_ok());
+        assert!(gate.check_and_record(&market(0)).is_ok());
+        assert_eq!(
+            gate.check_and_record(&market(0)),
+            Err(RejectReason::BurstSignal)
+        );
+
+        // Market 1: should still be allowed
+        assert!(gate.check_and_record(&market(1)).is_ok());
+        assert!(gate.check_and_record(&market(1)).is_ok());
+
+        // Market 1: now blocked too
+        assert_eq!(
+            gate.check_and_record(&market(1)),
+            Err(RejectReason::BurstSignal)
+        );
+
+        // Market 2: unaffected
+        assert!(gate.check_and_record(&market(2)).is_ok());
+        assert!(!gate.is_market_in_cooldown(&market(2)));
+    }
+
+    #[test]
+    fn test_burst_gate_cooldown_blocks_all() {
+        let config = BurstSignalConfig {
+            enabled: true,
+            burst_window_secs: 1800,
+            burst_max_signals: 1,
+            burst_cooldown_secs: 300,
+        };
+        let gate = BurstSignalGate::new(config);
+
+        // First signal passes
+        assert!(gate.check_and_record(&market(0)).is_ok());
+
+        // Second triggers cooldown
+        assert_eq!(
+            gate.check_and_record(&market(0)),
+            Err(RejectReason::BurstSignal)
+        );
+
+        // During cooldown, all signals for this market blocked
+        assert_eq!(
+            gate.check_and_record(&market(0)),
+            Err(RejectReason::BurstSignal)
+        );
+        assert!(gate.is_market_in_cooldown(&market(0)));
+    }
+
+    #[test]
+    fn test_burst_gate_config_defaults() {
+        let config = BurstSignalConfig::default();
+        assert!(!config.enabled);
+        assert_eq!(config.burst_window_secs, 1800);
+        assert_eq!(config.burst_max_signals, 3);
+        assert_eq!(config.burst_cooldown_secs, 300);
+    }
+
+    #[test]
+    fn test_burst_gate_signal_count() {
+        let config = BurstSignalConfig {
+            enabled: true,
+            burst_window_secs: 1800,
+            burst_max_signals: 10,
+            burst_cooldown_secs: 300,
+        };
+        let gate = BurstSignalGate::new(config);
+
+        assert_eq!(gate.signal_count(&market(0)), 0);
+        assert_eq!(gate.signal_count(&market(1)), 0);
+
+        gate.check_and_record(&market(0)).unwrap();
+        gate.check_and_record(&market(0)).unwrap();
+        gate.check_and_record(&market(1)).unwrap();
+
+        assert_eq!(gate.signal_count(&market(0)), 2);
+        assert_eq!(gate.signal_count(&market(1)), 1);
     }
 }

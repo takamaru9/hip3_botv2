@@ -34,7 +34,9 @@ use hip3_core::{
     RejectReason, Size, SkipReason, TrackedOrder,
 };
 use hip3_position::PositionTrackerHandle;
-use hip3_risk::{CorrelationCooldownGate, CorrelationPositionGate, MaxDrawdownGate};
+use hip3_risk::{
+    BurstSignalGate, CorrelationCooldownGate, CorrelationPositionGate, MaxDrawdownGate,
+};
 
 use crate::batch::BatchScheduler;
 use crate::ready::TradingReadyChecker;
@@ -340,6 +342,9 @@ impl MarketStateCache {
 /// # Gate Check Order (Strict)
 ///
 /// 1. HardStop               → Rejected(HardStop)
+///    1b. MaxDrawdown         → Rejected(MaxDrawdown)
+///    1c. CorrelationCooldown → Rejected(CorrelationCooldown)
+///    1d. BurstSignal         → Rejected(BurstSignal)
 /// 2. (READY-TRADING)        → Handled by bot via `connection_manager.is_ready()`
 /// 3. MaxPositionPerMarket   → Rejected(MaxPositionPerMarket)
 /// 4. MaxPositionTotal       → Rejected(MaxPositionTotal)
@@ -375,6 +380,8 @@ pub struct Executor {
     correlation_cooldown_gate: Option<Arc<CorrelationCooldownGate>>,
     /// P3-3: CorrelationPositionGate (optional, None = disabled).
     correlation_position_gate: Option<Arc<CorrelationPositionGate>>,
+    /// BurstSignalGate: per-market signal rate limiting (optional, None = disabled).
+    burst_signal_gate: Option<Arc<BurstSignalGate>>,
 }
 
 impl Executor {
@@ -400,6 +407,7 @@ impl Executor {
             max_drawdown_gate: None,
             correlation_cooldown_gate: None,
             correlation_position_gate: None,
+            burst_signal_gate: None,
         }
     }
 
@@ -421,6 +429,13 @@ impl Executor {
     #[must_use]
     pub fn with_correlation_position_gate(mut self, gate: Arc<CorrelationPositionGate>) -> Self {
         self.correlation_position_gate = Some(gate);
+        self
+    }
+
+    /// Set the BurstSignalGate (per-market signal rate limiting).
+    #[must_use]
+    pub fn with_burst_signal_gate(mut self, gate: Arc<BurstSignalGate>) -> Self {
+        self.burst_signal_gate = Some(gate);
         self
     }
 
@@ -469,6 +484,7 @@ impl Executor {
     /// 1.  HardStop               → Rejected::HardStop
     ///     1b. MaxDrawdown (P2-3)     → Rejected::MaxDrawdown
     ///     1c. CorrelationCooldown    → Rejected::CorrelationCooldown
+    ///     1d. BurstSignal            → Rejected::BurstSignal
     /// 2.  (READY-TRADING)        → Handled by bot, not checked here
     /// 3.  MaxPositionPerMarket   → Rejected::MaxPositionPerMarket
     /// 4.  MaxPositionTotal       → Rejected::MaxPositionTotal
@@ -522,6 +538,17 @@ impl Executor {
                 debug!(
                     market = %market,
                     "Signal rejected: CorrelationCooldown gate"
+                );
+                return ExecutionResult::rejected(reason);
+            }
+        }
+
+        // Gate 1d: BurstSignal — per-market signal rate limiting
+        if let Some(ref gate) = self.burst_signal_gate {
+            if let Err(reason) = gate.check_and_record(market) {
+                debug!(
+                    market = %market,
+                    "Signal rejected: BurstSignal gate"
                 );
                 return ExecutionResult::rejected(reason);
             }

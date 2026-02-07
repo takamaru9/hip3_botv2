@@ -269,6 +269,8 @@ pub enum RejectReason {
     CorrelationCooldown,
     /// Correlation-weighted position limit exceeded (P3-3).
     CorrelationPositionLimit,
+    /// Burst signal rate limit exceeded (too many signals per market in window).
+    BurstSignal,
 }
 
 /// Reason for skipping signal processing.

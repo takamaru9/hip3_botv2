@@ -873,6 +873,19 @@ impl Application {
                 executor =
                     executor.with_correlation_cooldown_gate(correlation_cooldown_gate.clone());
             }
+            // BurstSignalGate: per-market signal rate limiting
+            if self.config.burst_signal.enabled {
+                let burst_gate = Arc::new(hip3_risk::BurstSignalGate::new(
+                    self.config.burst_signal.clone(),
+                ));
+                info!(
+                    window_secs = self.config.burst_signal.burst_window_secs,
+                    max_signals = self.config.burst_signal.burst_max_signals,
+                    cooldown_secs = self.config.burst_signal.burst_cooldown_secs,
+                    "BurstSignalGate enabled"
+                );
+                executor = executor.with_burst_signal_gate(burst_gate);
+            }
             // P3-3: CorrelationPositionGate
             if self.config.correlation_position.enabled {
                 let dex_id = self.get_dex_id();

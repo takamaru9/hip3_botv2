@@ -378,6 +378,13 @@ min_edge_above_baseline_bps = 0     # 0 = observation mode (track but don't filt
 edge_velocity_gate = false
 min_edge_velocity_bps = 5           # 5 bps/tick minimum oracle speed
 #
+# Sprint 3 P2-D: Confidence Entry Gate
+# Uses existing P3-1 confidence_score (0.0-1.0) as entry filter.
+# Signals with confidence below this threshold are rejected.
+# 0.0 = disabled (all signals pass). Recommended: 0.3-0.4.
+# Start disabled (observation mode) to measure confidence distribution.
+min_confidence_entry = 0.0
+#
 # Quote Lag Gate (PR-5: True Stale Liquidity)
 # Only generate signals when oracle changed within this time window.
 # Both set to 0 = disabled (backwards compatible)
@@ -504,3 +511,14 @@ enabled = true
 burst_window_secs = 1800         # 30-minute rolling window
 burst_max_signals = 3            # Max 3 signals per market in window
 burst_cooldown_secs = 300        # 5-minute cooldown after burst limit hit
+
+# Sprint 3 P2-E: Market Health Tracker
+# Auto-disables markets with consistently poor performance.
+# Tracks rolling window of trade outcomes per market.
+# Start enabled with observation-friendly thresholds.
+[market_health]
+enabled = true
+window_size = 20                 # Last 20 trades per market
+disable_threshold = 0.3          # Health score < 0.3 → auto-disable
+re_enable_threshold = 0.5        # Health score >= 0.5 → re-enable
+min_samples_to_disable = 10      # Need 10+ trades before auto-disable

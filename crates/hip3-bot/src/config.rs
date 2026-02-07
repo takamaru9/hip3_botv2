@@ -4,8 +4,8 @@ use crate::error::{AppError, AppResult};
 use hip3_dashboard::DashboardConfig;
 use hip3_detector::DetectorConfig;
 use hip3_risk::{
-    BurstSignalConfig, CorrelationCooldownConfig, CorrelationPositionConfig, MaxDrawdownConfig,
-    RiskGateConfig,
+    BurstSignalConfig, CorrelationCooldownConfig, CorrelationPositionConfig, MarketHealthConfig,
+    MaxDrawdownConfig, RiskGateConfig,
 };
 use hip3_ws::{ConnectionConfig, SubscriptionTarget};
 use rust_decimal::Decimal;
@@ -367,6 +367,9 @@ pub struct AppConfig {
     /// Burst signal rate limiting configuration.
     #[serde(default)]
     pub burst_signal: BurstSignalConfig,
+    /// Sprint 3 P2-E: Market health tracker configuration.
+    #[serde(default)]
+    pub market_health: MarketHealthConfig,
     /// Executor configuration (Trading mode only).
     #[serde(default)]
     pub executor: ExecutorConfig,
@@ -574,6 +577,7 @@ impl Default for AppConfig {
             correlation_cooldown: CorrelationCooldownConfig::default(),
             correlation_position: CorrelationPositionConfig::default(),
             burst_signal: BurstSignalConfig::default(),
+            market_health: MarketHealthConfig::default(),
             executor: ExecutorConfig::default(),
             dashboard: DashboardConfig::default(),
             position: PositionConfig::default(),

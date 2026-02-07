@@ -591,6 +591,20 @@ impl DislocationDetector {
             &key,
         );
 
+        // Sprint 3 P2-D: Confidence Entry Gate
+        if !self.config.min_confidence_entry.is_zero()
+            && confidence < self.config.min_confidence_entry
+        {
+            tracing::debug!(
+                %key,
+                side = "buy",
+                %confidence,
+                min_confidence = %self.config.min_confidence_entry,
+                "Signal rejected by confidence entry gate"
+            );
+            return None;
+        }
+
         // P3-1: confidence_multiplier = 0.5 + 0.5 * confidence (range: 0.5-1.0)
         let confidence_multiplier = if self.config.confidence_sizing {
             Decimal::new(5, 1) + Decimal::new(5, 1) * confidence
@@ -845,6 +859,20 @@ impl DislocationDetector {
             liquidity_factor,
             &key,
         );
+
+        // Sprint 3 P2-D: Confidence Entry Gate
+        if !self.config.min_confidence_entry.is_zero()
+            && confidence < self.config.min_confidence_entry
+        {
+            tracing::debug!(
+                %key,
+                side = "sell",
+                %confidence,
+                min_confidence = %self.config.min_confidence_entry,
+                "Signal rejected by confidence entry gate"
+            );
+            return None;
+        }
 
         let confidence_multiplier = if self.config.confidence_sizing {
             Decimal::new(5, 1) + Decimal::new(5, 1) * confidence
@@ -2191,7 +2219,10 @@ mod tests {
         // Verify baseline established (~1.2 bps)
         let (gap, count) = detector.baseline_gap_bps(&key).unwrap();
         assert_eq!(count, 2);
-        assert!(gap > dec!(0) && gap < dec!(3), "Baseline gap should be ~1.2 bps, got {gap}");
+        assert!(
+            gap > dec!(0) && gap < dec!(3),
+            "Baseline gap should be ~1.2 bps, got {gap}"
+        );
 
         // Now genuine dislocation: oracle=50000, bid=49900, ask=49940
         // raw_edge = 12 bps, baseline ~1.2 bps → edge_above = ~10.8 > min(5) → PASSES
@@ -2224,10 +2255,17 @@ mod tests {
         // oracle=50000, bid=49900, ask=49940 → buy edge ~12 bps > default threshold 11
         let snapshot = make_snapshot(dec!(50000), dec!(49900), dec!(49940));
         let signal = detector.check(key, &snapshot, None, None, None);
-        assert!(signal.is_some(), "Signal should be generated with default config");
+        assert!(
+            signal.is_some(),
+            "Signal should be generated with default config"
+        );
 
         let s = signal.unwrap();
-        assert_eq!(s.baseline_gap_bps, dec!(0), "Baseline should be zero when disabled");
+        assert_eq!(
+            s.baseline_gap_bps,
+            dec!(0),
+            "Baseline should be zero when disabled"
+        );
         assert_eq!(
             s.edge_above_baseline_bps, s.raw_edge_bps,
             "edge_above_baseline should equal raw_edge when disabled"
@@ -2295,7 +2333,10 @@ mod tests {
         // First call: no previous oracle → change_bps=0 → blocked by velocity gate
         let snapshot = make_snapshot(dec!(50000), dec!(49900), dec!(49940));
         let signal = detector.check(key, &snapshot, None, None, None);
-        assert!(signal.is_none(), "First tick (0 velocity) should be blocked");
+        assert!(
+            signal.is_none(),
+            "First tick (0 velocity) should be blocked"
+        );
 
         // Second call: tiny oracle move (2 bps) → still blocked
         // 50010 vs 50000 = 10/50000*10000 = 2 bps
@@ -2363,5 +2404,115 @@ mod tests {
             "Large oracle drop should pass velocity gate for sell"
         );
         assert_eq!(signal.unwrap().side, OrderSide::Sell);
+    }
+
+    // ---- Sprint 3 P2-D: Confidence Entry Gate Tests ----
+
+    #[test]
+    fn test_confidence_entry_gate_disabled_by_default() {
+        // Default min_confidence_entry=0 means gate is disabled
+        let config = DetectorConfig {
+            taker_fee_bps: dec!(4),
+            slippage_bps: dec!(2),
+            min_edge_bps: dec!(4),
+            oracle_direction_filter: false,
+            min_oracle_change_bps: dec!(0),
+            ..Default::default()
+        };
+        assert!(config.min_confidence_entry.is_zero());
+        let detector = DislocationDetector::new(config).unwrap();
+        let key = test_key();
+
+        // First tick: establish oracle
+        let snapshot1 = make_snapshot(dec!(50000), dec!(49900), dec!(49940));
+        let _ = detector.check(key, &snapshot1, None, None, None);
+
+        // Second tick: oracle rises, buy signal with any confidence should pass
+        let snapshot2 = make_snapshot(dec!(50100), dec!(49900), dec!(49940));
+        let signal = detector.check(key, &snapshot2, None, None, None);
+        assert!(signal.is_some(), "Signal should pass with gate disabled");
+    }
+
+    #[test]
+    fn test_confidence_entry_gate_blocks_low_confidence() {
+        // Set high min_confidence_entry to block low-quality signals
+        let config = DetectorConfig {
+            taker_fee_bps: dec!(4),
+            slippage_bps: dec!(2),
+            min_edge_bps: dec!(4),
+            oracle_direction_filter: false,
+            min_oracle_change_bps: dec!(0),
+            min_confidence_entry: dec!(0.9), // Very high bar
+            ..Default::default()
+        };
+        let detector = DislocationDetector::new(config).unwrap();
+        let key = test_key();
+
+        // First tick: establish oracle
+        let snapshot1 = make_snapshot(dec!(50000), dec!(49900), dec!(49940));
+        let _ = detector.check(key, &snapshot1, None, None, None);
+
+        // Second tick: marginal edge → low confidence → should be blocked
+        let snapshot2 = make_snapshot(dec!(50020), dec!(49900), dec!(49940));
+        let signal = detector.check(key, &snapshot2, None, None, None);
+        assert!(
+            signal.is_none(),
+            "Low confidence signal should be blocked by entry gate"
+        );
+    }
+
+    #[test]
+    fn test_confidence_entry_gate_passes_high_confidence() {
+        // Set moderate min_confidence_entry
+        let config = DetectorConfig {
+            taker_fee_bps: dec!(4),
+            slippage_bps: dec!(2),
+            min_edge_bps: dec!(4),
+            oracle_direction_filter: false,
+            min_oracle_change_bps: dec!(0),
+            min_confidence_entry: dec!(0.2), // Moderate bar
+            ..Default::default()
+        };
+        let detector = DislocationDetector::new(config).unwrap();
+        let key = test_key();
+
+        // First tick: establish oracle
+        let snapshot1 = make_snapshot(dec!(50000), dec!(49900), dec!(49940));
+        let _ = detector.check(key, &snapshot1, None, None, None);
+
+        // Second tick: large edge → higher confidence → should pass
+        let snapshot2 = make_snapshot(dec!(50100), dec!(49900), dec!(49940));
+        let signal = detector.check(key, &snapshot2, None, None, None);
+        assert!(
+            signal.is_some(),
+            "High confidence signal should pass entry gate"
+        );
+    }
+
+    #[test]
+    fn test_confidence_entry_gate_sell_side() {
+        let config = DetectorConfig {
+            taker_fee_bps: dec!(4),
+            slippage_bps: dec!(2),
+            min_edge_bps: dec!(4),
+            oracle_direction_filter: false,
+            min_oracle_change_bps: dec!(0),
+            min_confidence_entry: dec!(0.9), // Very high bar
+            ..Default::default()
+        };
+        let detector = DislocationDetector::new(config).unwrap();
+        let key = test_key();
+
+        // First tick: establish oracle
+        let snapshot1 = make_snapshot(dec!(50000), dec!(50060), dec!(50080));
+        let _ = detector.check(key, &snapshot1, None, None, None);
+
+        // Second tick: marginal sell edge → low confidence → blocked
+        let snapshot2 = make_snapshot(dec!(49980), dec!(50060), dec!(50080));
+        let signal = detector.check(key, &snapshot2, None, None, None);
+        assert!(
+            signal.is_none(),
+            "Low confidence sell signal should be blocked by entry gate"
+        );
     }
 }

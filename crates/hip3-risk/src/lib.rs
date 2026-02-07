@@ -18,6 +18,7 @@
 pub mod error;
 pub mod gates;
 pub mod hard_stop;
+pub mod market_health;
 
 pub use error::{RiskError, RiskResult};
 pub use gates::{
@@ -29,3 +30,4 @@ pub use gates::{
 pub use hard_stop::{
     ExecutionEvent, HardStopLatch, HardStopReason, RiskMonitor, RiskMonitorConfig,
 };
+pub use market_health::{MarketHealthConfig, MarketHealthTracker, TradeOutcome};

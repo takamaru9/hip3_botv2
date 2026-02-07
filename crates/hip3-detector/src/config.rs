@@ -193,6 +193,17 @@ pub struct DetectorConfig {
     /// Default: 5 bps (based on strategy design report recommendation).
     #[serde(default = "default_min_edge_velocity_bps")]
     pub min_edge_velocity_bps: Decimal,
+
+    // ---- Sprint 3: Confidence Entry Gate (P2-D) ----
+    /// Minimum confidence score to generate a signal (Sprint 3).
+    ///
+    /// Uses the existing P3-1 confidence_score (0.0-1.0) as an entry gate.
+    /// Signals with confidence below this threshold are rejected.
+    ///
+    /// Set to 0.0 to disable (all signals pass regardless of confidence).
+    /// Recommended: 0.3-0.4 to filter low-quality signals.
+    #[serde(default)]
+    pub min_confidence_entry: Decimal,
 }
 
 fn default_min_order_notional() -> Decimal {
@@ -279,6 +290,7 @@ impl Default for DetectorConfig {
             min_edge_above_baseline_bps: Decimal::ZERO,                 // 0 = no filtering
             edge_velocity_gate: false,                                  // Disabled by default
             min_edge_velocity_bps: default_min_edge_velocity_bps(),     // 5 bps
+            min_confidence_entry: Decimal::ZERO,                        // 0 = disabled
         }
     }
 }

@@ -142,6 +142,8 @@ pub struct Application {
     /// P2-5: Cache of last signal edge_bps per market for dynamic exit thresholds.
     /// Populated at signal time, consumed at fill time for on_position_opened.
     last_signal_edge: RwLock<HashMap<MarketKey, Decimal>>,
+    /// Sprint 3 P2-E: Market health tracker for auto-disable/re-enable.
+    market_health_tracker: Option<Arc<hip3_risk::MarketHealthTracker>>,
 }
 
 impl Application {
@@ -227,6 +229,8 @@ impl Application {
             correlation_cooldown_gate: None,
             // P2-5: Signal edge cache for dynamic exit thresholds
             last_signal_edge: RwLock::new(HashMap::new()),
+            // Sprint 3 P2-E: Market health tracker
+            market_health_tracker: None,
         })
     }
 
@@ -937,6 +941,20 @@ impl Application {
             }
             if correlation_cooldown_gate.is_enabled() {
                 self.correlation_cooldown_gate = Some(correlation_cooldown_gate);
+            }
+
+            // Sprint 3 P2-E: Market Health Tracker
+            if self.config.market_health.enabled {
+                let tracker = Arc::new(hip3_risk::MarketHealthTracker::new(
+                    self.config.market_health.clone(),
+                ));
+                info!(
+                    window_size = self.config.market_health.window_size,
+                    disable_threshold = %self.config.market_health.disable_threshold,
+                    re_enable_threshold = %self.config.market_health.re_enable_threshold,
+                    "MarketHealthTracker enabled"
+                );
+                self.market_health_tracker = Some(tracker);
             }
 
             // 7. KeyManager (uses KeySource struct variant)
@@ -2013,6 +2031,48 @@ impl Application {
                         closed_at_ms: now_ms,
                     });
                 }
+
+                // Sprint 3 P2-E: Record trade outcome for market health tracking
+                if let Some(ref tracker) = self.market_health_tracker {
+                    let pnl_bps_health = match existing_pos.side {
+                        OrderSide::Buy => {
+                            (price.inner() - existing_pos.entry_price.inner())
+                                / existing_pos.entry_price.inner()
+                                * Decimal::from(10000)
+                        }
+                        OrderSide::Sell => {
+                            (existing_pos.entry_price.inner() - price.inner())
+                                / existing_pos.entry_price.inner()
+                                * Decimal::from(10000)
+                        }
+                    };
+                    let notional_health = size.inner() * price.inner();
+                    let pnl_usd_health = pnl_bps_health / Decimal::from(10000) * notional_health;
+                    let entry_edge = self
+                        .last_signal_edge
+                        .read()
+                        .get(&market)
+                        .copied()
+                        .unwrap_or(Decimal::ZERO);
+                    let outcome = hip3_risk::TradeOutcome {
+                        is_win: pnl_usd_health > Decimal::ZERO,
+                        pnl_usd: pnl_usd_health,
+                        entry_edge_bps: entry_edge,
+                    };
+                    if let Some(disabled) = tracker.record_outcome(market, outcome) {
+                        if disabled {
+                            warn!(
+                                %market,
+                                "Market auto-disabled by health tracker"
+                            );
+                        } else {
+                            info!(
+                                %market,
+                                "Market re-enabled by health tracker"
+                            );
+                        }
+                    }
+                }
             }
         }
 
@@ -2220,6 +2280,17 @@ impl Application {
                     };
                     self.edge_tracker
                         .record_threshold_info(key, spread_ewma, eff_threshold);
+
+                    // Sprint 3 P2-E: Skip markets disabled by health tracker
+                    if let Some(ref tracker) = self.market_health_tracker {
+                        if tracker.is_disabled(&key) {
+                            tracing::debug!(
+                                %key,
+                                "Market skipped: disabled by health tracker"
+                            );
+                            continue;
+                        }
+                    }
 
                     // All gates passed, check for dislocation
                     if let Some(signal) = self.detector.check(

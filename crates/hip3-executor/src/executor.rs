@@ -543,9 +543,10 @@ impl Executor {
             }
         }
 
-        // Gate 1d: BurstSignal — per-market signal rate limiting
+        // Gate 1d: BurstSignal — per-market signal rate limiting (check only)
+        // record() is called after all gates pass, so only actual trades count.
         if let Some(ref gate) = self.burst_signal_gate {
-            if let Err(reason) = gate.check_and_record(market) {
+            if let Err(reason) = gate.check(market) {
                 debug!(
                     market = %market,
                     "Signal rejected: BurstSignal gate"
@@ -734,6 +735,11 @@ impl Executor {
             // Race condition: budget exhausted between check and consume
             self.position_tracker.unmark_pending_market(market);
             return ExecutionResult::skipped(SkipReason::BudgetExhausted);
+        }
+
+        // All gates passed — record burst signal (only actual trades count)
+        if let Some(ref gate) = self.burst_signal_gate {
+            gate.record(market);
         }
 
         // All gates passed - create and queue order

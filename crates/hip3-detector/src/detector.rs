@@ -46,6 +46,40 @@ struct OracleMovement {
     change_bps: Decimal,
 }
 
+/// Per-market oracle-quote baseline state (Sprint 2).
+///
+/// Tracks the structural gap between oracle and quote mid-price using EWMA.
+/// Markets like USAR/SNDK have a persistent oracle-quote gap that isn't
+/// exploitable edge - this tracker learns and subtracts that baseline.
+#[derive(Debug, Clone)]
+struct OracleQuoteBaseline {
+    /// EWMA of signed gap: (oracle - mid) / oracle * 10000 in bps.
+    /// Positive = oracle typically above mid (common for most xyz perp markets).
+    gap_ewma_bps: Decimal,
+    /// Number of updates received.
+    sample_count: u64,
+}
+
+impl OracleQuoteBaseline {
+    fn new() -> Self {
+        Self {
+            gap_ewma_bps: Decimal::ZERO,
+            sample_count: 0,
+        }
+    }
+
+    /// Update EWMA with new observation. Returns current baseline bps.
+    fn update(&mut self, gap_bps: Decimal, alpha: Decimal) -> Decimal {
+        self.sample_count += 1;
+        if self.sample_count == 1 {
+            self.gap_ewma_bps = gap_bps;
+        } else {
+            self.gap_ewma_bps = alpha * gap_bps + (Decimal::ONE - alpha) * self.gap_ewma_bps;
+        }
+        self.gap_ewma_bps
+    }
+}
+
 /// Dislocation detector.
 ///
 /// Strategy: Enter when best price crosses oracle with edge > (FEE + SLIP + EDGE).
@@ -67,6 +101,8 @@ pub struct DislocationDetector {
     prev_oracle: RefCell<HashMap<MarketKey, Price>>,
     /// P2-2: Per-market spread EWMA for adaptive threshold.
     spread_ewma: RefCell<HashMap<MarketKey, Decimal>>,
+    /// Sprint 2: Per-market oracle-quote baseline tracker.
+    oracle_baselines: RefCell<HashMap<MarketKey, OracleQuoteBaseline>>,
 }
 
 impl DislocationDetector {
@@ -88,6 +124,7 @@ impl DislocationDetector {
             fee_calculator,
             prev_oracle: RefCell::new(HashMap::new()),
             spread_ewma: RefCell::new(HashMap::new()),
+            oracle_baselines: RefCell::new(HashMap::new()),
         })
     }
 
@@ -109,6 +146,7 @@ impl DislocationDetector {
             fee_calculator,
             prev_oracle: RefCell::new(HashMap::new()),
             spread_ewma: RefCell::new(HashMap::new()),
+            oracle_baselines: RefCell::new(HashMap::new()),
         })
     }
 
@@ -213,6 +251,72 @@ impl DislocationDetector {
         Some(spread_threshold)
     }
 
+    /// Sprint 2: Update oracle-quote baseline on every snapshot (unconditional).
+    ///
+    /// Called from `check()` AFTER check_buy/check_sell to avoid self-contamination:
+    /// the current snapshot's gap must not influence its own signal decision.
+    /// Updates on all snapshots (not just signal-generating ones) for unbiased estimation.
+    fn update_oracle_baseline(&self, key: MarketKey, snapshot: &MarketSnapshot) {
+        if !self.config.baseline_tracking {
+            return;
+        }
+
+        let oracle = snapshot.ctx.oracle.oracle_px;
+        let mid = match snapshot.bbo.mid_price() {
+            Some(m) if !m.is_zero() => m,
+            _ => return,
+        };
+
+        if oracle.is_zero() {
+            return;
+        }
+
+        // Signed gap: positive = oracle above mid (typical)
+        let gap_bps = (oracle.inner() - mid.inner()) / oracle.inner() * Decimal::from(10000);
+
+        let mut baselines = self.oracle_baselines.borrow_mut();
+        let baseline = baselines
+            .entry(key)
+            .or_insert_with(OracleQuoteBaseline::new);
+        baseline.update(gap_bps, self.config.baseline_alpha);
+    }
+
+    /// Sprint 2: Get baseline adjustment for edge calculation (read-only).
+    ///
+    /// Returns (baseline_gap_bps, edge_above_baseline_bps).
+    /// During warmup or when disabled, returns (0, raw_edge_bps).
+    fn get_baseline_adjustment(
+        &self,
+        key: &MarketKey,
+        raw_edge_bps: Decimal,
+        side: OrderSide,
+    ) -> (Decimal, Decimal) {
+        if !self.config.baseline_tracking {
+            return (Decimal::ZERO, raw_edge_bps);
+        }
+
+        let baselines = self.oracle_baselines.borrow();
+        match baselines.get(key) {
+            Some(b) if b.sample_count >= self.config.baseline_min_samples => {
+                // For BUY: structural gap is when oracle above mid → subtract max(0, baseline)
+                // For SELL: structural gap is when oracle below mid → subtract max(0, -baseline)
+                let adjustment = match side {
+                    OrderSide::Buy => b.gap_ewma_bps.max(Decimal::ZERO),
+                    OrderSide::Sell => (-b.gap_ewma_bps).max(Decimal::ZERO),
+                };
+                (b.gap_ewma_bps, raw_edge_bps - adjustment)
+            }
+            Some(b) => (b.gap_ewma_bps, raw_edge_bps), // warmup: no adjustment
+            None => (Decimal::ZERO, raw_edge_bps),
+        }
+    }
+
+    /// Sprint 2: Get current baseline gap for a market (for metrics/debugging).
+    pub fn baseline_gap_bps(&self, key: &MarketKey) -> Option<(Decimal, u64)> {
+        let baselines = self.oracle_baselines.borrow();
+        baselines.get(key).map(|b| (b.gap_ewma_bps, b.sample_count))
+    }
+
     /// P2-2: Get current spread EWMA for a market (for metrics/debugging).
     pub fn spread_ewma(&self, key: &MarketKey) -> Decimal {
         self.spread_ewma
@@ -274,6 +378,8 @@ impl DislocationDetector {
             oracle_tracker,
             oracle_age_ms,
         ) {
+            // Sprint 2: Update baseline AFTER signal check to avoid self-contamination
+            self.update_oracle_baseline(key, snapshot);
             return Some(signal);
         }
 
@@ -286,9 +392,13 @@ impl DislocationDetector {
             oracle_tracker,
             oracle_age_ms,
         ) {
+            // Sprint 2: Update baseline AFTER signal check
+            self.update_oracle_baseline(key, snapshot);
             return Some(signal);
         }
 
+        // Sprint 2: Update baseline even when no signal generated (unbiased estimate)
+        self.update_oracle_baseline(key, snapshot);
         None
     }
 
@@ -419,6 +529,39 @@ impl DislocationDetector {
             }
         }
 
+        // Sprint 2: Edge Velocity Gate - require minimum oracle movement speed
+        if self.config.edge_velocity_gate
+            && oracle_movement.change_bps < self.config.min_edge_velocity_bps
+        {
+            tracing::debug!(
+                %key,
+                side = "buy",
+                raw_edge_bps = %raw_edge_bps,
+                oracle_velocity_bps = %oracle_movement.change_bps,
+                min_edge_velocity_bps = %self.config.min_edge_velocity_bps,
+                "Signal skipped: edge velocity too low (likely structural)"
+            );
+            return None;
+        }
+
+        // Sprint 2: Oracle-Quote Baseline Tracker - subtract structural gap
+        let (baseline_gap_bps, edge_above_baseline_bps) =
+            self.get_baseline_adjustment(&key, raw_edge_bps, OrderSide::Buy);
+        if !self.config.min_edge_above_baseline_bps.is_zero()
+            && edge_above_baseline_bps < self.config.min_edge_above_baseline_bps
+        {
+            tracing::debug!(
+                %key,
+                side = "buy",
+                raw_edge_bps = %raw_edge_bps,
+                baseline_gap_bps = %baseline_gap_bps,
+                edge_above_baseline_bps = %edge_above_baseline_bps,
+                min_edge_above_baseline_bps = %self.config.min_edge_above_baseline_bps,
+                "Signal skipped: edge below baseline (structural spread)"
+            );
+            return None;
+        }
+
         // P2-1: Calculate velocity multiplier for sizing
         let velocity_multiplier = self.config.velocity_multiplier(oracle_movement.change_bps);
 
@@ -490,11 +633,13 @@ impl DislocationDetector {
             oracle_change_bps = %oracle_movement.change_bps,
             %velocity_multiplier,
             %confidence,
+            %baseline_gap_bps,
+            %edge_above_baseline_bps,
             ?oracle_age_ms,
             "Dislocation detected (P0-24: HIP-3 2x fee applied)"
         );
 
-        Some(DislocationSignal::new(
+        let mut signal = DislocationSignal::new(
             key,
             OrderSide::Buy,
             raw_edge_bps,
@@ -507,7 +652,10 @@ impl DislocationDetector {
             fee_metadata,
             oracle_movement.change_bps,
             confidence,
-        ))
+        );
+        signal.baseline_gap_bps = baseline_gap_bps;
+        signal.edge_above_baseline_bps = edge_above_baseline_bps;
+        Some(signal)
     }
 
     /// Check for sell opportunity.
@@ -637,6 +785,39 @@ impl DislocationDetector {
             }
         }
 
+        // Sprint 2: Edge Velocity Gate - require minimum oracle movement speed
+        if self.config.edge_velocity_gate
+            && oracle_movement.change_bps < self.config.min_edge_velocity_bps
+        {
+            tracing::debug!(
+                %key,
+                side = "sell",
+                raw_edge_bps = %raw_edge_bps,
+                oracle_velocity_bps = %oracle_movement.change_bps,
+                min_edge_velocity_bps = %self.config.min_edge_velocity_bps,
+                "Signal skipped: edge velocity too low (likely structural)"
+            );
+            return None;
+        }
+
+        // Sprint 2: Oracle-Quote Baseline Tracker - subtract structural gap
+        let (baseline_gap_bps, edge_above_baseline_bps) =
+            self.get_baseline_adjustment(&key, raw_edge_bps, OrderSide::Sell);
+        if !self.config.min_edge_above_baseline_bps.is_zero()
+            && edge_above_baseline_bps < self.config.min_edge_above_baseline_bps
+        {
+            tracing::debug!(
+                %key,
+                side = "sell",
+                raw_edge_bps = %raw_edge_bps,
+                baseline_gap_bps = %baseline_gap_bps,
+                edge_above_baseline_bps = %edge_above_baseline_bps,
+                min_edge_above_baseline_bps = %self.config.min_edge_above_baseline_bps,
+                "Signal skipped: edge below baseline (structural spread)"
+            );
+            return None;
+        }
+
         // P2-1: Calculate velocity multiplier for sizing
         let velocity_multiplier = self.config.velocity_multiplier(oracle_movement.change_bps);
 
@@ -705,11 +886,13 @@ impl DislocationDetector {
             oracle_change_bps = %oracle_movement.change_bps,
             %velocity_multiplier,
             %confidence,
+            %baseline_gap_bps,
+            %edge_above_baseline_bps,
             ?oracle_age_ms,
             "Dislocation detected (P0-24: HIP-3 2x fee applied)"
         );
 
-        Some(DislocationSignal::new(
+        let mut signal = DislocationSignal::new(
             key,
             OrderSide::Sell,
             raw_edge_bps,
@@ -722,7 +905,10 @@ impl DislocationDetector {
             fee_metadata,
             oracle_movement.change_bps,
             confidence,
-        ))
+        );
+        signal.baseline_gap_bps = baseline_gap_bps;
+        signal.edge_above_baseline_bps = edge_above_baseline_bps;
+        Some(signal)
     }
 
     /// P3-1: Calculate multi-factor confidence score (0.0-1.0).
@@ -1901,5 +2087,281 @@ mod tests {
         // Too stale - blocked
         let signal = detector.check(key, &snapshot, None, None, Some(1000));
         assert!(signal.is_none(), "Sell signal should be blocked: too stale");
+    }
+
+    // ---- Sprint 2: Oracle-Quote Baseline Tracker Tests ----
+
+    #[test]
+    fn test_baseline_tracking_warmup_does_not_filter() {
+        // During warmup (< min_samples), baseline should not filter signals
+        let config = DetectorConfig {
+            taker_fee_bps: dec!(4),
+            slippage_bps: dec!(2),
+            min_edge_bps: dec!(4),
+            oracle_direction_filter: false,
+            min_oracle_change_bps: dec!(0),
+            baseline_tracking: true,
+            baseline_alpha: dec!(0.001),
+            baseline_min_samples: 100,
+            min_edge_above_baseline_bps: dec!(5), // Would filter, but warmup
+            ..Default::default()
+        };
+        let detector = DislocationDetector::new(config).unwrap();
+        let key = test_key();
+
+        // Oracle=50000, bid=49900, ask=49940 → raw_edge ~12 bps
+        // mid=49920, gap = (50000-49920)/50000*10000 = 16 bps
+        // After warmup this would be filtered but during warmup no adjustment
+        let snapshot = make_snapshot(dec!(50000), dec!(49900), dec!(49940));
+
+        // First call: warmup (sample_count=1 < 100)
+        let signal = detector.check(key, &snapshot, None, None, None);
+        assert!(signal.is_some(), "Should pass during warmup period");
+
+        // Verify baseline is being tracked
+        let baseline = detector.baseline_gap_bps(&key);
+        assert!(baseline.is_some());
+        let (_, count) = baseline.unwrap();
+        assert!(count < 100);
+    }
+
+    #[test]
+    fn test_baseline_tracking_filters_structural_edge() {
+        // After warmup, baseline should subtract structural gap
+        let config = DetectorConfig {
+            taker_fee_bps: dec!(4),
+            slippage_bps: dec!(2),
+            min_edge_bps: dec!(4),
+            oracle_direction_filter: false,
+            min_oracle_change_bps: dec!(0),
+            baseline_tracking: true,
+            baseline_alpha: dec!(1), // alpha=1 means instant tracking (for testing)
+            baseline_min_samples: 2, // Only need 2 samples for testing
+            min_edge_above_baseline_bps: dec!(5),
+            ..Default::default()
+        };
+        let detector = DislocationDetector::new(config).unwrap();
+        let key = test_key();
+
+        // Oracle=50000, bid=49900, ask=49940
+        // raw_edge = (50000-49940)/50000*10000 = 12 bps
+        // mid=49920, gap = (50000-49920)/50000*10000 = 16 bps
+        let snapshot = make_snapshot(dec!(50000), dec!(49900), dec!(49940));
+
+        // Sample 1 & 2: build baseline to 16 bps
+        let _ = detector.check(key, &snapshot, None, None, None);
+        let _ = detector.check(key, &snapshot, None, None, None);
+
+        // Now: raw_edge=12, baseline=16, adjustment=max(0,16)=16
+        // edge_above_baseline = 12 - 16 = -4 < min(5) → FILTERED
+        let signal = detector.check(key, &snapshot, None, None, None);
+        assert!(
+            signal.is_none(),
+            "Should filter structural edge after baseline established"
+        );
+    }
+
+    #[test]
+    fn test_baseline_tracking_passes_genuine_edge() {
+        // Genuine edge (above baseline) should pass
+        let config = DetectorConfig {
+            taker_fee_bps: dec!(4),
+            slippage_bps: dec!(2),
+            min_edge_bps: dec!(4),
+            oracle_direction_filter: false,
+            min_oracle_change_bps: dec!(0),
+            baseline_tracking: true,
+            baseline_alpha: dec!(1),
+            baseline_min_samples: 2,
+            min_edge_above_baseline_bps: dec!(5),
+            ..Default::default()
+        };
+        let detector = DislocationDetector::new(config).unwrap();
+        let key = test_key();
+
+        // Establish baseline with small gap:
+        // oracle=50000, bid=49990, ask=49998 → mid=49994
+        // gap = (50000-49994)/50000*10000 ≈ 1.2 bps
+        // raw_edge(buy) = (50000-49998)/50000*10000 = 0.4 bps → below threshold → no signal
+        // But baseline still updates via update_oracle_baseline in check()
+        let baseline_snapshot = make_snapshot(dec!(50000), dec!(49990), dec!(49998));
+        let _ = detector.check(key, &baseline_snapshot, None, None, None);
+        let _ = detector.check(key, &baseline_snapshot, None, None, None);
+
+        // Verify baseline established (~1.2 bps)
+        let (gap, count) = detector.baseline_gap_bps(&key).unwrap();
+        assert_eq!(count, 2);
+        assert!(gap > dec!(0) && gap < dec!(3), "Baseline gap should be ~1.2 bps, got {gap}");
+
+        // Now genuine dislocation: oracle=50000, bid=49900, ask=49940
+        // raw_edge = 12 bps, baseline ~1.2 bps → edge_above = ~10.8 > min(5) → PASSES
+        let genuine_snapshot = make_snapshot(dec!(50000), dec!(49900), dec!(49940));
+        let signal = detector.check(key, &genuine_snapshot, None, None, None);
+        assert!(signal.is_some(), "Genuine edge should pass baseline filter");
+
+        let s = signal.unwrap();
+        assert!(
+            s.edge_above_baseline_bps > dec!(0),
+            "edge_above_baseline should be positive"
+        );
+        assert!(
+            s.edge_above_baseline_bps < s.raw_edge_bps,
+            "edge_above_baseline should be less than raw_edge"
+        );
+    }
+
+    #[test]
+    fn test_baseline_disabled_by_default() {
+        // Default config: baseline_tracking=false → no baseline fields populated
+        let config = DetectorConfig {
+            oracle_direction_filter: false,
+            min_oracle_change_bps: dec!(0),
+            ..Default::default()
+        };
+        let detector = DislocationDetector::new(config).unwrap();
+        let key = test_key();
+
+        // oracle=50000, bid=49900, ask=49940 → buy edge ~12 bps > default threshold 11
+        let snapshot = make_snapshot(dec!(50000), dec!(49900), dec!(49940));
+        let signal = detector.check(key, &snapshot, None, None, None);
+        assert!(signal.is_some(), "Signal should be generated with default config");
+
+        let s = signal.unwrap();
+        assert_eq!(s.baseline_gap_bps, dec!(0), "Baseline should be zero when disabled");
+        assert_eq!(
+            s.edge_above_baseline_bps, s.raw_edge_bps,
+            "edge_above_baseline should equal raw_edge when disabled"
+        );
+
+        // No baseline data should exist
+        assert!(detector.baseline_gap_bps(&key).is_none());
+    }
+
+    #[test]
+    fn test_baseline_observation_mode() {
+        // baseline_tracking=true but min_edge_above_baseline_bps=0 → track but don't filter
+        let config = DetectorConfig {
+            taker_fee_bps: dec!(4),
+            slippage_bps: dec!(2),
+            min_edge_bps: dec!(4),
+            oracle_direction_filter: false,
+            min_oracle_change_bps: dec!(0),
+            baseline_tracking: true,
+            baseline_alpha: dec!(1),
+            baseline_min_samples: 2,
+            min_edge_above_baseline_bps: dec!(0), // Observation mode
+            ..Default::default()
+        };
+        let detector = DislocationDetector::new(config).unwrap();
+        let key = test_key();
+
+        // oracle=50000, bid=49900, ask=49940 → raw_edge=12 bps
+        let snapshot = make_snapshot(dec!(50000), dec!(49900), dec!(49940));
+        let _ = detector.check(key, &snapshot, None, None, None);
+        let _ = detector.check(key, &snapshot, None, None, None);
+
+        // Even though edge ≈ baseline, min_edge_above_baseline_bps=0 so passes
+        let signal = detector.check(key, &snapshot, None, None, None);
+        assert!(
+            signal.is_some(),
+            "Observation mode should not filter signals"
+        );
+
+        // But baseline_gap_bps should be populated
+        let s = signal.unwrap();
+        assert!(
+            s.baseline_gap_bps > dec!(0),
+            "baseline_gap should be tracked in observation mode"
+        );
+    }
+
+    // ---- Sprint 2: Edge Velocity Gate Tests ----
+
+    #[test]
+    fn test_edge_velocity_gate_blocks_slow_edge() {
+        let config = DetectorConfig {
+            taker_fee_bps: dec!(4),
+            slippage_bps: dec!(2),
+            min_edge_bps: dec!(4),
+            oracle_direction_filter: false,
+            min_oracle_change_bps: dec!(0), // Pass basic velocity filter
+            edge_velocity_gate: true,
+            min_edge_velocity_bps: dec!(5), // Require 5 bps/tick
+            ..Default::default()
+        };
+        let detector = DislocationDetector::new(config).unwrap();
+        let key = test_key();
+
+        // First call: no previous oracle → change_bps=0 → blocked by velocity gate
+        let snapshot = make_snapshot(dec!(50000), dec!(49900), dec!(49940));
+        let signal = detector.check(key, &snapshot, None, None, None);
+        assert!(signal.is_none(), "First tick (0 velocity) should be blocked");
+
+        // Second call: tiny oracle move (2 bps) → still blocked
+        // 50010 vs 50000 = 10/50000*10000 = 2 bps
+        let snapshot2 = make_snapshot(dec!(50010), dec!(49900), dec!(49940));
+        let signal = detector.check(key, &snapshot2, None, None, None);
+        assert!(
+            signal.is_none(),
+            "Small oracle move (2 bps) should be blocked by velocity gate"
+        );
+
+        // Third call: large oracle move (10 bps)
+        // 50060 vs 50010 = 50/50010*10000 ≈ 9.998 bps → passes 5 bps gate
+        let snapshot3 = make_snapshot(dec!(50060), dec!(49900), dec!(49940));
+        let signal = detector.check(key, &snapshot3, None, None, None);
+        assert!(
+            signal.is_some(),
+            "Large oracle move (~10 bps) should pass velocity gate"
+        );
+    }
+
+    #[test]
+    fn test_edge_velocity_gate_disabled_by_default() {
+        let config = DetectorConfig {
+            oracle_direction_filter: false,
+            min_oracle_change_bps: dec!(0),
+            edge_velocity_gate: false, // Default: disabled
+            ..Default::default()
+        };
+        let detector = DislocationDetector::new(config).unwrap();
+        let key = test_key();
+
+        // Zero velocity (first tick) should still pass when gate is disabled
+        let snapshot = make_snapshot(dec!(50000), dec!(49900), dec!(49940));
+        let signal = detector.check(key, &snapshot, None, None, None);
+        assert!(
+            signal.is_some(),
+            "First tick should pass when velocity gate is disabled"
+        );
+    }
+
+    #[test]
+    fn test_edge_velocity_gate_sell_side() {
+        let config = DetectorConfig {
+            taker_fee_bps: dec!(4),
+            slippage_bps: dec!(2),
+            min_edge_bps: dec!(4),
+            oracle_direction_filter: false,
+            min_oracle_change_bps: dec!(0),
+            edge_velocity_gate: true,
+            min_edge_velocity_bps: dec!(5),
+            ..Default::default()
+        };
+        let detector = DislocationDetector::new(config).unwrap();
+        let key = test_key();
+
+        // First tick: establish oracle
+        let snapshot1 = make_snapshot(dec!(50000), dec!(50060), dec!(50080));
+        let _ = detector.check(key, &snapshot1, None, None, None);
+
+        // Second tick: large drop (10 bps) → sell signal should pass
+        let snapshot2 = make_snapshot(dec!(49950), dec!(50060), dec!(50080));
+        let signal = detector.check(key, &snapshot2, None, None, None);
+        assert!(
+            signal.is_some(),
+            "Large oracle drop should pass velocity gate for sell"
+        );
+        assert_eq!(signal.unwrap().side, OrderSide::Sell);
     }
 }

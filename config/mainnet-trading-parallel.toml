@@ -361,6 +361,23 @@ spread_threshold_multiplier = 1.5  # effective_threshold = spread_ewma × 1.5
 # Low-confidence signals get 50% size, high-confidence get full size
 confidence_sizing = true
 #
+# Sprint 2: Oracle-Quote Baseline Tracker
+# Tracks structural oracle-quote gap per market using EWMA.
+# Subtracts baseline from raw edge to isolate "genuine" edge.
+# Analysis: 74% of trades are structural_spread (constant gap, 15.7% WR).
+# Start in observation mode (min_edge=0) to log baselines before filtering.
+baseline_tracking = true
+baseline_alpha = 0.001              # Slow EWMA (~1000 tick half-life)
+baseline_min_samples = 100          # Warmup: 100 updates before trusting baseline
+min_edge_above_baseline_bps = 0     # 0 = observation mode (track but don't filter)
+#
+# Sprint 2: Edge Velocity Gate
+# Requires minimum oracle movement speed for signal generation.
+# Filters static/structural edges where oracle barely moved.
+# Start disabled until baseline observation data is collected.
+edge_velocity_gate = false
+min_edge_velocity_bps = 5           # 5 bps/tick minimum oracle speed
+#
 # Quote Lag Gate (PR-5: True Stale Liquidity)
 # Only generate signals when oracle changed within this time window.
 # Both set to 0 = disabled (backwards compatible)

@@ -71,6 +71,16 @@ pub struct DislocationSignal {
     /// Used for confidence-based sizing when enabled.
     #[serde(default)]
     pub confidence_score: Decimal,
+    /// Structural oracle-quote gap for this market (Sprint 2).
+    /// Signed bps: positive = oracle typically above mid, negative = below.
+    /// Only populated when baseline_tracking is enabled.
+    #[serde(default)]
+    pub baseline_gap_bps: Decimal,
+    /// Edge remaining after subtracting structural baseline (Sprint 2).
+    /// `raw_edge_bps - baseline_adjustment`. Represents "genuine" edge.
+    /// Only populated when baseline_tracking is enabled.
+    #[serde(default)]
+    pub edge_above_baseline_bps: Decimal,
 }
 
 impl DislocationSignal {
@@ -108,6 +118,8 @@ impl DislocationSignal {
             fee_metadata,
             oracle_velocity_bps,
             confidence_score,
+            baseline_gap_bps: Decimal::ZERO,
+            edge_above_baseline_bps: Decimal::ZERO,
         }
     }
 

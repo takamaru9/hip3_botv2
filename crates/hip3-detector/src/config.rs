@@ -142,6 +142,57 @@ pub struct DetectorConfig {
     /// consecutive moves (0.2), book depth (0.15), spread tightness (0.15).
     #[serde(default)]
     pub confidence_sizing: bool,
+
+    // ---- Sprint 2: Oracle-Quote Baseline Tracker ----
+    /// Enable oracle-quote baseline tracking (Sprint 2).
+    ///
+    /// Tracks the structural gap between oracle price and quote mid-price
+    /// per market using an EWMA. When enabled, the structural gap is
+    /// subtracted from raw edge to compute `edge_above_baseline`.
+    ///
+    /// Backtest: 74% of trades are "structural_spread" (constant oracle-quote gap).
+    /// Baseline tracking filters these, keeping only genuine edge (100% WR).
+    #[serde(default)]
+    pub baseline_tracking: bool,
+
+    /// EWMA alpha for baseline gap tracking.
+    ///
+    /// Smaller = more stable estimate. 0.001 = ~1000 tick half-life.
+    /// The baseline should change very slowly to capture the "normal" gap.
+    #[serde(default = "default_baseline_alpha")]
+    pub baseline_alpha: Decimal,
+
+    /// Minimum samples before baseline is used for edge adjustment.
+    ///
+    /// Until this many updates are collected, raw edge is used (no adjustment).
+    /// Prevents false filtering during startup when baseline is noisy.
+    #[serde(default = "default_baseline_min_samples")]
+    pub baseline_min_samples: u64,
+
+    /// Minimum edge above baseline to generate signal (bps).
+    ///
+    /// Requires `baseline_tracking = true`.
+    /// Set to 0 to still track baseline but not filter on it
+    /// (useful for observation/logging before enabling filtering).
+    #[serde(default)]
+    pub min_edge_above_baseline_bps: Decimal,
+
+    // ---- Sprint 2: Edge Velocity Gate ----
+    /// Enable edge velocity gate (Sprint 2).
+    ///
+    /// Requires minimum oracle movement speed for signal generation.
+    /// Static edges (constant oracle-quote gap with small/no oracle movement)
+    /// are more likely structural and are rejected.
+    #[serde(default)]
+    pub edge_velocity_gate: bool,
+
+    /// Minimum oracle velocity in bps (per tick) to accept signal.
+    ///
+    /// Requires `edge_velocity_gate = true`.
+    /// Higher than `min_oracle_change_bps` to provide stricter velocity filtering.
+    /// Default: 5 bps (based on strategy design report recommendation).
+    #[serde(default = "default_min_edge_velocity_bps")]
+    pub min_edge_velocity_bps: Decimal,
 }
 
 fn default_min_order_notional() -> Decimal {
@@ -188,6 +239,18 @@ fn default_spread_ewma_alpha() -> Decimal {
     Decimal::new(5, 2) // 0.05 = slow adaptation (~20 tick half-life)
 }
 
+fn default_baseline_alpha() -> Decimal {
+    Decimal::new(1, 3) // 0.001 = ~1000 tick half-life (very slow adaptation)
+}
+
+fn default_baseline_min_samples() -> u64 {
+    100 // Require 100 updates before baseline is trusted
+}
+
+fn default_min_edge_velocity_bps() -> Decimal {
+    Decimal::from(5) // 5 bps/tick minimum oracle movement speed
+}
+
 impl Default for DetectorConfig {
     fn default() -> Self {
         Self {
@@ -210,6 +273,12 @@ impl Default for DetectorConfig {
             spread_threshold_multiplier: default_spread_threshold_multiplier(), // 1.5x
             spread_ewma_alpha: default_spread_ewma_alpha(),             // 0.05
             confidence_sizing: false,                                   // Disabled by default
+            baseline_tracking: false,                                   // Disabled by default
+            baseline_alpha: default_baseline_alpha(),                   // 0.001
+            baseline_min_samples: default_baseline_min_samples(),       // 100
+            min_edge_above_baseline_bps: Decimal::ZERO,                 // 0 = no filtering
+            edge_velocity_gate: false,                                  // Disabled by default
+            min_edge_velocity_bps: default_min_edge_velocity_bps(),     // 5 bps
         }
     }
 }

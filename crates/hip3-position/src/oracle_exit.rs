@@ -41,7 +41,7 @@ use tracing::{debug, info, trace, warn};
 use rust_decimal::Decimal;
 
 use hip3_core::types::MarketSnapshot;
-use hip3_core::{MarketKey, OrderSide, PendingOrder};
+use hip3_core::{ExitProfile, MarketKey, OrderSide, PendingOrder};
 use hip3_feed::OracleMovementTracker;
 
 use crate::time_stop::FlattenOrderBuilder;
@@ -71,6 +71,8 @@ struct OracleBaseline {
     best_pnl_bps: Decimal,
     /// P3-2: Whether trailing stop has been activated.
     trail_activated: bool,
+    /// Sprint 4 P2-F: Exit profile for this position.
+    exit_profile: ExitProfile,
 }
 
 // ============================================================================
@@ -140,6 +142,13 @@ pub struct OracleExitConfig {
     /// Exit when oracle retraces this much from best PnL since entry.
     #[serde(default = "default_trail_bps")]
     pub trail_bps: u32,
+
+    /// Sprint 4 P2-F: Enable exit profile overrides.
+    ///
+    /// When enabled, exit parameters are adjusted per-position based on
+    /// the ExitProfile assigned at signal generation time.
+    #[serde(default)]
+    pub exit_profile_enabled: bool,
 }
 
 fn default_enabled() -> bool {
@@ -192,6 +201,7 @@ impl Default for OracleExitConfig {
             trailing_stop: false,
             activation_bps: default_activation_bps(),
             trail_bps: default_trail_bps(),
+            exit_profile_enabled: false,
         }
     }
 }
@@ -225,6 +235,15 @@ pub enum OracleExitReason {
         /// Current PnL in bps when trail triggered.
         current_pnl_bps: Decimal,
     },
+
+    /// Sprint 4 P2-F: Profile-specific time stop.
+    /// Position exceeded the profile's time limit (Scalper=5s, Runner=120s).
+    ProfileTimeStop {
+        /// How long the position was held (ms).
+        held_ms: u64,
+        /// Profile time limit (ms).
+        limit_ms: u64,
+    },
 }
 
 impl std::fmt::Display for OracleExitReason {
@@ -244,6 +263,13 @@ impl std::fmt::Display for OracleExitReason {
                     f,
                     "TrailingStop(best={} bps, current={} bps)",
                     best_pnl_bps, current_pnl_bps
+                )
+            }
+            Self::ProfileTimeStop { held_ms, limit_ms } => {
+                write!(
+                    f,
+                    "ProfileTimeStop(held={}ms, limit={}ms)",
+                    held_ms, limit_ms
                 )
             }
         }
@@ -342,12 +368,14 @@ impl OracleExitWatcher {
     /// * `side` - Position side (Buy = long, Sell = short)
     /// * `entry_edge_bps` - P2-5: Entry edge in basis points (None if unknown)
     /// * `entry_oracle_px` - P3-2: Oracle price at entry (None if unknown, e.g. startup sync)
+    /// * `exit_profile` - Sprint 4 P2-F: Exit profile for this position
     pub fn on_position_opened(
         &self,
         key: MarketKey,
         side: OrderSide,
         entry_edge_bps: Option<Decimal>,
         entry_oracle_px: Option<Decimal>,
+        exit_profile: ExitProfile,
     ) {
         let consecutive_with = self.oracle_tracker.consecutive_with(&key, side);
         let consecutive_against = self.oracle_tracker.consecutive_against(&key, side);
@@ -359,6 +387,7 @@ impl OracleExitWatcher {
             entry_oracle_px,
             best_pnl_bps: Decimal::ZERO,
             trail_activated: false,
+            exit_profile,
         };
 
         debug!(
@@ -368,6 +397,7 @@ impl OracleExitWatcher {
             baseline_against = consecutive_against,
             entry_edge_bps = ?entry_edge_bps,
             entry_oracle_px = ?entry_oracle_px,
+            %exit_profile,
             "OracleExitWatcher: recorded position baseline"
         );
 
@@ -430,7 +460,25 @@ impl OracleExitWatcher {
             return;
         }
 
-        // 5. P3-2: Update trailing stop state and check for trail exit
+        // 5. Sprint 4 P2-F: Profile-based time stop (early exit for Scalper)
+        if self.config.exit_profile_enabled {
+            if let Some(time_stop_ms) = self.profile_time_stop_ms(&key) {
+                if held_ms >= time_stop_ms {
+                    {
+                        let mut flattening = self.local_flattening.write();
+                        flattening.insert(key);
+                    }
+                    let reason = OracleExitReason::ProfileTimeStop {
+                        held_ms,
+                        limit_ms: time_stop_ms,
+                    };
+                    self.trigger_exit(&position, reason, snapshot, now_ms);
+                    return;
+                }
+            }
+        }
+
+        // 6. P3-2: Update trailing stop state and check for trail exit
         if self.config.trailing_stop {
             if let Some(reason) = self.update_trailing_state(&key, &position, snapshot) {
                 {
@@ -442,7 +490,7 @@ impl OracleExitWatcher {
             }
         }
 
-        // 6. Check oracle-based exit condition (consecutive moves)
+        // 7. Check oracle-based exit condition (consecutive moves)
         if let Some(reason) = self.check_oracle_exit(&position) {
             // 7. Mark as flattening BEFORE sending to prevent duplicates
             {
@@ -459,12 +507,20 @@ impl OracleExitWatcher {
     ///
     /// Updates best PnL tracking and checks activation/exit conditions.
     /// Returns exit reason if trailing stop fires.
+    ///
+    /// Sprint 4 P2-F: Profile-based trailing stop parameter overrides.
+    /// - Runner: activation=3, trail=2 (tighter, let profits run)
+    /// - Standard: uses config defaults
+    /// - Scalper: trailing stop disabled entirely
     fn update_trailing_state(
         &self,
         key: &MarketKey,
         position: &Position,
         snapshot: &MarketSnapshot,
     ) -> Option<OracleExitReason> {
+        // Sprint 4 P2-F: Check profile trailing params (Scalper disables trailing)
+        let (activation_bps, trail_bps) = self.profile_trailing_params(key)?;
+
         let oracle_px = snapshot.ctx.oracle.oracle_px.inner();
         if oracle_px.is_zero() {
             return None;
@@ -489,24 +545,24 @@ impl OracleExitWatcher {
             baseline.best_pnl_bps = current_pnl_bps;
         }
 
-        // Check activation
+        // Check activation (using profile-adjusted threshold)
         if !baseline.trail_activated {
-            if baseline.best_pnl_bps >= Decimal::from(self.config.activation_bps) {
+            if baseline.best_pnl_bps >= Decimal::from(activation_bps) {
                 baseline.trail_activated = true;
                 info!(
                     market = %key,
                     side = ?position.side,
                     best_pnl_bps = %baseline.best_pnl_bps,
-                    activation_bps = self.config.activation_bps,
+                    activation_bps = activation_bps,
                     "OracleExitWatcher: trailing stop activated"
                 );
             }
             return None; // Not yet activated
         }
 
-        // Check trail exit: retrace from best
+        // Check trail exit: retrace from best (using profile-adjusted trail)
         let retrace_bps = baseline.best_pnl_bps - current_pnl_bps;
-        if retrace_bps >= Decimal::from(self.config.trail_bps) {
+        if retrace_bps >= Decimal::from(trail_bps) {
             return Some(OracleExitReason::TrailingStop {
                 best_pnl_bps: baseline.best_pnl_bps,
                 current_pnl_bps,
@@ -563,22 +619,25 @@ impl OracleExitWatcher {
             "OracleExitWatcher: checking exit condition"
         );
 
-        // P2-5: Compute effective exit_against_moves based on entry edge
+        // Sprint 4 P2-F: Start with profile-based exit_against_moves
+        let base_exit_against = self.profile_exit_against_moves(key);
+
+        // P2-5: Further adjust based on entry edge (dynamic thresholds)
         let effective_exit_against = if self.config.dynamic_thresholds {
             if let Some(edge) = baseline.entry_edge_bps {
                 if edge >= Decimal::from(self.config.high_edge_bps) {
                     // High edge entry → more tolerant (allow extra move)
-                    self.config.exit_against_moves + 1
+                    base_exit_against + 1
                 } else {
-                    // Normal or low edge → use default (fast loss cut)
-                    self.config.exit_against_moves
+                    // Normal or low edge → use profile base
+                    base_exit_against
                 }
             } else {
-                // Unknown edge → use default
-                self.config.exit_against_moves
+                // Unknown edge → use profile base
+                base_exit_against
             }
         } else {
-            self.config.exit_against_moves
+            base_exit_against
         };
 
         // Check for loss cut: oracle moving against us since entry
@@ -632,6 +691,10 @@ impl OracleExitWatcher {
                 // Trailing stop counts as a catchup (profit-take variant)
                 self.catchup_count.fetch_add(1, Ordering::Relaxed);
             }
+            OracleExitReason::ProfileTimeStop { .. } => {
+                // Profile time stop: counts as reversal (defensive exit)
+                self.reversal_count.fetch_add(1, Ordering::Relaxed);
+            }
         }
 
         // P1-4: Record exit metrics
@@ -639,6 +702,7 @@ impl OracleExitWatcher {
             OracleExitReason::OracleReversal { .. } => "OracleReversal",
             OracleExitReason::OracleCatchup { .. } => "OracleCatchup",
             OracleExitReason::TrailingStop { .. } => "TrailingStop",
+            OracleExitReason::ProfileTimeStop { .. } => "ProfileTimeStop",
         };
         let market_str = position.market.to_string();
         hip3_telemetry::Metrics::position_holding_time(
@@ -695,6 +759,63 @@ impl OracleExitWatcher {
             Err(mpsc::error::TrySendError::Closed(_)) => {
                 warn!("OracleExitWatcher: flatten channel closed");
             }
+        }
+    }
+
+    /// Sprint 4 P2-F: Get profile-specific time stop in milliseconds.
+    ///
+    /// Returns `Some(ms)` for profiles with a hard time limit:
+    /// - Scalper: 5000ms (5s) - marginal edge, exit quickly
+    /// - Runner: 120000ms (120s) - let profits run, but not forever
+    /// - Standard: None - uses the global TimeStop config
+    fn profile_time_stop_ms(&self, key: &MarketKey) -> Option<u64> {
+        let baselines = self.position_baselines.read();
+        let baseline = baselines.get(key)?;
+        match baseline.exit_profile {
+            ExitProfile::Scalper => Some(5_000),
+            ExitProfile::Runner => Some(120_000),
+            ExitProfile::Standard => None,
+        }
+    }
+
+    /// Sprint 4 P2-F: Get profile-based exit_against_moves override.
+    ///
+    /// Returns adjusted exit_against_moves based on exit profile:
+    /// - Runner: config.exit_against_moves + 1 (more tolerant)
+    /// - Standard: config.exit_against_moves (default)
+    /// - Scalper: max(1, config.exit_against_moves - 1) (faster loss cut)
+    fn profile_exit_against_moves(&self, key: &MarketKey) -> u32 {
+        if !self.config.exit_profile_enabled {
+            return self.config.exit_against_moves;
+        }
+        let baselines = self.position_baselines.read();
+        match baselines.get(key).map(|b| b.exit_profile) {
+            Some(ExitProfile::Runner) => self.config.exit_against_moves + 1,
+            Some(ExitProfile::Scalper) => self
+                .config
+                .exit_against_moves
+                .max(1)
+                .saturating_sub(1)
+                .max(1),
+            _ => self.config.exit_against_moves,
+        }
+    }
+
+    /// Sprint 4 P2-F: Get profile-based trailing stop params override.
+    ///
+    /// Returns (activation_bps, trail_bps) adjusted by profile:
+    /// - Runner: reduced activation (3 bps), tighter trail (2 bps)
+    /// - Standard: config defaults
+    /// - Scalper: trailing stop disabled (returns None)
+    fn profile_trailing_params(&self, key: &MarketKey) -> Option<(u32, u32)> {
+        if !self.config.exit_profile_enabled {
+            return Some((self.config.activation_bps, self.config.trail_bps));
+        }
+        let baselines = self.position_baselines.read();
+        match baselines.get(key).map(|b| b.exit_profile) {
+            Some(ExitProfile::Runner) => Some((3, 2)),
+            Some(ExitProfile::Scalper) => None, // No trailing for scalper
+            _ => Some((self.config.activation_bps, self.config.trail_bps)),
         }
     }
 
@@ -837,6 +958,15 @@ mod tests {
             format!("{}", trail),
             "TrailingStop(best=8 bps, current=4 bps)"
         );
+
+        let profile_ts = OracleExitReason::ProfileTimeStop {
+            held_ms: 6000,
+            limit_ms: 5000,
+        };
+        assert_eq!(
+            format!("{}", profile_ts),
+            "ProfileTimeStop(held=6000ms, limit=5000ms)"
+        );
     }
 
     #[test]
@@ -887,6 +1017,7 @@ mod tests {
             entry_oracle_px: Some(dec!(100)),
             best_pnl_bps: Decimal::ZERO,
             trail_activated: false,
+            exit_profile: ExitProfile::Standard,
         };
         assert_eq!(baseline.entry_edge_bps, Some(Decimal::from(45)));
         assert_eq!(baseline.entry_oracle_px, Some(dec!(100)));
@@ -899,9 +1030,11 @@ mod tests {
             entry_oracle_px: None,
             best_pnl_bps: Decimal::ZERO,
             trail_activated: false,
+            exit_profile: ExitProfile::Runner,
         };
         assert_eq!(baseline_no_edge.entry_edge_bps, None);
         assert_eq!(baseline_no_edge.entry_oracle_px, None);
+        assert_eq!(baseline_no_edge.exit_profile, ExitProfile::Runner);
     }
 
     #[test]
@@ -932,5 +1065,55 @@ mod tests {
         assert!(config.trailing_stop);
         assert_eq!(config.activation_bps, 8);
         assert_eq!(config.trail_bps, 4);
+    }
+
+    #[test]
+    fn test_exit_profile_config_serde_backward_compat() {
+        // Existing TOML without exit_profile_enabled should default to false
+        let toml = r#"
+            enabled = true
+            exit_against_moves = 2
+            exit_with_moves = 3
+        "#;
+        let config: OracleExitConfig = toml::from_str(toml).unwrap();
+        assert!(!config.exit_profile_enabled);
+    }
+
+    #[test]
+    fn test_exit_profile_config_enabled() {
+        let toml = r#"
+            enabled = true
+            exit_against_moves = 2
+            exit_with_moves = 3
+            exit_profile_enabled = true
+        "#;
+        let config: OracleExitConfig = toml::from_str(toml).unwrap();
+        assert!(config.exit_profile_enabled);
+    }
+
+    #[test]
+    fn test_oracle_baseline_exit_profiles() {
+        // Test all three exit profiles in OracleBaseline
+        let scalper = OracleBaseline {
+            consecutive_with: 0,
+            consecutive_against: 0,
+            entry_edge_bps: Some(dec!(15)),
+            entry_oracle_px: Some(dec!(100)),
+            best_pnl_bps: Decimal::ZERO,
+            trail_activated: false,
+            exit_profile: ExitProfile::Scalper,
+        };
+        assert_eq!(scalper.exit_profile, ExitProfile::Scalper);
+
+        let runner = OracleBaseline {
+            consecutive_with: 0,
+            consecutive_against: 0,
+            entry_edge_bps: Some(dec!(50)),
+            entry_oracle_px: Some(dec!(100)),
+            best_pnl_bps: Decimal::ZERO,
+            trail_activated: false,
+            exit_profile: ExitProfile::Runner,
+        };
+        assert_eq!(runner.exit_profile, ExitProfile::Runner);
     }
 }

@@ -19,6 +19,7 @@ use crate::error::DetectorError;
 use crate::fee::{FeeCalculator, UserFees};
 use crate::signal::{DislocationSignal, SignalStrength};
 use hip3_core::types::MarketSnapshot;
+use hip3_core::ExitProfile;
 use hip3_core::{MarketKey, OrderSide, Price, Size};
 use hip3_feed::{MoveDirection, OracleMovementTracker};
 use rust_decimal::Decimal;
@@ -444,8 +445,13 @@ impl DislocationDetector {
         }
 
         // Use per-market threshold if provided, otherwise use FeeCalculator's total_cost
-        let total_cost =
+        let base_cost =
             threshold_override_bps.unwrap_or_else(|| self.fee_calculator.total_cost_bps());
+
+        // Sprint 4 P2-G: Apply session-aware threshold multiplier
+        let (session_threshold_mult, session_sizing_mult) = self.config.session_multipliers();
+        let total_cost = base_cost * session_threshold_mult;
+
         let net_edge_bps = raw_edge_bps - total_cost;
 
         // Check if edge is sufficient
@@ -605,6 +611,10 @@ impl DislocationDetector {
             return None;
         }
 
+        // Sprint 4 P2-F: Select exit profile based on signal quality
+        let exit_profile =
+            self.select_exit_profile(confidence, oracle_movement.change_bps, consecutive_up);
+
         // P3-1: confidence_multiplier = 0.5 + 0.5 * confidence (range: 0.5-1.0)
         let confidence_multiplier = if self.config.confidence_sizing {
             Decimal::new(5, 1) + Decimal::new(5, 1) * confidence
@@ -619,6 +629,14 @@ impl DislocationDetector {
             velocity_multiplier,
             confidence_multiplier,
         );
+
+        // Sprint 4 P2-G: Apply session sizing multiplier
+        let suggested_size = if session_sizing_mult != Decimal::ONE {
+            let adjusted = suggested_size.inner() * session_sizing_mult;
+            hip3_core::Size::new(adjusted)
+        } else {
+            suggested_size
+        };
 
         // Skip signal if size is zero (low liquidity)
         if suggested_size.is_zero() {
@@ -647,6 +665,7 @@ impl DislocationDetector {
             oracle_change_bps = %oracle_movement.change_bps,
             %velocity_multiplier,
             %confidence,
+            %exit_profile,
             %baseline_gap_bps,
             %edge_above_baseline_bps,
             ?oracle_age_ms,
@@ -669,6 +688,7 @@ impl DislocationDetector {
         );
         signal.baseline_gap_bps = baseline_gap_bps;
         signal.edge_above_baseline_bps = edge_above_baseline_bps;
+        signal.exit_profile = exit_profile;
         Some(signal)
     }
 
@@ -714,8 +734,13 @@ impl DislocationDetector {
         }
 
         // Use per-market threshold if provided, otherwise use FeeCalculator's total_cost
-        let total_cost =
+        let base_cost =
             threshold_override_bps.unwrap_or_else(|| self.fee_calculator.total_cost_bps());
+
+        // Sprint 4 P2-G: Apply session-aware threshold multiplier
+        let (session_threshold_mult, session_sizing_mult) = self.config.session_multipliers();
+        let total_cost = base_cost * session_threshold_mult;
+
         let net_edge_bps = raw_edge_bps - total_cost;
 
         // Check if edge is sufficient
@@ -874,6 +899,10 @@ impl DislocationDetector {
             return None;
         }
 
+        // Sprint 4 P2-F: Select exit profile based on signal quality
+        let exit_profile =
+            self.select_exit_profile(confidence, oracle_movement.change_bps, consecutive_down);
+
         let confidence_multiplier = if self.config.confidence_sizing {
             Decimal::new(5, 1) + Decimal::new(5, 1) * confidence
         } else {
@@ -886,6 +915,14 @@ impl DislocationDetector {
             velocity_multiplier,
             confidence_multiplier,
         );
+
+        // Sprint 4 P2-G: Apply session sizing multiplier
+        let suggested_size = if session_sizing_mult != Decimal::ONE {
+            let adjusted = suggested_size.inner() * session_sizing_mult;
+            hip3_core::Size::new(adjusted)
+        } else {
+            suggested_size
+        };
 
         // Skip signal if size is zero (low liquidity)
         if suggested_size.is_zero() {
@@ -914,6 +951,7 @@ impl DislocationDetector {
             oracle_change_bps = %oracle_movement.change_bps,
             %velocity_multiplier,
             %confidence,
+            %exit_profile,
             %baseline_gap_bps,
             %edge_above_baseline_bps,
             ?oracle_age_ms,
@@ -936,7 +974,38 @@ impl DislocationDetector {
         );
         signal.baseline_gap_bps = baseline_gap_bps;
         signal.edge_above_baseline_bps = edge_above_baseline_bps;
+        signal.exit_profile = exit_profile;
         Some(signal)
+    }
+
+    /// Sprint 4 P2-F: Select exit profile based on signal quality metrics.
+    ///
+    /// Profile selection criteria:
+    /// - Runner: confidence >= 0.7 AND velocity > 15 bps AND consecutive >= 3
+    /// - Standard: confidence >= 0.4 AND velocity > 5 bps
+    /// - Scalper: everything else
+    ///
+    /// Returns ExitProfile::Standard when exit_profile_enabled is false.
+    fn select_exit_profile(
+        &self,
+        confidence: Decimal,
+        velocity_bps: Decimal,
+        consecutive_moves: u32,
+    ) -> ExitProfile {
+        if !self.config.exit_profile_enabled {
+            return ExitProfile::Standard;
+        }
+
+        if confidence >= Decimal::new(7, 1)
+            && velocity_bps > Decimal::from(15)
+            && consecutive_moves >= 3
+        {
+            ExitProfile::Runner
+        } else if confidence >= Decimal::new(4, 1) && velocity_bps > Decimal::from(5) {
+            ExitProfile::Standard
+        } else {
+            ExitProfile::Scalper
+        }
     }
 
     /// P3-1: Calculate multi-factor confidence score (0.0-1.0).

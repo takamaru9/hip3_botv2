@@ -141,6 +141,33 @@ impl AsRef<str> for ClientOrderId {
     }
 }
 
+/// Exit profile for position management (Sprint 4 P2-F).
+///
+/// Determines how aggressively the position will be managed:
+/// - Runner: High-quality signal, let profits run with trailing stop
+/// - Standard: Normal signal, balanced exit parameters
+/// - Scalper: Marginal signal, quick exit to minimize losses
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+pub enum ExitProfile {
+    /// High-quality edge: wide trailing stop, tolerant loss cut.
+    Runner,
+    /// Standard edge: default exit parameters.
+    #[default]
+    Standard,
+    /// Marginal edge: aggressive loss cut, quick time stop.
+    Scalper,
+}
+
+impl fmt::Display for ExitProfile {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Runner => write!(f, "Runner"),
+            Self::Standard => write!(f, "Standard"),
+            Self::Scalper => write!(f, "Scalper"),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

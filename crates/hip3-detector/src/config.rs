@@ -1,5 +1,6 @@
 //! Detector configuration.
 
+use chrono::Timelike;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
@@ -204,6 +205,43 @@ pub struct DetectorConfig {
     /// Recommended: 0.3-0.4 to filter low-quality signals.
     #[serde(default)]
     pub min_confidence_entry: Decimal,
+
+    // ---- Sprint 4: Exit Profile (P2-F) ----
+    /// Enable exit profile assignment (Sprint 4).
+    ///
+    /// When enabled, each signal is assigned an ExitProfile (Runner/Standard/Scalper)
+    /// based on confidence, velocity, and consecutive moves. The profile determines
+    /// how aggressively the position is managed (exit_against_moves, trailing, time_stop).
+    #[serde(default)]
+    pub exit_profile_enabled: bool,
+
+    // ---- Sprint 4: Session-Aware Parameters (P2-G) ----
+    /// Enable session-aware threshold/sizing multipliers (Sprint 4).
+    ///
+    /// When enabled, applies multipliers based on US market session:
+    /// - MarketOpen (14:30-16:00 UTC): highest volatility, most conservative
+    /// - USActive (16:00-21:00 UTC): elevated volatility
+    /// - Other hours: default parameters
+    #[serde(default)]
+    pub session_aware: bool,
+
+    /// Threshold multiplier during US market open (14:30-16:00 UTC).
+    /// Higher = more conservative (require larger edge).
+    #[serde(default = "default_market_open_threshold_mult")]
+    pub market_open_threshold_mult: Decimal,
+
+    /// Threshold multiplier during US active hours (16:00-21:00 UTC).
+    #[serde(default = "default_us_active_threshold_mult")]
+    pub us_active_threshold_mult: Decimal,
+
+    /// Sizing multiplier during US market open (14:30-16:00 UTC).
+    /// Lower = smaller positions during volatile period.
+    #[serde(default = "default_market_open_sizing_mult")]
+    pub market_open_sizing_mult: Decimal,
+
+    /// Sizing multiplier during US active hours (16:00-21:00 UTC).
+    #[serde(default = "default_us_active_sizing_mult")]
+    pub us_active_sizing_mult: Decimal,
 }
 
 fn default_min_order_notional() -> Decimal {
@@ -262,6 +300,22 @@ fn default_min_edge_velocity_bps() -> Decimal {
     Decimal::from(5) // 5 bps/tick minimum oracle movement speed
 }
 
+fn default_market_open_threshold_mult() -> Decimal {
+    Decimal::from(2) // 2.0x threshold during market open
+}
+
+fn default_us_active_threshold_mult() -> Decimal {
+    Decimal::new(15, 1) // 1.5x threshold during US active hours
+}
+
+fn default_market_open_sizing_mult() -> Decimal {
+    Decimal::new(5, 1) // 0.5x sizing during market open
+}
+
+fn default_us_active_sizing_mult() -> Decimal {
+    Decimal::new(75, 2) // 0.75x sizing during US active hours
+}
+
 impl Default for DetectorConfig {
     fn default() -> Self {
         Self {
@@ -291,6 +345,12 @@ impl Default for DetectorConfig {
             edge_velocity_gate: false,                                  // Disabled by default
             min_edge_velocity_bps: default_min_edge_velocity_bps(),     // 5 bps
             min_confidence_entry: Decimal::ZERO,                        // 0 = disabled
+            exit_profile_enabled: false,                                // Disabled by default
+            session_aware: false,                                       // Disabled by default
+            market_open_threshold_mult: default_market_open_threshold_mult(), // 2.0x
+            us_active_threshold_mult: default_us_active_threshold_mult(), // 1.5x
+            market_open_sizing_mult: default_market_open_sizing_mult(), // 0.5x
+            us_active_sizing_mult: default_us_active_sizing_mult(),     // 0.75x
         }
     }
 }
@@ -345,6 +405,41 @@ impl DetectorConfig {
     /// Sell when: bid >= oracle * (1 + threshold/10000)
     pub fn sell_threshold(&self) -> Decimal {
         Decimal::ONE + self.total_cost_bps() / Decimal::from(10000)
+    }
+
+    /// Determine US market session from current UTC hour/minute.
+    ///
+    /// Sessions (all UTC):
+    /// - MarketOpen: 14:30-16:00 (US market open, highest volatility)
+    /// - USActive: 16:00-21:00 (US regular hours)
+    /// - Other: all other times (pre-market, after hours, overnight)
+    ///
+    /// Returns (threshold_mult, sizing_mult) for the current session.
+    pub fn session_multipliers(&self) -> (Decimal, Decimal) {
+        if !self.session_aware {
+            return (Decimal::ONE, Decimal::ONE);
+        }
+
+        let now = chrono::Utc::now();
+        let hour = now.hour();
+        let minute = now.minute();
+        let time_minutes = hour * 60 + minute; // Minutes since midnight UTC
+
+        // MarketOpen: 14:30-16:00 UTC (870-960 minutes)
+        if (870..960).contains(&time_minutes) {
+            return (
+                self.market_open_threshold_mult,
+                self.market_open_sizing_mult,
+            );
+        }
+
+        // USActive: 16:00-21:00 UTC (960-1260 minutes)
+        if (960..1260).contains(&time_minutes) {
+            return (self.us_active_threshold_mult, self.us_active_sizing_mult);
+        }
+
+        // Other hours: default multipliers
+        (Decimal::ONE, Decimal::ONE)
     }
 
     /// Calculate velocity-based sizing multiplier (P2-1).

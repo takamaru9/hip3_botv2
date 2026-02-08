@@ -15,7 +15,8 @@ use crate::error::{AppError, AppResult};
 use alloy::primitives::Address;
 use chrono::Utc;
 use hip3_core::{
-    AssetId, ClientOrderId, DexId, MarketKey, OrderSide, OrderState, PendingOrder, Price, Size,
+    AssetId, ClientOrderId, DexId, ExitProfile, MarketKey, OrderSide, OrderState, PendingOrder,
+    Price, Size,
 };
 use hip3_dashboard::{DashboardState, SignalSender, SignalSnapshot};
 use hip3_detector::{CrossDurationTracker, DislocationDetector, DislocationSignal};
@@ -142,6 +143,9 @@ pub struct Application {
     /// P2-5: Cache of last signal edge_bps per market for dynamic exit thresholds.
     /// Populated at signal time, consumed at fill time for on_position_opened.
     last_signal_edge: RwLock<HashMap<MarketKey, Decimal>>,
+    /// Sprint 4 P2-F: Cache of last signal ExitProfile per market.
+    /// Populated at signal time, consumed at fill time for on_position_opened.
+    last_signal_profile: RwLock<HashMap<MarketKey, ExitProfile>>,
     /// Sprint 3 P2-E: Market health tracker for auto-disable/re-enable.
     market_health_tracker: Option<Arc<hip3_risk::MarketHealthTracker>>,
 }
@@ -229,6 +233,8 @@ impl Application {
             correlation_cooldown_gate: None,
             // P2-5: Signal edge cache for dynamic exit thresholds
             last_signal_edge: RwLock::new(HashMap::new()),
+            // Sprint 4 P2-F: Exit profile cache
+            last_signal_profile: RwLock::new(HashMap::new()),
             // Sprint 3 P2-E: Market health tracker
             market_health_tracker: None,
         })
@@ -627,7 +633,14 @@ impl Application {
         // market state when the position was originally opened.
         if let Some(ref oracle_exit) = self.oracle_exit_watcher {
             for position in &positions_to_sync {
-                oracle_exit.on_position_opened(position.market, position.side, None, None);
+                // Startup sync: no entry edge/oracle data, use Standard profile
+                oracle_exit.on_position_opened(
+                    position.market,
+                    position.side,
+                    None,
+                    None,
+                    ExitProfile::Standard,
+                );
             }
         }
 
@@ -1510,10 +1523,15 @@ impl Application {
                                     );
 
                                     // P2-5: Cache entry edge for dynamic exit thresholds
+                                    // Sprint 4 P2-F: Cache exit profile
                                     if result.is_queued() {
                                         self.last_signal_edge.write().insert(
                                             signal.market_key,
                                             signal.raw_edge_bps,
+                                        );
+                                        self.last_signal_profile.write().insert(
+                                            signal.market_key,
+                                            signal.exit_profile,
                                         );
                                     }
 
@@ -1943,13 +1961,25 @@ impl Application {
             // New position will be created - record baseline
             // P2-5: Pass cached entry edge for dynamic exit thresholds
             let entry_edge = self.last_signal_edge.write().remove(&market);
+            // Sprint 4 P2-F: Pass cached exit profile
+            let exit_profile = self
+                .last_signal_profile
+                .write()
+                .remove(&market)
+                .unwrap_or(ExitProfile::Standard);
             // P3-2: Pass current oracle price for trailing stop tracking
             let entry_oracle = self
                 .market_state
                 .get_snapshot(&market)
                 .map(|s| s.ctx.oracle.oracle_px.inner());
             if let Some(ref oracle_exit) = self.oracle_exit_watcher {
-                oracle_exit.on_position_opened(market, side, entry_edge, entry_oracle);
+                oracle_exit.on_position_opened(
+                    market,
+                    side,
+                    entry_edge,
+                    entry_oracle,
+                    exit_profile,
+                );
             }
         }
 

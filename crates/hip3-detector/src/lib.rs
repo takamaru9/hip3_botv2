@@ -18,4 +18,4 @@ pub use cross_tracker::CrossDurationTracker;
 pub use detector::DislocationDetector;
 pub use error::{DetectorError, DetectorResult};
 pub use fee::{FeeCalculator, FeeMetadata, UserFees, HIP3_FEE_MULTIPLIER};
-pub use signal::{DislocationSignal, SignalStrength};
+pub use signal::{DislocationSignal, ExitProfile, SignalStrength};

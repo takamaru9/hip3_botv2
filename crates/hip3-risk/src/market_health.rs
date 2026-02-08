@@ -166,10 +166,7 @@ impl MarketHealthTracker {
         if !self.config.enabled {
             return false;
         }
-        self.markets
-            .lock()
-            .get(market)
-            .is_some_and(|h| h.disabled)
+        self.markets.lock().get(market).is_some_and(|h| h.disabled)
     }
 
     /// Get the current health score for a market (0.0-1.0).

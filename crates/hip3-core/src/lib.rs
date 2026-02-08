@@ -16,7 +16,7 @@ pub mod types;
 pub use decimal::{Price, Size};
 pub use error::{CoreError, Result};
 pub use market::{AssetId, DexId, MarketKey, MarketSpec, HIP3_MAX_SIG_FIGS};
-pub use order::{ClientOrderId, OrderSide, OrderType, TimeInForce};
+pub use order::{ClientOrderId, ExitProfile, OrderSide, OrderType, TimeInForce};
 pub use types::{AssetCtx, Bbo, BboState, MarketSnapshot, OracleData};
 
 // Execution types

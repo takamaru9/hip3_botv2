@@ -6,6 +6,9 @@ use hip3_core::{MarketKey, OrderSide, Price, Size};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
+// Re-export ExitProfile from hip3-core for downstream consumers.
+pub use hip3_core::ExitProfile;
+
 /// Signal strength indicator.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SignalStrength {
@@ -81,6 +84,10 @@ pub struct DislocationSignal {
     /// Only populated when baseline_tracking is enabled.
     #[serde(default)]
     pub edge_above_baseline_bps: Decimal,
+    /// Exit profile for position management (Sprint 4 P2-F).
+    /// Determines exit_against_moves, trailing stop params, and time_stop.
+    #[serde(default)]
+    pub exit_profile: ExitProfile,
 }
 
 impl DislocationSignal {
@@ -120,6 +127,7 @@ impl DislocationSignal {
             confidence_score,
             baseline_gap_bps: Decimal::ZERO,
             edge_above_baseline_bps: Decimal::ZERO,
+            exit_profile: ExitProfile::default(),
         }
     }
 

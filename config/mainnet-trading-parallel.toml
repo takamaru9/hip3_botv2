@@ -400,6 +400,21 @@ min_confidence_entry = 0.0
 #   Signals with oracle_direction: Unchanged and stale oracle are NOT stale liquidity
 min_quote_lag_ms = 50   # Filter too-fresh oracle moves (noise)
 max_quote_lag_ms = 500  # Filter too-stale oracle moves (MM caught up)
+#
+# Sprint 4 P2-F: Exit Profile Assignment
+# Assigns Runner/Standard/Scalper profile to signals based on:
+#   Runner: confidence>=0.7 AND velocity>15bps AND consecutive>=3
+#   Standard: confidence>=0.4 AND velocity>5bps
+#   Scalper: everything else
+# Profile determines exit parameters (see [oracle_exit] exit_profile_enabled)
+exit_profile_enabled = false
+#
+# Sprint 4 P2-G: Session-Aware Parameters
+# Adjusts threshold and sizing based on US market session:
+#   MarketOpen (14:30-16:00 UTC): 2.0x threshold, 0.5x sizing (volatile)
+#   USActive (16:00-21:00 UTC): 1.5x threshold, 0.75x sizing
+#   Other: 1.0x both (no adjustment)
+session_aware = false
 
 [persistence]
 data_dir = "./data/signals-trading"
@@ -432,6 +447,12 @@ slippage_bps = 50
 trailing_stop = true
 activation_bps = 5
 trail_bps = 3
+# Sprint 4 P2-F: Exit profile overrides (Runner/Standard/Scalper)
+# When enabled, exit parameters are adjusted per-position based on signal quality:
+# - Runner (high confidence): exit_against_moves+1, trail activation=3/trail=2, time_stop=120s
+# - Standard: uses defaults above
+# - Scalper (low confidence): exit_against_moves-1 (min 1), no trailing, time_stop=5s
+exit_profile_enabled = false
 
 [time_stop]
 # Oracle-driven exitがメイン、TimeStopはバックアップ（非常用ハードリミット）

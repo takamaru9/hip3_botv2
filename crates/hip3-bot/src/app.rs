@@ -2361,15 +2361,23 @@ impl Application {
         }
 
         // Check if this market is in the MM market list
-        if !self.config.maker.markets.is_empty()
-            && !self
+        // Config uses human-readable names (e.g., "GOLD"), resolve via spec_cache
+        if !self.config.maker.markets.is_empty() {
+            let market_name = self
+                .spec_cache
+                .get(&market)
+                .map(|s| s.name.clone())
+                .unwrap_or_default();
+            // Match against both "GOLD" and "xyz:GOLD" formats
+            let matches = self
                 .config
                 .maker
                 .markets
                 .iter()
-                .any(|m| m == &market.to_string())
-        {
-            return;
+                .any(|m| m == &market_name || format!("xyz:{m}") == market_name);
+            if !matches {
+                return;
+            }
         }
 
         // Generate quote action

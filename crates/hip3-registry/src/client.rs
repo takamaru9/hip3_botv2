@@ -123,9 +123,6 @@ impl MetaClient {
             RegistryError::HttpClient("perpDexs response is not an array".to_string())
         })?;
 
-        // Also fetch meta to get szDecimals for each asset
-        let asset_specs = self.fetch_hip3_asset_specs().await.unwrap_or_default();
-
         let mut perp_dexs = Vec::new();
 
         for (idx, entry) in entries.iter().enumerate() {
@@ -159,9 +156,9 @@ impl MetaClient {
                     asset_key.clone()
                 };
 
-                // Get specs from meta if available, otherwise use defaults
-                let (sz_decimals, max_leverage) =
-                    asset_specs.get(asset_key).copied().unwrap_or((2, 10)); // Default: 2 decimals, 10x leverage
+                // Initial defaults; will be overwritten by meta(dex=xyz) response later
+                let sz_decimals: u8 = 2;
+                let max_leverage: u8 = 10;
 
                 markets.push(crate::preflight::PerpMarketInfo {
                     name: asset_name,
@@ -180,27 +177,32 @@ impl MetaClient {
             });
         }
 
-        // Fetch correct asset indices from meta(dex=xyz) for each xyz DEX
+        // Fetch correct asset indices AND specs from meta(dex=xyz) for each xyz DEX
         // IMPORTANT: perpDexs returns markets in different order than meta(dex=xyz)
         // Asset IDs must use indices from meta(dex=xyz), not perpDexs
+        // szDecimals/maxLeverage also come from meta(dex=xyz) (not metaAndAssetCtxs)
         for dex in &mut perp_dexs {
             if let Ok(index_map) = self.fetch_dex_meta_indices(&dex.name).await {
                 for market in &mut dex.markets {
                     // Look up the correct index using full coin name (e.g., "xyz:SILVER")
                     let full_name = format!("{}:{}", dex.name, market.name);
-                    if let Some(&idx) = index_map.get(&full_name) {
+                    if let Some(&(idx, sz_dec, max_lev)) = index_map.get(&full_name) {
                         market.asset_index = Some(idx);
+                        market.sz_decimals = sz_dec;
+                        market.max_leverage = max_lev;
                         debug!(
                             dex = %dex.name,
                             market = %market.name,
                             asset_index = idx,
-                            "Set asset_index from meta(dex) API"
+                            sz_decimals = sz_dec,
+                            max_leverage = max_lev,
+                            "Set asset specs from meta(dex) API"
                         );
                     } else {
                         warn!(
                             dex = %dex.name,
                             market = %market.name,
-                            "Could not find asset_index in meta(dex) response"
+                            "Could not find asset in meta(dex) response, using defaults"
                         );
                     }
                 }
@@ -227,9 +229,12 @@ impl MetaClient {
     /// markets in a different order than what's used for asset ID calculation.
     ///
     /// # Returns
-    /// Map from full coin name (e.g., "xyz:SILVER") to asset index.
-    async fn fetch_dex_meta_indices(&self, dex_name: &str) -> RegistryResult<HashMap<String, u32>> {
-        debug!(dex = %dex_name, "Fetching meta(dex) for asset indices");
+    /// Map from full coin name (e.g., "xyz:SILVER") to (asset_index, sz_decimals, max_leverage).
+    async fn fetch_dex_meta_indices(
+        &self,
+        dex_name: &str,
+    ) -> RegistryResult<HashMap<String, (u32, u8, u8)>> {
+        debug!(dex = %dex_name, "Fetching meta(dex) for asset indices and specs");
 
         let request = InfoRequestWithDex {
             request_type: "meta".to_string(),
@@ -258,11 +263,19 @@ impl MetaClient {
 
         let mut index_map = HashMap::new();
 
-        // Extract universe array and build name -> index map
+        // Extract universe array and build name -> (index, sz_decimals, max_leverage) map
         if let Some(universe) = body.get("universe").and_then(|u| u.as_array()) {
             for (idx, entry) in universe.iter().enumerate() {
                 if let Some(name) = entry.get("name").and_then(|n| n.as_str()) {
-                    index_map.insert(name.to_string(), idx as u32);
+                    let sz_decimals = entry
+                        .get("szDecimals")
+                        .and_then(|s| s.as_u64())
+                        .unwrap_or(2) as u8;
+                    let max_leverage = entry
+                        .get("maxLeverage")
+                        .and_then(|m| m.as_u64())
+                        .unwrap_or(10) as u8;
+                    index_map.insert(name.to_string(), (idx as u32, sz_decimals, max_leverage));
                 }
             }
         }
@@ -270,68 +283,10 @@ impl MetaClient {
         info!(
             dex = %dex_name,
             asset_count = index_map.len(),
-            "Fetched asset indices from meta(dex)"
+            "Fetched asset indices and specs from meta(dex)"
         );
 
         Ok(index_map)
-    }
-
-    /// Fetch HIP-3 asset specifications (szDecimals, maxLeverage).
-    ///
-    /// This fetches the meta endpoint and extracts specs for HIP-3 assets.
-    /// Returns a map from "dex:asset" key to (sz_decimals, max_leverage).
-    async fn fetch_hip3_asset_specs(&self) -> RegistryResult<HashMap<String, (u8, u8)>> {
-        debug!("Fetching HIP-3 asset specs");
-
-        // Get metaAndAssetCtxs to find HIP-3 assets with full specs
-        let request = InfoRequest {
-            request_type: "metaAndAssetCtxs".to_string(),
-        };
-
-        let response = self
-            .client
-            .post(&self.info_url)
-            .json(&request)
-            .send()
-            .await
-            .map_err(|e| RegistryError::HttpClient(format!("HTTP request failed: {e}")))?;
-
-        if !response.status().is_success() {
-            return Ok(HashMap::new());
-        }
-
-        let body: serde_json::Value = response.json().await.map_err(|e| {
-            RegistryError::HttpClient(format!("Failed to parse meta response: {e}"))
-        })?;
-
-        // Try to extract specs from the meta response
-        // The structure may vary, so we use a best-effort approach
-        let mut specs = HashMap::new();
-
-        // Check if there's a universe in the meta part
-        if let Some(meta) = body.get(0) {
-            if let Some(universe) = meta.get("universe").and_then(|u| u.as_array()) {
-                for entry in universe {
-                    if let (Some(name), Some(sz_decimals)) = (
-                        entry.get("name").and_then(|n| n.as_str()),
-                        entry.get("szDecimals").and_then(|s| s.as_u64()),
-                    ) {
-                        let max_leverage = entry
-                            .get("maxLeverage")
-                            .and_then(|m| m.as_u64())
-                            .unwrap_or(10) as u8;
-
-                        // Check if this is a HIP-3 asset (contains ':')
-                        if name.contains(':') {
-                            specs.insert(name.to_string(), (sz_decimals as u8, max_leverage));
-                        }
-                    }
-                }
-            }
-        }
-
-        debug!(spec_count = specs.len(), "Fetched HIP-3 asset specs");
-        Ok(specs)
     }
 
     /// Fetch clearinghouse state for a user.

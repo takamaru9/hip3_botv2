@@ -12,6 +12,7 @@ members = [
     "crates/hip3-telemetry",
     "crates/hip3-persistence",
     "crates/hip3-dashboard",
+    "crates/hip3-mm",
     "crates/hip3-bot",
 ]
 
@@ -103,6 +104,7 @@ hip3-position = { path = "crates/hip3-position" }
 hip3-telemetry = { path = "crates/hip3-telemetry" }
 hip3-persistence = { path = "crates/hip3-persistence" }
 hip3-dashboard = { path = "crates/hip3-dashboard" }
+hip3-mm = { path = "crates/hip3-mm" }
 
 [profile.release]
 lto = "thin"

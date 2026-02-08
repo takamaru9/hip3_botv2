@@ -19,7 +19,7 @@ use hip3_persistence::SignalRecord;
 use hip3_position::PositionTrackerHandle;
 
 use crate::types::{
-    CompletedTrade, DashboardSnapshot, MarketDataSnapshot, MarketPnlStats, PnlSummary,
+    CompletedTrade, DashboardSnapshot, MarketDataSnapshot, MarketPnlStats, MmStatus, PnlSummary,
     PositionSnapshot, RiskStatus, SignalSnapshot,
 };
 
@@ -54,6 +54,8 @@ pub struct DashboardState {
     signal_rx: Arc<tokio::sync::Mutex<Option<SignalReceiver>>>,
     /// P3-4: Completed trade history for PnL tracking.
     completed_trades: Arc<RwLock<VecDeque<CompletedTrade>>>,
+    /// P2-8: Market making status (updated from app.rs).
+    mm_status: Arc<RwLock<Option<MmStatus>>>,
 }
 
 impl DashboardState {
@@ -76,6 +78,7 @@ impl DashboardState {
             signal_tx,
             signal_rx: Arc::new(tokio::sync::Mutex::new(Some(signal_rx))),
             completed_trades: Arc::new(RwLock::new(VecDeque::new())),
+            mm_status: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -101,6 +104,7 @@ impl DashboardState {
             signal_tx,
             signal_rx: Arc::new(tokio::sync::Mutex::new(Some(signal_rx))),
             completed_trades: Arc::new(RwLock::new(VecDeque::new())),
+            mm_status: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -151,6 +155,9 @@ impl DashboardState {
         // P3-4: Collect PnL summary
         let pnl_summary = self.collect_pnl_summary(&positions);
 
+        // P2-8: Collect MM status
+        let mm_status = self.mm_status.read().clone();
+
         DashboardSnapshot {
             timestamp_ms,
             markets,
@@ -159,6 +166,7 @@ impl DashboardState {
             risk,
             recent_signals,
             pnl_summary,
+            mm_status,
         }
     }
 
@@ -367,6 +375,11 @@ impl DashboardState {
         while trades.len() > 500 {
             trades.pop_front();
         }
+    }
+
+    /// P2-8: Update market making status.
+    pub fn update_mm_status(&self, status: MmStatus) {
+        *self.mm_status.write() = Some(status);
     }
 
     /// P3-4: Collect PnL summary from completed trades and open positions.

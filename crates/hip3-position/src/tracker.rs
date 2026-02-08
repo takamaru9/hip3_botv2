@@ -538,6 +538,14 @@ pub struct PositionTrackerHandle {
     /// Using AtomicU64 for high-frequency reads without locking.
     /// Precision: $0.01 (sufficient for position sizing calculations).
     balance_cache: Arc<AtomicU64>,
+
+    /// OID mapping: cloid -> exchange order ID (oid).
+    /// Required for cancelling GTC/ALO orders via PendingCancel.
+    cloid_to_oid: Arc<DashMap<ClientOrderId, u64>>,
+
+    /// Reverse OID mapping: oid -> cloid.
+    /// Used when exchange sends orderUpdate with oid but without cloid.
+    oid_to_cloid: Arc<DashMap<u64, ClientOrderId>>,
 }
 
 impl PositionTrackerHandle {
@@ -626,25 +634,41 @@ impl PositionTrackerHandle {
     /// Remove an order from tracking.
     pub async fn remove_order(&self, cloid: ClientOrderId) {
         self.remove_order_from_caches(&cloid);
+        self.remove_oid_mapping(&cloid);
         let _ = self.tx.send(PositionTrackerMsg::RemoveOrder(cloid)).await;
     }
 
     /// Record oid to cloid mapping.
     ///
-    /// This is used when we receive oid from post response and need to
-    /// track the mapping for potential orderUpdate messages that might
-    /// only contain oid (without cloid).
-    ///
-    /// Currently this is a no-op as our implementation relies on cloid.
-    /// The mapping is recorded via logging for debugging purposes.
+    /// Stores bidirectional mapping between cloid and exchange order ID.
+    /// Required for:
+    /// - Cancelling GTC/ALO resting orders (PendingCancel needs oid)
+    /// - Resolving orderUpdate messages that only contain oid
     pub async fn record_oid_mapping(&self, cloid: ClientOrderId, oid: u64) {
-        // For now, just log the mapping. In the future, we could store this
-        // in a HashMap to support orderUpdates without cloid.
-        tracing::debug!(
-            cloid = %cloid,
-            oid = oid,
-            "Recording oid mapping"
-        );
+        tracing::debug!(cloid = %cloid, oid = oid, "Recording oid mapping");
+        self.cloid_to_oid.insert(cloid.clone(), oid);
+        self.oid_to_cloid.insert(oid, cloid);
+    }
+
+    /// Get the exchange order ID for a client order ID.
+    #[must_use]
+    pub fn get_oid(&self, cloid: &ClientOrderId) -> Option<u64> {
+        self.cloid_to_oid.get(cloid).map(|r| *r)
+    }
+
+    /// Get the client order ID for an exchange order ID.
+    #[must_use]
+    pub fn get_cloid_by_oid(&self, oid: u64) -> Option<ClientOrderId> {
+        self.oid_to_cloid.get(&oid).map(|r| r.clone())
+    }
+
+    /// Remove oid mapping for a client order ID.
+    ///
+    /// Called when an order reaches terminal state to prevent memory leak.
+    pub fn remove_oid_mapping(&self, cloid: &ClientOrderId) {
+        if let Some((_, oid)) = self.cloid_to_oid.remove(cloid) {
+            self.oid_to_cloid.remove(&oid);
+        }
     }
 
     /// Send an order update.
@@ -655,8 +679,15 @@ impl PositionTrackerHandle {
         filled_size: Size,
         oid: Option<u64>,
     ) {
+        // Record oid mapping if provided (e.g., from resting response)
+        if let Some(oid_val) = oid {
+            self.cloid_to_oid.insert(cloid.clone(), oid_val);
+            self.oid_to_cloid.insert(oid_val, cloid.clone());
+        }
+
         if state.is_terminal() {
             self.remove_order_from_caches(&cloid);
+            self.remove_oid_mapping(&cloid);
         }
 
         let _ = self
@@ -970,6 +1001,8 @@ pub fn spawn_position_tracker(capacity: usize) -> (PositionTrackerHandle, JoinHa
     let positions_data = Arc::new(DashMap::new());
     let pending_orders_data = Arc::new(DashMap::new());
     let balance_cache = Arc::new(AtomicU64::new(0));
+    let cloid_to_oid = Arc::new(DashMap::new());
+    let oid_to_cloid = Arc::new(DashMap::new());
 
     let task = PositionTrackerTask {
         rx,
@@ -990,6 +1023,8 @@ pub fn spawn_position_tracker(capacity: usize) -> (PositionTrackerHandle, JoinHa
         positions_data,
         pending_orders_data,
         balance_cache,
+        cloid_to_oid,
+        oid_to_cloid,
     };
 
     let join_handle = tokio::spawn(task.run());
@@ -1047,6 +1082,8 @@ mod tests {
             positions_data,
             pending_orders_data,
             balance_cache,
+            cloid_to_oid: Arc::new(DashMap::new()),
+            oid_to_cloid: Arc::new(DashMap::new()),
         };
 
         let err = handle.try_register_order(order.clone()).unwrap_err();
@@ -1336,5 +1373,113 @@ mod tests {
         assert_eq!(handle.get_balance(), dec!(100.99));
 
         handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn test_oid_mapping_record_and_lookup() {
+        let (handle, _join) = spawn_position_tracker(100);
+        let cloid = ClientOrderId::new();
+        let oid = 42u64;
+
+        // Initially no mapping
+        assert!(handle.get_oid(&cloid).is_none());
+        assert!(handle.get_cloid_by_oid(oid).is_none());
+
+        // Record mapping
+        handle.record_oid_mapping(cloid.clone(), oid).await;
+
+        // Forward lookup
+        assert_eq!(handle.get_oid(&cloid), Some(oid));
+        // Reverse lookup
+        assert_eq!(handle.get_cloid_by_oid(oid), Some(cloid.clone()));
+
+        handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn test_oid_mapping_removed_on_terminal_state() {
+        let (handle, _join) = spawn_position_tracker(100);
+        let order = sample_tracked_order(sample_market(), false);
+        let cloid = order.cloid.clone();
+        let oid = 99u64;
+
+        handle.register_order(order).await;
+        handle.record_oid_mapping(cloid.clone(), oid).await;
+        tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+
+        assert_eq!(handle.get_oid(&cloid), Some(oid));
+
+        // Terminal state should clean up mapping
+        handle
+            .order_update(
+                cloid.clone(),
+                OrderState::Filled,
+                Size::new(dec!(0.1)),
+                Some(oid),
+            )
+            .await;
+        tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+
+        assert!(handle.get_oid(&cloid).is_none());
+        assert!(handle.get_cloid_by_oid(oid).is_none());
+
+        handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn test_oid_mapping_removed_on_remove_order() {
+        let (handle, _join) = spawn_position_tracker(100);
+        let order = sample_tracked_order(sample_market(), false);
+        let cloid = order.cloid.clone();
+        let oid = 55u64;
+
+        handle.register_order(order).await;
+        handle.record_oid_mapping(cloid.clone(), oid).await;
+        tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+
+        assert_eq!(handle.get_oid(&cloid), Some(oid));
+
+        // Remove order should clean up mapping
+        handle.remove_order(cloid.clone()).await;
+        tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+
+        assert!(handle.get_oid(&cloid).is_none());
+        assert!(handle.get_cloid_by_oid(oid).is_none());
+
+        handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn test_oid_mapping_recorded_via_order_update() {
+        let (handle, _join) = spawn_position_tracker(100);
+        let order = sample_tracked_order(sample_market(), false);
+        let cloid = order.cloid.clone();
+        let oid = 77u64;
+
+        handle.register_order(order).await;
+        tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+
+        // No mapping yet
+        assert!(handle.get_oid(&cloid).is_none());
+
+        // order_update with oid should record mapping
+        handle
+            .order_update(cloid.clone(), OrderState::Open, Size::ZERO, Some(oid))
+            .await;
+
+        assert_eq!(handle.get_oid(&cloid), Some(oid));
+        assert_eq!(handle.get_cloid_by_oid(oid), Some(cloid.clone()));
+
+        handle.shutdown().await;
+    }
+
+    #[test]
+    fn test_remove_oid_mapping_noop_for_unknown() {
+        // Ensure remove_oid_mapping doesn't panic on unknown cloid
+        let (handle, _) = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(async { spawn_position_tracker(100) });
+        let unknown_cloid = ClientOrderId::new();
+        handle.remove_oid_mapping(&unknown_cloid); // Should not panic
     }
 }

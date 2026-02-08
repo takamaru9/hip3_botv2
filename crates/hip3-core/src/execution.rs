@@ -9,7 +9,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::market::MarketKey;
-use crate::order::{ClientOrderId, OrderSide};
+use crate::order::{ClientOrderId, OrderSide, TimeInForce};
 use crate::{Price, Size};
 
 // ============================================================================
@@ -35,10 +35,13 @@ pub struct PendingOrder {
     pub reduce_only: bool,
     /// Creation timestamp (Unix milliseconds).
     pub created_at: u64,
+    /// Time-in-force. Defaults to IOC for backward compatibility with taker strategy.
+    #[serde(default)]
+    pub tif: TimeInForce,
 }
 
 impl PendingOrder {
-    /// Create a new pending order.
+    /// Create a new pending order with default TIF (IOC).
     #[must_use]
     pub fn new(
         cloid: ClientOrderId,
@@ -57,6 +60,32 @@ impl PendingOrder {
             size,
             reduce_only,
             created_at,
+            tif: TimeInForce::default(), // IOC
+        }
+    }
+
+    /// Create a new pending order with explicit TIF.
+    #[must_use]
+    #[allow(clippy::too_many_arguments)]
+    pub fn with_tif(
+        cloid: ClientOrderId,
+        market: MarketKey,
+        side: OrderSide,
+        price: Price,
+        size: Size,
+        reduce_only: bool,
+        created_at: u64,
+        tif: TimeInForce,
+    ) -> Self {
+        Self {
+            cloid,
+            market,
+            side,
+            price,
+            size,
+            reduce_only,
+            created_at,
+            tif,
         }
     }
 }
@@ -148,6 +177,9 @@ pub struct TrackedOrder {
     pub created_at: u64,
     /// Last update timestamp (Unix milliseconds).
     pub updated_at: u64,
+    /// Time-in-force.
+    #[serde(default)]
+    pub tif: TimeInForce,
 }
 
 impl TrackedOrder {
@@ -167,6 +199,7 @@ impl TrackedOrder {
             state: OrderState::Pending,
             created_at: pending.created_at,
             updated_at: pending.created_at,
+            tif: pending.tif,
         }
     }
 

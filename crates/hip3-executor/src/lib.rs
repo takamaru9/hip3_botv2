@@ -49,7 +49,8 @@ pub use error::{ExecutorError, ExecutorResult};
 
 // Executor and related types
 pub use executor::{
-    ActionBudget, Executor, ExecutorConfig, MarketState, MarketStateCache, PostIdGenerator,
+    ActionBudget, Executor, ExecutorConfig, MarketState, MarketStateCache, MmQuoteResult,
+    PostIdGenerator,
 };
 
 // Price provider for TimeStopMonitor

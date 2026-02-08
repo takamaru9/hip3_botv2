@@ -259,15 +259,20 @@ impl OrderWire {
         order: &hip3_core::PendingOrder,
         spec: &hip3_core::MarketSpec,
     ) -> Self {
-        use hip3_core::OrderSide;
+        use hip3_core::{OrderSide, TimeInForce};
         let is_buy = matches!(order.side, OrderSide::Buy);
+        let order_type = match order.tif {
+            TimeInForce::GoodTilCancelled => OrderTypeWire::gtc(),
+            TimeInForce::ImmediateOrCancel => OrderTypeWire::ioc(),
+            TimeInForce::AddLiquidityOnly => OrderTypeWire::alo(),
+        };
         Self {
             asset: order.market.asset.0,
             is_buy,
             limit_px: spec.format_price(order.price, is_buy),
             sz: spec.format_size(order.size),
             reduce_only: order.reduce_only,
-            order_type: OrderTypeWire::ioc(),
+            order_type,
             cloid: Some(order.cloid.to_string()),
         }
     }

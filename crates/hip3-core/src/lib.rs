@@ -11,12 +11,16 @@ pub mod error;
 pub mod execution;
 pub mod market;
 pub mod order;
+pub mod trading_session;
 pub mod types;
 
 pub use decimal::{Price, Size};
 pub use error::{CoreError, Result};
 pub use market::{AssetId, DexId, MarketKey, MarketSpec, HIP3_MAX_SIG_FIGS};
 pub use order::{ClientOrderId, ExitProfile, OrderSide, OrderType, TimeInForce};
+pub use trading_session::{
+    current_session, is_mm_shutdown_at, is_weekend_at, is_weekend_utc, session_at, TradingSession,
+};
 pub use types::{AssetCtx, Bbo, BboState, MarketSnapshot, OracleData};
 
 // Execution types

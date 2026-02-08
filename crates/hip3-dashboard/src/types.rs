@@ -24,6 +24,9 @@ pub struct DashboardSnapshot {
     pub recent_signals: Vec<SignalSnapshot>,
     /// P3-4: PnL summary (session stats + per-market stats).
     pub pnl_summary: PnlSummary,
+    /// P2-8: Market making status (None if MM not configured).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mm_status: Option<MmStatus>,
 }
 
 /// Market data snapshot for a single market.
@@ -220,6 +223,25 @@ pub struct PnlSummary {
     pub recent_trades: Vec<CompletedTrade>,
 }
 
+/// P2-8: Market making status.
+#[derive(Debug, Clone, Serialize, Default)]
+pub struct MmStatus {
+    /// Whether MM is currently enabled.
+    pub enabled: bool,
+    /// Whether MM is currently active (weekend window).
+    pub active: bool,
+    /// Number of markets being quoted.
+    pub num_markets: usize,
+    /// Total active quotes across all markets.
+    pub total_active_quotes: usize,
+    /// P2-2: Whether quoting is halted due to stale cancels.
+    pub stale_halted: bool,
+    /// Total realized PnL from MM (USD).
+    pub realized_pnl: f64,
+    /// Per-market MM inventory (market -> net size in base units).
+    pub inventory: HashMap<String, f64>,
+}
+
 /// Risk alert types.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -252,11 +274,14 @@ mod tests {
             },
             recent_signals: vec![],
             pnl_summary: PnlSummary::default(),
+            mm_status: None,
         };
 
         let json = serde_json::to_string(&snapshot).unwrap();
         assert!(json.contains("\"timestamp_ms\":1706400000000"));
         assert!(json.contains("\"trading_allowed\":true"));
+        // mm_status is None, should be omitted
+        assert!(!json.contains("\"mm_status\""));
     }
 
     #[test]

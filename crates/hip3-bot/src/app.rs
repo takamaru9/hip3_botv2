@@ -16,7 +16,7 @@ use alloy::primitives::Address;
 use chrono::Utc;
 use hip3_core::{
     AssetId, ClientOrderId, DexId, ExitProfile, MarketKey, OrderSide, OrderState, PendingOrder,
-    Price, Size,
+    Price, Size, TimeInForce,
 };
 use hip3_dashboard::{DashboardState, SignalSender, SignalSnapshot};
 use hip3_detector::{CrossDurationTracker, DislocationDetector, DislocationSignal};
@@ -29,6 +29,7 @@ use hip3_executor::{
 use hip3_feed::{
     MarketEvent, MarketState, MessageParser, OracleMovementTracker, OracleTrackerHandle,
 };
+use hip3_mm::{InventoryManager, QuoteManager};
 use hip3_persistence::{FollowupRecord, FollowupWriter, ParquetWriter, SignalRecord};
 use hip3_position::{
     flatten_all_positions, new_exit_watcher, new_oracle_exit_watcher, spawn_position_tracker,
@@ -148,6 +149,14 @@ pub struct Application {
     last_signal_profile: RwLock<HashMap<MarketKey, ExitProfile>>,
     /// Sprint 3 P2-E: Market health tracker for auto-disable/re-enable.
     market_health_tracker: Option<Arc<hip3_risk::MarketHealthTracker>>,
+    /// MM: Quote manager for weekend market making (None if maker disabled).
+    quote_manager: Option<QuoteManager>,
+    /// MM: Inventory manager for tracking MM positions.
+    mm_inventory: Option<InventoryManager>,
+    /// MM: Whether shutdown (cancel all + flatten) has been triggered for this weekend.
+    mm_shutdown_triggered: bool,
+    /// P3-1: Last time wick volatility stats were logged (ms).
+    mm_wick_log_ms: u64,
 }
 
 impl Application {
@@ -237,6 +246,11 @@ impl Application {
             last_signal_profile: RwLock::new(HashMap::new()),
             // Sprint 3 P2-E: Market health tracker
             market_health_tracker: None,
+            // MM: Initialized in Trading mode if maker.enabled
+            quote_manager: None,
+            mm_inventory: None,
+            mm_shutdown_triggered: false,
+            mm_wick_log_ms: 0,
         })
     }
 
@@ -970,6 +984,22 @@ impl Application {
                 self.market_health_tracker = Some(tracker);
             }
 
+            // MM: Initialize QuoteManager and InventoryManager if maker enabled
+            if self.config.maker.enabled {
+                let maker_config = self.config.maker.clone();
+                info!(
+                    num_levels = maker_config.num_levels,
+                    min_offset_bps = %maker_config.min_offset_bps,
+                    size_per_level_usd = %maker_config.size_per_level_usd,
+                    max_position_usd = %maker_config.max_position_usd,
+                    weekend_only = maker_config.weekend_only,
+                    use_alo = maker_config.use_alo,
+                    "Market Maker enabled"
+                );
+                self.quote_manager = Some(QuoteManager::new(maker_config.clone()));
+                self.mm_inventory = Some(InventoryManager::new(maker_config.max_position_usd));
+            }
+
             // 7. KeyManager (uses KeySource struct variant)
             let key_source = self.config.private_key.as_ref().map(|_| {
                 // Use env var for security (config just indicates "use env")
@@ -1297,6 +1327,7 @@ impl Application {
                                     size: request.size,
                                     reduce_only: true,
                                     created_at: now_ms,
+                                    tif: TimeInForce::ImmediateOrCancel,
                                 };
 
                                 debug!(
@@ -1654,7 +1685,7 @@ impl Application {
     }
 
     /// Handle incoming WebSocket message.
-    async fn handle_message(&self, parser: &MessageParser, msg: WsMessage) -> AppResult<()> {
+    async fn handle_message(&mut self, parser: &MessageParser, msg: WsMessage) -> AppResult<()> {
         match &msg {
             WsMessage::Channel(channel_msg) => {
                 let channel = &channel_msg.channel;
@@ -1818,7 +1849,7 @@ impl Application {
     }
 
     /// Handle orderUpdates message.
-    fn handle_order_update(&self, update: &OrderUpdatePayload) {
+    fn handle_order_update(&mut self, update: &OrderUpdatePayload) {
         let cloid_str = update.order.cloid.as_deref().unwrap_or("<no cloid>");
         let oid = update.order.oid;
         let status = &update.status;
@@ -1886,6 +1917,20 @@ impl Application {
             }
         }
 
+        // MM: Notify quote_manager on resting/cancelled
+        if self.quote_manager.is_some() {
+            let mm_market = self.coin_to_market(coin);
+            if let (Some(ref mut qm), Some(market)) = (&mut self.quote_manager, mm_market) {
+                if state == OrderState::Open {
+                    qm.record_resting(&market, &cloid, oid);
+                } else if state == OrderState::Cancelled {
+                    qm.record_cancelled(&market, &cloid);
+                    // P2-2: Also ack the cancel for stale tracking
+                    qm.record_cancel_acked(oid);
+                }
+            }
+        }
+
         let filled_size = sz.parse().map(Size::new).unwrap_or(Size::ZERO);
 
         let tracker = tracker.clone();
@@ -1897,7 +1942,7 @@ impl Application {
     }
 
     /// Handle userFills message.
-    fn handle_user_fill(&self, fill: &FillPayload) {
+    fn handle_user_fill(&mut self, fill: &FillPayload) {
         let coin = &fill.coin;
         let side_str = &fill.side;
         let px = &fill.px;
@@ -1983,11 +2028,18 @@ impl Application {
             }
         }
 
+        // P2-4: Determine if this fill is from an MM quote (before record_fill removes it)
+        let is_mm_fill = match (&self.quote_manager, &cloid) {
+            (Some(ref qm), Some(ref c)) => qm.is_mm_order(c),
+            _ => false,
+        };
+
         // P2-3/P2-4: Report PnL and close events when a position is being closed
         // (fill side opposite to position side = reduce-only direction)
+        // P2-4: Skip taker-specific reporting for MM fills
         if let Some(existing_pos) = tracker.get_position(&market) {
             let is_closing = existing_pos.side != side;
-            if is_closing {
+            if is_closing && !is_mm_fill {
                 // P2-3: Report realized PnL estimate to MaxDrawdownGate
                 if let Some(ref gate) = self.max_drawdown_gate {
                     use rust_decimal::prelude::ToPrimitive;
@@ -2106,6 +2158,54 @@ impl Application {
             }
         }
 
+        // P2-4: Log MM close P&L separately (not sent to taker drawdown gate)
+        if is_mm_fill {
+            if let Some(existing_pos) = tracker.get_position(&market) {
+                if existing_pos.side != side {
+                    let pnl_bps = match existing_pos.side {
+                        OrderSide::Buy => {
+                            (price.inner() - existing_pos.entry_price.inner())
+                                / existing_pos.entry_price.inner()
+                                * Decimal::from(10000)
+                        }
+                        OrderSide::Sell => {
+                            (existing_pos.entry_price.inner() - price.inner())
+                                / existing_pos.entry_price.inner()
+                                * Decimal::from(10000)
+                        }
+                    };
+                    let notional = size.inner() * price.inner();
+                    let pnl_usd = pnl_bps / Decimal::from(10000) * notional;
+                    info!(
+                        %market, pnl_usd = %pnl_usd, pnl_bps = %pnl_bps,
+                        "MM position close (excluded from taker drawdown)"
+                    );
+                }
+            }
+        }
+
+        // MM: Update inventory and quote manager on fills
+        if let Some(ref mut inv) = self.mm_inventory {
+            inv.record_fill(market, side, price, size);
+            debug!(
+                %market, ?side, %price, %size,
+                net_size = %inv.net_size(&market),
+                realized_pnl = %inv.total_realized_pnl(),
+                "MM inventory updated"
+            );
+        }
+        if let (Some(ref mut qm), Some(ref c)) = (&mut self.quote_manager, &cloid) {
+            let counter_action = qm.record_fill(&market, c, price, time);
+            if let Some(action) = counter_action {
+                if let Some(ref executor_loop) = self.executor_loop {
+                    let results = executor_loop.executor().on_mm_quote(vec![action]);
+                    for result in &results {
+                        debug!(result = ?result, "MM counter-order result");
+                    }
+                }
+            }
+        }
+
         let tracker = tracker.clone();
         let timestamp = time;
         tokio::spawn(async move {
@@ -2138,7 +2238,7 @@ impl Application {
     }
 
     /// Apply market event to state.
-    fn apply_market_event(&self, event: MarketEvent) {
+    fn apply_market_event(&mut self, event: MarketEvent) {
         match event {
             MarketEvent::BboUpdate { key, bbo } => {
                 let key_str = key.to_string();
@@ -2220,8 +2320,159 @@ impl Application {
                         oracle_exit.on_market_update(key, &snapshot);
                     }
                 }
+
+                // MM: Trigger quote update on oracle change
+                self.maybe_update_mm_quotes(key, oracle_px, mark_px, now_ms);
             }
         }
+    }
+
+    /// Process MM quote update for a market if MM is active.
+    fn maybe_update_mm_quotes(
+        &mut self,
+        market: MarketKey,
+        oracle_px: Price,
+        mark_px: Price,
+        now_ms: u64,
+    ) {
+        // Check if MM is enabled and components are initialized
+        if self.quote_manager.is_none() || self.mm_inventory.is_none() {
+            return;
+        }
+
+        // Weekend-only check
+        if self.config.maker.weekend_only && !hip3_core::is_weekend_utc() {
+            return;
+        }
+
+        // MM shutdown window check (Sunday 21:00 - Monday 00:00 UTC)
+        // P1-8: On entering shutdown, cancel all GTC quotes + flatten positions
+        if hip3_core::is_mm_shutdown_at(chrono::Utc::now()) {
+            if !self.mm_shutdown_triggered {
+                self.trigger_mm_shutdown(now_ms);
+            }
+            return;
+        }
+
+        // Reset shutdown flag when we're back in active MM period
+        if self.mm_shutdown_triggered {
+            info!("MM shutdown flag reset — new weekend period");
+            self.mm_shutdown_triggered = false;
+        }
+
+        // Check if this market is in the MM market list
+        if !self.config.maker.markets.is_empty()
+            && !self
+                .config
+                .maker
+                .markets
+                .iter()
+                .any(|m| m == &market.to_string())
+        {
+            return;
+        }
+
+        // Generate quote action
+        let qm = self.quote_manager.as_mut().unwrap();
+        let inv = self.mm_inventory.as_ref().unwrap();
+        let action = qm.on_market_update(market, oracle_px, mark_px, now_ms, inv);
+
+        // Execute via MM executor path
+        if let Some(action) = action {
+            if let Some(ref executor_loop) = self.executor_loop {
+                let results = executor_loop.executor().on_mm_quote(vec![action]);
+                for result in &results {
+                    debug!(market = %market, result = ?result, "MM quote result");
+                }
+            }
+        }
+
+        // P3-1: Periodic wick volatility logging (every 60 seconds)
+        if now_ms.saturating_sub(self.mm_wick_log_ms) >= 60_000 {
+            let vol_stats = qm.volatility_stats(now_ms);
+            for (mk, stats) in &vol_stats {
+                if stats.is_valid {
+                    info!(
+                        market = %mk,
+                        p99 = format!("{:.1}", stats.p99_wick_bps),
+                        p100 = format!("{:.1}", stats.p100_wick_bps),
+                        optimal = format!("{:.1}", stats.optimal_wick_bps),
+                        optimal_pct = stats.optimal_percentile,
+                        n = stats.sample_count,
+                        "P3-1 wick volatility"
+                    );
+                }
+            }
+            self.mm_wick_log_ms = now_ms;
+        }
+
+        // P2-8: Update MM status on dashboard
+        self.update_mm_dashboard();
+    }
+
+    /// P2-8: Update MM status on dashboard.
+    fn update_mm_dashboard(&self) {
+        let ds = match self.dashboard_state {
+            Some(ref ds) => ds,
+            None => return,
+        };
+        let (qm, inv) = match (&self.quote_manager, &self.mm_inventory) {
+            (Some(qm), Some(inv)) => (qm, inv),
+            _ => return,
+        };
+
+        use rust_decimal::prelude::ToPrimitive;
+        let is_weekend = hip3_core::is_weekend_utc();
+        let active = self.config.maker.enabled
+            && (!self.config.maker.weekend_only || is_weekend)
+            && !self.mm_shutdown_triggered;
+
+        let mut inventory = std::collections::HashMap::new();
+        for (mk, market_inv) in inv.iter() {
+            if !market_inv.net_size.is_zero() {
+                inventory.insert(mk.to_string(), market_inv.net_size.to_f64().unwrap_or(0.0));
+            }
+        }
+
+        ds.update_mm_status(hip3_dashboard::MmStatus {
+            enabled: self.config.maker.enabled,
+            active,
+            num_markets: qm.num_quoted_markets(),
+            total_active_quotes: qm.total_active_quotes(),
+            stale_halted: qm.is_stale_halted(),
+            realized_pnl: inv.total_realized_pnl().to_f64().unwrap_or(0.0),
+            inventory,
+        });
+    }
+
+    /// P1-8: Trigger MM shutdown — cancel all GTC quotes and flatten positions.
+    fn trigger_mm_shutdown(&mut self, now_ms: u64) {
+        let (qm, inv) = match (self.quote_manager.as_mut(), self.mm_inventory.as_ref()) {
+            (Some(qm), Some(inv)) => (qm, inv),
+            _ => return,
+        };
+
+        warn!("MM SHUTDOWN: Cancelling all quotes and flattening positions");
+
+        // Build mark price lookup from market state
+        let market_state = self.market_state.clone();
+        let actions = qm.shutdown_all(
+            inv,
+            |mk| market_state.get_snapshot(mk).map(|s| s.ctx.oracle.mark_px),
+            now_ms,
+        );
+
+        // Execute all shutdown actions
+        if let Some(ref executor_loop) = self.executor_loop {
+            for action in actions {
+                let results = executor_loop.executor().on_mm_quote(vec![action]);
+                for result in &results {
+                    warn!(result = ?result, "MM shutdown result");
+                }
+            }
+        }
+
+        self.mm_shutdown_triggered = true;
     }
 
     /// Check all markets for dislocations.

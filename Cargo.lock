@@ -1973,6 +1973,7 @@ dependencies = [
  "hip3-detector",
  "hip3-executor",
  "hip3-feed",
+ "hip3-mm",
  "hip3-persistence",
  "hip3-position",
  "hip3-registry",
@@ -2058,6 +2059,7 @@ dependencies = [
  "dashmap",
  "hex",
  "hip3-core",
+ "hip3-mm",
  "hip3-position",
  "hip3-registry",
  "hip3-risk",
@@ -2091,6 +2093,20 @@ dependencies = [
  "thiserror 1.0.69",
  "tokio",
  "tokio-test",
+ "tracing",
+]
+
+[[package]]
+name = "hip3-mm"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "hip3-core",
+ "rust_decimal",
+ "rust_decimal_macros",
+ "serde",
+ "tokio-test",
+ "toml",
  "tracing",
 ]
 

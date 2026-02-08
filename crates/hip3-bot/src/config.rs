@@ -3,6 +3,7 @@
 use crate::error::{AppError, AppResult};
 use hip3_dashboard::DashboardConfig;
 use hip3_detector::DetectorConfig;
+use hip3_mm::MakerConfig;
 use hip3_risk::{
     BurstSignalConfig, CorrelationCooldownConfig, CorrelationPositionConfig, MarketHealthConfig,
     MaxDrawdownConfig, RiskGateConfig,
@@ -399,6 +400,9 @@ pub struct AppConfig {
     /// If Some, trading mode will load the private key from environment variable.
     #[serde(default)]
     pub private_key: Option<String>,
+    /// Market making configuration (weekend MM strategy).
+    #[serde(default)]
+    pub maker: MakerConfig,
 }
 
 fn default_info_url() -> String {
@@ -588,6 +592,7 @@ impl Default for AppConfig {
             private_key: None,
             oracle_tracking: None,
             oracle_exit: None,
+            maker: MakerConfig::default(),
         }
     }
 }

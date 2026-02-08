@@ -30,9 +30,10 @@ use rust_decimal::Decimal;
 use tracing::{debug, info, trace, warn};
 
 use hip3_core::{
-    ClientOrderId, EnqueueResult, ExecutionResult, MarketKey, OrderSide, PendingOrder, Price,
-    RejectReason, Size, SkipReason, TrackedOrder,
+    ClientOrderId, EnqueueResult, ExecutionResult, MarketKey, OrderSide, PendingCancel,
+    PendingOrder, Price, RejectReason, Size, SkipReason, TrackedOrder,
 };
+use hip3_mm::MakerAction;
 use hip3_position::PositionTrackerHandle;
 use hip3_risk::{
     BurstSignalGate, CorrelationCooldownGate, CorrelationPositionGate, MaxDrawdownGate,
@@ -41,6 +42,23 @@ use hip3_risk::{
 use crate::batch::BatchScheduler;
 use crate::ready::TradingReadyChecker;
 use crate::risk::HardStopLatch;
+
+// ============================================================================
+// MmQuoteResult
+// ============================================================================
+
+/// Result of processing an MM quote action.
+#[derive(Debug, Clone)]
+pub enum MmQuoteResult {
+    /// Order successfully queued.
+    Queued(ClientOrderId),
+    /// Cancels sent to batch scheduler.
+    CancelsSent,
+    /// Flatten orders sent.
+    FlattenSent,
+    /// Action rejected (gate or queue failure).
+    Rejected(String),
+}
 
 // ============================================================================
 // PostIdGenerator
@@ -359,6 +377,9 @@ impl MarketStateCache {
 /// for verifying WebSocket READY-TRADING state before calling `on_signal`.
 ///
 /// Orders that pass all gates are queued via the BatchScheduler.
+///
+/// MM quotes use the dedicated [`Executor::on_mm_quote`] path which bypasses
+/// taker-only gates (BurstSignal, AlreadyHasPosition, PendingOrderExists).
 pub struct Executor {
     /// Position management handle.
     position_tracker: PositionTrackerHandle,
@@ -776,6 +797,139 @@ impl Executor {
                 self.position_tracker.unmark_pending_market(market);
                 debug!(cloid = %cloid, market = %market, "Order rejected: Inflight full");
                 ExecutionResult::rejected(RejectReason::InflightFull)
+            }
+        }
+    }
+
+    /// Process MM quote actions (place/cancel/replace).
+    ///
+    /// This is the MM-specific executor path that bypasses taker-only gates:
+    /// - Gate 1d (BurstSignal): bypassed — MM requotes are normal
+    /// - Gate 5 (MaxConcurrentPositions): bypassed — MM quotes across markets
+    /// - Gate 7 (AlreadyHasPosition): bypassed — MM holds positions while quoting
+    /// - Gate 8 (PendingOrder): bypassed — MM has multiple orders per market
+    /// - Gate 9 (ActionBudget): bypassed — MM has its own requote interval
+    ///
+    /// Gates that still apply:
+    /// - Gate 1 (HardStop): emergency stop applies to all
+    /// - Gate 1b (MaxDrawdown): drawdown limit applies to all
+    pub fn on_mm_quote(&self, actions: Vec<MakerAction>) -> Vec<MmQuoteResult> {
+        let mut results = Vec::new();
+
+        // Gate 1: HardStop — block all MM activity
+        if self.hard_stop_latch.is_triggered() {
+            debug!("MM quotes rejected: HardStop triggered");
+            results.push(MmQuoteResult::Rejected("HardStop".into()));
+            return results;
+        }
+
+        // Gate 1b: MaxDrawdown — block new entries when drawdown exceeded
+        if let Some(ref gate) = self.max_drawdown_gate {
+            if gate.check().is_err() {
+                debug!("MM quotes rejected: MaxDrawdown gate");
+                results.push(MmQuoteResult::Rejected("MaxDrawdown".into()));
+                return results;
+            }
+        }
+
+        for action in actions {
+            match action {
+                MakerAction::PlaceOrders(orders) => {
+                    for order in orders {
+                        let result = self.enqueue_mm_order(order);
+                        results.push(result);
+                    }
+                }
+                MakerAction::CancelOrders(cancels) => {
+                    for cancel in cancels {
+                        self.enqueue_mm_cancel(cancel);
+                    }
+                    results.push(MmQuoteResult::CancelsSent);
+                }
+                MakerAction::CancelAndReplace {
+                    cancels,
+                    new_orders,
+                } => {
+                    // Cancels go first (highest priority in BatchScheduler)
+                    for cancel in cancels {
+                        self.enqueue_mm_cancel(cancel);
+                    }
+                    // New orders follow (processed after cancels)
+                    for order in new_orders {
+                        let result = self.enqueue_mm_order(order);
+                        results.push(result);
+                    }
+                }
+                MakerAction::FlattenAll {
+                    cancels,
+                    flatten_orders,
+                } => {
+                    for cancel in cancels {
+                        self.enqueue_mm_cancel(cancel);
+                    }
+                    for order in flatten_orders {
+                        // Flatten uses reduce-only path (higher priority)
+                        let cloid = order.cloid.clone();
+                        match self.batch_scheduler.enqueue_reduce_only(order.clone()) {
+                            EnqueueResult::Queued | EnqueueResult::InflightFull => {
+                                let tracked = TrackedOrder::from_pending(order);
+                                self.try_register_order(tracked, &cloid);
+                                debug!(cloid = %cloid, "MM flatten order queued");
+                            }
+                            EnqueueResult::QueuedDegraded => {
+                                let tracked = TrackedOrder::from_pending(order);
+                                self.try_register_order(tracked, &cloid);
+                            }
+                            EnqueueResult::QueueFull => {
+                                warn!(cloid = %cloid, "MM flatten order rejected: queue full");
+                            }
+                        }
+                    }
+                    results.push(MmQuoteResult::FlattenSent);
+                }
+            }
+        }
+
+        results
+    }
+
+    /// Enqueue a single MM order (GTC/ALO).
+    fn enqueue_mm_order(&self, order: PendingOrder) -> MmQuoteResult {
+        let cloid = order.cloid.clone();
+        let market = order.market;
+
+        match self.batch_scheduler.enqueue_new_order(order.clone()) {
+            EnqueueResult::Queued => {
+                let tracked = TrackedOrder::from_pending(order);
+                self.try_register_order(tracked, &cloid);
+                debug!(cloid = %cloid, market = %market, "MM order queued");
+                MmQuoteResult::Queued(cloid)
+            }
+            EnqueueResult::QueuedDegraded => {
+                let tracked = TrackedOrder::from_pending(order);
+                self.try_register_order(tracked, &cloid);
+                MmQuoteResult::Queued(cloid)
+            }
+            EnqueueResult::QueueFull => {
+                debug!(cloid = %cloid, market = %market, "MM order rejected: queue full");
+                MmQuoteResult::Rejected("QueueFull".into())
+            }
+            EnqueueResult::InflightFull => {
+                debug!(cloid = %cloid, market = %market, "MM order rejected: inflight full");
+                MmQuoteResult::Rejected("InflightFull".into())
+            }
+        }
+    }
+
+    /// Enqueue a cancel for an MM quote.
+    fn enqueue_mm_cancel(&self, cancel: PendingCancel) {
+        let oid = cancel.oid;
+        match self.batch_scheduler.enqueue_cancel(cancel) {
+            EnqueueResult::Queued => {
+                debug!(oid = oid, "MM cancel queued");
+            }
+            _ => {
+                warn!(oid = oid, "MM cancel failed to enqueue");
             }
         }
     }

@@ -23,6 +23,7 @@ hip3-registry = { workspace = true }
 hip3-risk = { workspace = true }
 hip3-detector = { workspace = true }
 hip3-executor = { workspace = true }
+hip3-mm = { workspace = true }
 hip3-position = { workspace = true }
 hip3-telemetry = { workspace = true }
 hip3-persistence = { workspace = true }

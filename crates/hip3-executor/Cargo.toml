@@ -11,6 +11,7 @@ description = "IOC order execution for HIP-3 (Phase B)"
 hip3-core = { workspace = true }
 hip3-position = { workspace = true }
 hip3-registry = { workspace = true }
+hip3-mm = { workspace = true }
 hip3-risk = { workspace = true }
 hip3-ws = { workspace = true }
 tokio = { workspace = true }

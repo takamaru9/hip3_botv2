@@ -750,8 +750,42 @@ impl QuoteManager {
     }
 
     /// P2-2: Check for stale (unacknowledged) cancels.
+    ///
+    /// Auto-expires pending cancels that exceed `stale_cancel_max_age_ms`
+    /// to prevent infinite halt when the exchange never ACKs (e.g., order
+    /// was already rejected/gone).
     fn check_stale_cancels(&mut self, now_ms: u64) {
         if self.config.stale_cancel_timeout_ms == 0 {
+            return;
+        }
+
+        // Auto-expire cancels that exceed max age
+        let max_age = self.config.stale_cancel_max_age_ms;
+        if max_age > 0 {
+            let before = self.pending_cancels.len();
+            self.pending_cancels.retain(|pc| {
+                let age = now_ms.saturating_sub(pc.sent_at_ms);
+                if age >= max_age {
+                    warn!(
+                        oid = pc.oid,
+                        market = %pc.market,
+                        age_ms = age,
+                        "P2-2: Pending cancel auto-expired (max age exceeded)"
+                    );
+                    false
+                } else {
+                    true
+                }
+            });
+            if self.pending_cancels.len() < before && self.pending_cancels.is_empty() {
+                info!("All stale cancels auto-expired — resuming MM quoting");
+                self.stale_halt = false;
+                return;
+            }
+        }
+
+        // Already halted — don't re-log warnings
+        if self.stale_halt {
             return;
         }
 
@@ -1385,6 +1419,74 @@ mod tests {
 
         // Halt should be resolved
         assert!(!mgr.is_stale_halted());
+    }
+
+    #[test]
+    fn test_stale_cancel_auto_expires_after_max_age() {
+        let config = MakerConfig {
+            stale_cancel_timeout_ms: 5000,
+            stale_cancel_max_age_ms: 60_000, // 60s max age
+            ..test_config()
+        };
+        let mut mgr = QuoteManager::new(config);
+        let inv = InventoryManager::new(dec!(100));
+
+        // Place, confirm, requote → creates pending cancels
+        let action = mgr.on_market_update(
+            mk(),
+            Price::new(dec!(100)),
+            Price::new(dec!(100)),
+            1000,
+            &inv,
+        );
+        let cloids: Vec<ClientOrderId> = if let Some(MakerAction::PlaceOrders(orders)) = &action {
+            orders.iter().map(|o| o.cloid.clone()).collect()
+        } else {
+            panic!("Expected PlaceOrders");
+        };
+        mgr.record_resting(&mk(), &cloids[0], 100);
+        mgr.record_resting(&mk(), &cloids[1], 101);
+
+        mgr.on_market_update(
+            mk(),
+            Price::new(dec!(101)),
+            Price::new(dec!(101)),
+            4000,
+            &inv,
+        );
+
+        // Timeout triggers halt at 10s
+        mgr.on_market_update(
+            mk(),
+            Price::new(dec!(102)),
+            Price::new(dec!(102)),
+            10000,
+            &inv,
+        );
+        assert!(mgr.is_stale_halted());
+
+        // 30s later — still halted (cancels not ACKed, but not yet max age)
+        let action = mgr.on_market_update(
+            mk(),
+            Price::new(dec!(103)),
+            Price::new(dec!(103)),
+            34000,
+            &inv,
+        );
+        assert!(mgr.is_stale_halted());
+        assert!(action.is_none());
+
+        // 65s after cancel was sent (> 60s max age) → auto-expire, resume
+        let action = mgr.on_market_update(
+            mk(),
+            Price::new(dec!(104)),
+            Price::new(dec!(104)),
+            65000,
+            &inv,
+        );
+        assert!(!mgr.is_stale_halted());
+        // Should produce new quotes since halt is resolved
+        assert!(action.is_some());
     }
 
     // === P2-3: Adverse selection tests ===

@@ -103,6 +103,12 @@ pub struct MakerConfig {
     #[serde(default = "default_stale_cancel_timeout_ms")]
     pub stale_cancel_timeout_ms: u64,
 
+    /// Maximum age (ms) for a pending cancel before it is auto-expired.
+    /// Prevents infinite halt when a cancel ACK is never received
+    /// (e.g., order already rejected/gone on exchange).
+    #[serde(default = "default_stale_cancel_max_age_ms")]
+    pub stale_cancel_max_age_ms: u64,
+
     // --- P2-3: Adverse selection protection ---
     /// Number of consecutive same-side fills that triggers spread widening.
     #[serde(default = "default_adverse_consecutive_fills")]
@@ -225,6 +231,7 @@ impl Default for MakerConfig {
             inventory_warn_ratio: default_inventory_warn_ratio(),
             inventory_emergency_ratio: default_inventory_emergency_ratio(),
             stale_cancel_timeout_ms: default_stale_cancel_timeout_ms(),
+            stale_cancel_max_age_ms: default_stale_cancel_max_age_ms(),
             adverse_consecutive_fills: default_adverse_consecutive_fills(),
             adverse_spread_multiplier: default_adverse_spread_multiplier(),
             dynamic_offset_enabled: false,
@@ -289,6 +296,9 @@ fn default_inventory_emergency_ratio() -> Decimal {
 }
 fn default_stale_cancel_timeout_ms() -> u64 {
     10_000 // 10 seconds
+}
+fn default_stale_cancel_max_age_ms() -> u64 {
+    300_000 // 5 minutes
 }
 fn default_adverse_consecutive_fills() -> u32 {
     3

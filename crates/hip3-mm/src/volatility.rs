@@ -210,11 +210,7 @@ impl WickTracker {
             }
         }
 
-        let stats = Self::compute_stats(
-            &state.wicks,
-            self.min_samples,
-            self.min_jump_ratio,
-        );
+        let stats = Self::compute_stats(&state.wicks, self.min_samples, self.min_jump_ratio);
 
         state.cached_stats = Some(CachedStats {
             stats: stats.clone(),
@@ -238,10 +234,7 @@ impl WickTracker {
 
     /// Number of wick samples for a market.
     pub fn sample_count(&self, market: &MarketKey) -> usize {
-        self.markets
-            .get(market)
-            .map(|s| s.wicks.len())
-            .unwrap_or(0)
+        self.markets.get(market).map(|s| s.wicks.len()).unwrap_or(0)
     }
 
     /// Compute percentile statistics from wick history.

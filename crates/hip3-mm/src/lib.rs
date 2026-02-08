@@ -22,7 +22,7 @@ pub mod quote_engine;
 pub mod quote_manager;
 pub mod volatility;
 
-pub use config::MakerConfig;
+pub use config::{LevelDistribution, MakerConfig, SizeDistribution};
 pub use inventory::InventoryManager;
 pub use quote_engine::{compute_quotes, QuoteLevel, QuotePair};
 pub use quote_manager::{ActiveQuote, MakerAction, QuoteManager};

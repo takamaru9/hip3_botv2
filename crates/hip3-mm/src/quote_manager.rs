@@ -278,7 +278,14 @@ impl QuoteManager {
             velocity_trend,
         );
         let filtered = Self::apply_inventory_warn(&self.config, quotes, inventory_ratio);
-        let new_orders = Self::make_orders(market, &filtered, mark_price, tif, now_ms);
+        let orders_with_levels = Self::make_orders(market, &filtered, mark_price, tif, now_ms);
+        // Build level map before extracting orders (for ActiveQuote tracking)
+        let level_map: HashMap<ClientOrderId, u32> = orders_with_levels
+            .iter()
+            .map(|(o, l)| (o.cloid.clone(), *l))
+            .collect();
+        let new_orders: Vec<PendingOrder> =
+            orders_with_levels.into_iter().map(|(o, _)| o).collect();
 
         let state = self
             .states
@@ -328,7 +335,7 @@ impl QuoteManager {
         state.last_oracle = Some(oracle_price);
         state.last_requote_ms = now_ms;
 
-        // Track new orders as active quotes
+        // Track new orders as active quotes (with level from QuoteEngine)
         if let MakerAction::PlaceOrders(ref orders)
         | MakerAction::CancelAndReplace {
             new_orders: ref orders,
@@ -342,7 +349,7 @@ impl QuoteManager {
                     side: order.side,
                     price: order.price,
                     size: order.size,
-                    level: 0,
+                    level: level_map.get(&order.cloid).copied().unwrap_or(0),
                     placed_at_ms: now_ms,
                 };
                 match order.side {
@@ -447,6 +454,13 @@ impl QuoteManager {
             return None;
         }
 
+        // Use ALO (maker-only) for counter-orders, matching regular MM quoting
+        let counter_tif = if self.config.use_alo {
+            TimeInForce::AddLiquidityOnly
+        } else {
+            TimeInForce::GoodTilCancelled
+        };
+
         let counter_order = PendingOrder::with_tif(
             ClientOrderId::new(),
             *market,
@@ -455,7 +469,7 @@ impl QuoteManager {
             Size::new(size_base),
             false,
             now_ms,
-            TimeInForce::GoodTilCancelled, // GTC for counter-orders
+            counter_tif,
         );
 
         debug!(
@@ -467,6 +481,26 @@ impl QuoteManager {
             level = fill_level,
             "Phase C: counter-order generated"
         );
+
+        // Track counter-order in MarketQuoteState so it is:
+        // - included in is_mm_order() checks (P2-4 drawdown separation)
+        // - cancelled by shutdown_all()
+        // - cleaned up on record_fill/record_cancelled
+        if let Some(state) = self.states.get_mut(market) {
+            let quote = ActiveQuote {
+                cloid: counter_order.cloid.clone(),
+                oid: None,
+                side: counter_side,
+                price: counter_price,
+                size: counter_order.size,
+                level: fill_level,
+                placed_at_ms: now_ms,
+            };
+            match counter_side {
+                OrderSide::Buy => state.bids.push(quote),
+                OrderSide::Sell => state.asks.push(quote),
+            }
+        }
 
         Some(MakerAction::PlaceOrders(vec![counter_order]))
     }
@@ -794,13 +828,15 @@ impl QuoteManager {
         oracle_change_bps >= config.min_requote_change_bps
     }
 
+    /// Build pending orders from quote levels.
+    /// Returns tuples of (PendingOrder, level_index) for level tracking.
     fn make_orders(
         market: MarketKey,
         quotes: &QuotePair,
         mark_price: Price,
         tif: TimeInForce,
         now_ms: u64,
-    ) -> Vec<PendingOrder> {
+    ) -> Vec<(PendingOrder, u32)> {
         let mut orders = Vec::new();
 
         for bid in &quotes.bids {
@@ -811,15 +847,18 @@ impl QuoteManager {
             };
 
             if size_base > Decimal::ZERO {
-                orders.push(PendingOrder::with_tif(
-                    ClientOrderId::new(),
-                    market,
-                    OrderSide::Buy,
-                    bid.price,
-                    Size::new(size_base),
-                    false,
-                    now_ms,
-                    tif,
+                orders.push((
+                    PendingOrder::with_tif(
+                        ClientOrderId::new(),
+                        market,
+                        OrderSide::Buy,
+                        bid.price,
+                        Size::new(size_base),
+                        false,
+                        now_ms,
+                        tif,
+                    ),
+                    bid.level,
                 ));
             }
         }
@@ -832,15 +871,18 @@ impl QuoteManager {
             };
 
             if size_base > Decimal::ZERO {
-                orders.push(PendingOrder::with_tif(
-                    ClientOrderId::new(),
-                    market,
-                    OrderSide::Sell,
-                    ask.price,
-                    Size::new(size_base),
-                    false,
-                    now_ms,
-                    tif,
+                orders.push((
+                    PendingOrder::with_tif(
+                        ClientOrderId::new(),
+                        market,
+                        OrderSide::Sell,
+                        ask.price,
+                        Size::new(size_base),
+                        false,
+                        now_ms,
+                        tif,
+                    ),
+                    ask.level,
                 ));
             }
         }
@@ -1577,13 +1619,7 @@ mod tests {
         // Feed multiple oracle updates across different seconds
         for sec in 0u64..10 {
             let price = dec!(100) + Decimal::new(sec as i64, 2);
-            mgr.on_market_update(
-                mk(),
-                Price::new(price),
-                Price::new(price),
-                sec * 1000,
-                &inv,
-            );
+            mgr.on_market_update(mk(), Price::new(price), Price::new(price), sec * 1000, &inv);
         }
 
         // WickTracker should have accumulated samples
@@ -1660,9 +1696,9 @@ mod tests {
         if let Some(MakerAction::PlaceOrders(orders)) = result {
             assert_eq!(orders.len(), 1);
             assert_eq!(orders[0].side, OrderSide::Sell); // counter is SELL
-            // fill_px=99.80, oracle=100, distance=0.20
-            // reversion = 0.20 * 0.6 = 0.12
-            // counter_price = 99.80 + 0.12 = 99.92
+                                                         // fill_px=99.80, oracle=100, distance=0.20
+                                                         // reversion = 0.20 * 0.6 = 0.12
+                                                         // counter_price = 99.80 + 0.12 = 99.92
             assert_eq!(orders[0].price.inner(), dec!(99.92));
         } else {
             panic!("Expected PlaceOrders");
@@ -1700,10 +1736,7 @@ mod tests {
 
         // Find L2 bid (should be the one with the lowest price)
         // With 3 levels: bid[0]=99.80, bid[1]=99.60, bid[2]=99.40
-        let buy_orders: Vec<_> = orders
-            .iter()
-            .filter(|o| o.side == OrderSide::Buy)
-            .collect();
+        let buy_orders: Vec<_> = orders.iter().filter(|o| o.side == OrderSide::Buy).collect();
         // The outermost bid (lowest price) — it's the last buy order
         let outer_bid = buy_orders.last().unwrap();
 
@@ -1713,11 +1746,11 @@ mod tests {
         assert!(result.is_some());
         if let Some(MakerAction::PlaceOrders(counter)) = result {
             assert_eq!(counter[0].side, OrderSide::Sell);
-            // Level stored as 0 in ActiveQuote (our make_orders doesn't set level)
-            // So reversion = 0.5 + 0.1*0 = 0.5
+            // Level correctly stored as 2 in ActiveQuote (make_orders sets level)
+            // reversion = 0.5 + 0.1*2 = 0.7
             // fill_px = 99.40, oracle=100, distance=0.60
-            // counter = 99.40 + 0.60 * 0.5 = 99.70
-            assert_eq!(counter[0].price.inner(), dec!(99.70));
+            // counter = 99.40 + 0.60 * 0.7 = 99.82
+            assert_eq!(counter[0].price.inner(), dec!(99.82));
         } else {
             panic!("Expected PlaceOrders");
         }

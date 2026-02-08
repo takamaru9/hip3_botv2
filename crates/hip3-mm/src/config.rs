@@ -3,6 +3,28 @@
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
+/// Level distribution strategy.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum LevelDistribution {
+    /// Uniform spacing: L0 + spacing * i
+    #[default]
+    Linear,
+    /// Exponential spacing: inner levels closer, outer levels further
+    Exponential,
+}
+
+/// Size distribution strategy.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum SizeDistribution {
+    /// Equal size per level.
+    #[default]
+    Uniform,
+    /// Outer levels get larger sizes (v1 lesson: outer fills = higher profit).
+    Convex,
+}
+
 /// Market making configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MakerConfig {
@@ -122,11 +144,11 @@ pub struct MakerConfig {
     pub breakpoint_min_jump_ratio: f64,
 
     // --- Phase B: Level distribution + size distribution ---
-    /// Level distribution: "linear" (default) or "exponential".
+    /// Level distribution strategy.
     /// Exponential places inner levels closer together and outer levels further apart,
     /// covering the P100 wick range adaptively.
-    #[serde(default = "default_level_distribution")]
-    pub level_distribution: String,
+    #[serde(default)]
+    pub level_distribution: LevelDistribution,
 
     /// Exponent for exponential level distribution (1.0 = linear, 2.0 = quadratic).
     #[serde(default = "default_level_exponent")]
@@ -140,10 +162,10 @@ pub struct MakerConfig {
     #[serde(default = "default_min_range_width_bps")]
     pub min_range_width_bps: Decimal,
 
-    /// Size distribution: "uniform" (default) or "convex".
+    /// Size distribution strategy.
     /// Convex gives outer levels larger sizes (v1 lesson: outer fills = higher profit).
-    #[serde(default = "default_size_distribution")]
-    pub size_distribution: String,
+    #[serde(default)]
+    pub size_distribution: SizeDistribution,
 
     /// Size multiplier for L0 (innermost level) in convex mode.
     #[serde(default = "default_size_min_multiplier")]
@@ -212,11 +234,11 @@ impl Default for MakerConfig {
             fee_buffer_bps: default_fee_buffer_bps(),
             wick_cache_ttl_ms: default_wick_cache_ttl_ms(),
             breakpoint_min_jump_ratio: default_breakpoint_min_jump_ratio(),
-            level_distribution: default_level_distribution(),
+            level_distribution: LevelDistribution::default(),
             level_exponent: default_level_exponent(),
             p100_safety_multiplier: default_p100_safety_multiplier(),
             min_range_width_bps: default_min_range_width_bps(),
-            size_distribution: default_size_distribution(),
+            size_distribution: SizeDistribution::default(),
             size_min_multiplier: default_size_min_multiplier(),
             size_max_multiplier: default_size_max_multiplier(),
             counter_order_enabled: false,
@@ -292,9 +314,6 @@ fn default_wick_cache_ttl_ms() -> u64 {
 fn default_breakpoint_min_jump_ratio() -> f64 {
     1.5 // 1.5x ratio triggers cliff detection
 }
-fn default_level_distribution() -> String {
-    "linear".to_string()
-}
 fn default_level_exponent() -> Decimal {
     Decimal::TWO // quadratic distribution
 }
@@ -303,9 +322,6 @@ fn default_p100_safety_multiplier() -> Decimal {
 }
 fn default_min_range_width_bps() -> Decimal {
     Decimal::new(10, 0) // 10 bps minimum range
-}
-fn default_size_distribution() -> String {
-    "uniform".to_string()
 }
 fn default_size_min_multiplier() -> Decimal {
     Decimal::new(5, 1) // 0.5x for L0
@@ -352,11 +368,11 @@ mod tests {
         assert_eq!(config.wick_cache_ttl_ms, 10_000);
         assert!((config.breakpoint_min_jump_ratio - 1.5).abs() < f64::EPSILON);
         // Phase B: Level + size distribution defaults
-        assert_eq!(config.level_distribution, "linear");
+        assert_eq!(config.level_distribution, LevelDistribution::Linear);
         assert_eq!(config.level_exponent, dec!(2));
         assert_eq!(config.p100_safety_multiplier, dec!(1.2));
         assert_eq!(config.min_range_width_bps, dec!(10));
-        assert_eq!(config.size_distribution, "uniform");
+        assert_eq!(config.size_distribution, SizeDistribution::Uniform);
         assert_eq!(config.size_min_multiplier, dec!(0.5));
         assert_eq!(config.size_max_multiplier, dec!(1.5));
         // Phase C: Counter-order + velocity skew defaults

@@ -10,7 +10,7 @@ use rust_decimal_macros::dec;
 
 use hip3_core::Price;
 
-use crate::config::MakerConfig;
+use crate::config::{LevelDistribution, MakerConfig, SizeDistribution};
 use crate::volatility::VolatilityStats;
 
 /// A single quote level (one side).
@@ -83,8 +83,8 @@ pub fn compute_quotes(
     let effective_min_offset = if config.dynamic_offset_enabled {
         match volatility {
             Some(vol) if vol.is_valid => {
-                let optimal = Decimal::from_f64_retain(vol.optimal_wick_bps)
-                    .unwrap_or(Decimal::ZERO);
+                let optimal =
+                    Decimal::from_f64_retain(vol.optimal_wick_bps).unwrap_or(Decimal::ZERO);
                 (optimal * config.l0_wick_multiplier)
                     .max(config.min_offset_bps)
                     .max(config.fee_buffer_bps)
@@ -96,7 +96,8 @@ pub fn compute_quotes(
     };
 
     // Phase B: Compute range upper bound for exponential distribution
-    let use_exponential = config.level_distribution == "exponential" && config.num_levels > 1;
+    let use_exponential =
+        config.level_distribution == LevelDistribution::Exponential && config.num_levels > 1;
     let range_upper = if use_exponential {
         // range_upper = max(P100 × safety_mult, L0 + min_range_width)
         let p100_based = volatility
@@ -113,13 +114,12 @@ pub fn compute_quotes(
     };
 
     // Phase B: Convex size distribution
-    let use_convex = config.size_distribution == "convex" && config.num_levels > 1;
+    let use_convex = config.size_distribution == SizeDistribution::Convex && config.num_levels > 1;
 
     for level in 0..config.num_levels {
         // Phase B: Level offset calculation
         let base_offset = if use_exponential {
-            let t = Decimal::from(level)
-                / Decimal::from(config.num_levels - 1);
+            let t = Decimal::from(level) / Decimal::from(config.num_levels - 1);
             let t_exp = decimal_pow(t, config.level_exponent);
             (effective_min_offset + t_exp * (range_upper - effective_min_offset)) * multiplier
         } else {
@@ -142,8 +142,8 @@ pub fn compute_quotes(
             let clamped_vel = velocity_trend.max(dec!(-1)).min(dec!(1));
             let vel_skew = config.velocity_skew_factor * clamped_vel;
             // Positive vel_skew (oracle rising): ask *= (1 - vel_skew), bid *= (1 + vel_skew)
-            bid_offset_bps = bid_offset_bps * (dec!(1) + vel_skew);
-            ask_offset_bps = ask_offset_bps * (dec!(1) - vel_skew);
+            bid_offset_bps *= dec!(1) + vel_skew;
+            ask_offset_bps *= dec!(1) - vel_skew;
         }
 
         // Ensure minimum offset is never negative
@@ -155,8 +155,7 @@ pub fn compute_quotes(
 
         // Phase B: Per-level size
         let level_size = if use_convex {
-            let t = Decimal::from(level)
-                / Decimal::from(config.num_levels - 1);
+            let t = Decimal::from(level) / Decimal::from(config.num_levels - 1);
             let size_mult = config.size_min_multiplier
                 + (config.size_max_multiplier - config.size_min_multiplier) * t;
             config.size_per_level_usd * size_mult
@@ -471,7 +470,7 @@ mod tests {
             min_offset_bps: dec!(20),
             level_spacing_bps: dec!(10),
             size_per_level_usd: dec!(5),
-            level_distribution: "linear".to_string(),
+            level_distribution: LevelDistribution::Linear,
             ..Default::default()
         };
         let oracle = Price::new(dec!(100));
@@ -483,7 +482,7 @@ mod tests {
         let exp_config = MakerConfig {
             num_levels: 3,
             min_offset_bps: dec!(20),
-            level_distribution: "exponential".to_string(),
+            level_distribution: LevelDistribution::Exponential,
             level_exponent: dec!(1), // linear
             min_range_width_bps: dec!(10),
             size_per_level_usd: dec!(5),
@@ -515,7 +514,7 @@ mod tests {
             dynamic_offset_enabled: true,
             min_offset_bps: dec!(20),
             l0_wick_multiplier: dec!(1), // L0 = 20 bps
-            level_distribution: "exponential".to_string(),
+            level_distribution: LevelDistribution::Exponential,
             level_exponent: dec!(2), // quadratic
             p100_safety_multiplier: dec!(1.2),
             min_range_width_bps: dec!(10),
@@ -554,7 +553,7 @@ mod tests {
             dynamic_offset_enabled: true,
             min_offset_bps: dec!(20),
             l0_wick_multiplier: dec!(1),
-            level_distribution: "exponential".to_string(),
+            level_distribution: LevelDistribution::Exponential,
             level_exponent: dec!(2),
             p100_safety_multiplier: dec!(1.2),
             min_range_width_bps: dec!(10),
@@ -597,7 +596,7 @@ mod tests {
             dynamic_offset_enabled: true,
             min_offset_bps: dec!(20),
             l0_wick_multiplier: dec!(1), // L0 = 20 (floor wins over 3*1=3)
-            level_distribution: "exponential".to_string(),
+            level_distribution: LevelDistribution::Exponential,
             level_exponent: dec!(2),
             p100_safety_multiplier: dec!(1.2),
             min_range_width_bps: dec!(10),
@@ -632,7 +631,7 @@ mod tests {
             min_offset_bps: dec!(20),
             level_spacing_bps: dec!(10),
             size_per_level_usd: dec!(10),
-            size_distribution: "convex".to_string(),
+            size_distribution: SizeDistribution::Convex,
             size_min_multiplier: dec!(0.5),
             size_max_multiplier: dec!(1.5),
             ..Default::default()
@@ -668,7 +667,7 @@ mod tests {
             min_offset_bps: dec!(20),
             level_spacing_bps: dec!(10),
             size_per_level_usd: dec!(10),
-            size_distribution: "convex".to_string(),
+            size_distribution: SizeDistribution::Convex,
             size_min_multiplier: dec!(0.5),
             size_max_multiplier: dec!(1.5),
             ..Default::default()
@@ -691,7 +690,7 @@ mod tests {
             min_offset_bps: dec!(20),
             level_spacing_bps: dec!(10),
             size_per_level_usd: dec!(5),
-            size_distribution: "uniform".to_string(),
+            size_distribution: SizeDistribution::Uniform,
             ..Default::default()
         };
         let oracle = Price::new(dec!(100));
@@ -711,7 +710,7 @@ mod tests {
         let config = MakerConfig {
             num_levels: 1,
             min_offset_bps: dec!(20),
-            level_distribution: "exponential".to_string(),
+            level_distribution: LevelDistribution::Exponential,
             level_exponent: dec!(2),
             size_per_level_usd: dec!(5),
             ..Default::default()

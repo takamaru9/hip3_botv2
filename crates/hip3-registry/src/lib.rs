@@ -12,7 +12,7 @@ pub mod preflight;
 pub mod spec_cache;
 pub mod user_state;
 
-pub use client::MetaClient;
+pub use client::{MetaClient, OpenOrder};
 pub use error::{RegistryError, RegistryResult};
 pub use preflight::{
     validate_market_keys, DiscoveredMarket, PerpDexInfo, PerpDexsResponse, PerpMarketInfo,

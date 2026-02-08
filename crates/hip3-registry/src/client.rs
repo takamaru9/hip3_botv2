@@ -56,6 +56,27 @@ struct RawPerpDexEntry {
     asset_to_streaming_oi_cap: Vec<(String, String)>,
 }
 
+/// Open order entry from the exchange API.
+///
+/// Returned by `fetch_open_orders()`. Contains the order ID needed
+/// to cancel orphaned orders on startup.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct OpenOrder {
+    /// Asset identifier (e.g., "xyz:SILVER").
+    pub coin: String,
+    /// Limit price as decimal string.
+    #[serde(rename = "limitPx")]
+    pub limit_px: String,
+    /// Exchange order ID.
+    pub oid: u64,
+    /// Order side ("A" for ask/sell, "B" for bid/buy).
+    pub side: String,
+    /// Order size as decimal string.
+    pub sz: String,
+    /// Order timestamp in milliseconds.
+    pub timestamp: u64,
+}
+
 /// Client for fetching exchange metadata.
 pub struct MetaClient {
     /// HTTP client.
@@ -289,6 +310,58 @@ impl MetaClient {
         Ok(index_map)
     }
 
+    /// Fetch open orders for a user.
+    ///
+    /// Returns all open orders on the specified DEX.
+    /// Used at startup to detect and cancel orphaned orders from previous sessions.
+    ///
+    /// # Arguments
+    /// * `user_address` - User's Ethereum address (0x...).
+    /// * `dex` - Optional DEX name (e.g., "xyz"). Required for perpDex orders.
+    pub async fn fetch_open_orders(
+        &self,
+        user_address: &str,
+        dex: Option<&str>,
+    ) -> RegistryResult<Vec<OpenOrder>> {
+        info!(
+            url = %self.info_url,
+            user = %user_address,
+            dex = ?dex,
+            "Fetching openOrders from exchange"
+        );
+
+        let request = InfoRequestWithUserAndDex {
+            request_type: "openOrders".to_string(),
+            user: user_address.to_string(),
+            dex: dex.map(|s| s.to_string()),
+        };
+
+        let response = self
+            .client
+            .post(&self.info_url)
+            .json(&request)
+            .send()
+            .await
+            .map_err(|e| RegistryError::HttpClient(format!("HTTP request failed: {e}")))?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            return Err(RegistryError::HttpClient(format!("HTTP {status}: {body}")));
+        }
+
+        let orders: Vec<OpenOrder> = response.json().await.map_err(|e| {
+            RegistryError::HttpClient(format!("Failed to parse openOrders: {e}"))
+        })?;
+
+        info!(
+            order_count = orders.len(),
+            "Fetched openOrders successfully"
+        );
+
+        Ok(orders)
+    }
+
     /// Fetch clearinghouse state for a user.
     ///
     /// Contains account summary and open positions.
@@ -357,5 +430,44 @@ mod tests {
         };
         let json = serde_json::to_string(&request).unwrap();
         assert_eq!(json, r#"{"type":"perpDexs"}"#);
+    }
+
+    #[test]
+    fn test_open_orders_request_serialization() {
+        let request = InfoRequestWithUserAndDex {
+            request_type: "openOrders".to_string(),
+            user: "0x1234".to_string(),
+            dex: Some("xyz".to_string()),
+        };
+        let json = serde_json::to_string(&request).unwrap();
+        assert!(json.contains(r#""type":"openOrders""#));
+        assert!(json.contains(r#""user":"0x1234""#));
+        assert!(json.contains(r#""dex":"xyz""#));
+    }
+
+    #[test]
+    fn test_open_order_deserialization() {
+        let json = r#"{
+            "coin": "xyz:SILVER",
+            "limitPx": "31.50",
+            "oid": 12345678,
+            "side": "B",
+            "sz": "0.40",
+            "timestamp": 1707400000000
+        }"#;
+        let order: OpenOrder = serde_json::from_str(json).unwrap();
+        assert_eq!(order.coin, "xyz:SILVER");
+        assert_eq!(order.oid, 12345678);
+        assert_eq!(order.side, "B");
+        assert_eq!(order.sz, "0.40");
+        assert_eq!(order.limit_px, "31.50");
+        assert_eq!(order.timestamp, 1707400000000);
+    }
+
+    #[test]
+    fn test_open_orders_empty_array() {
+        let json = "[]";
+        let orders: Vec<OpenOrder> = serde_json::from_str(json).unwrap();
+        assert!(orders.is_empty());
     }
 }

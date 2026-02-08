@@ -512,6 +512,87 @@ impl Application {
     /// Called at startup to initialize PositionTracker with current positions.
     /// Also updates account balance for dynamic position sizing.
     /// This prevents stale position state after bot restart.
+    /// Cancel all open orders on the xyz DEX at startup.
+    ///
+    /// Prevents orphaned orders from previous sessions accumulating on the exchange.
+    /// Container restart (SIGTERM) does not cancel exchange orders, so new sessions
+    /// must clean up before placing fresh quotes.
+    async fn cancel_orphaned_orders(
+        &self,
+        user_address: &str,
+        batch_scheduler: &Arc<hip3_executor::BatchScheduler>,
+    ) -> AppResult<()> {
+        let dex_name = self.config.xyz_pattern.as_str();
+        info!(user_address = %user_address, dex = %dex_name, "Checking for orphaned orders");
+
+        let client = MetaClient::new(&self.config.info_url)
+            .map_err(|e| AppError::Executor(format!("Failed to create HTTP client: {e}")))?;
+
+        let open_orders = client
+            .fetch_open_orders(user_address, Some(dex_name))
+            .await
+            .map_err(|e| AppError::Executor(format!("Failed to fetch open orders: {e}")))?;
+
+        if open_orders.is_empty() {
+            info!("No orphaned orders found");
+            return Ok(());
+        }
+
+        warn!(
+            count = open_orders.len(),
+            "Found orphaned orders, cancelling all"
+        );
+
+        let now_ms = current_time_ms();
+        let dex_id = self.get_dex_id();
+        let mut cancelled = 0u32;
+        let mut skipped = 0u32;
+
+        for order in &open_orders {
+            // Resolve coin name to MarketKey
+            let market_key = self.coin_to_market_key(&order.coin, dex_id);
+            let market_key = match market_key {
+                Some(key) => key,
+                None => {
+                    warn!(
+                        coin = %order.coin,
+                        oid = order.oid,
+                        "Cannot resolve market for orphaned order, skipping"
+                    );
+                    skipped += 1;
+                    continue;
+                }
+            };
+
+            let cancel = hip3_core::PendingCancel::new(market_key, order.oid, now_ms);
+            match batch_scheduler.enqueue_cancel(cancel) {
+                hip3_core::EnqueueResult::Queued | hip3_core::EnqueueResult::QueuedDegraded => {
+                    cancelled += 1;
+                }
+                hip3_core::EnqueueResult::QueueFull => {
+                    warn!(
+                        oid = order.oid,
+                        "Cancel queue full, remaining orphans not cancelled"
+                    );
+                    break;
+                }
+                hip3_core::EnqueueResult::InflightFull => {
+                    warn!("Inflight full, cannot cancel orphaned orders");
+                    break;
+                }
+            }
+        }
+
+        info!(
+            cancelled = cancelled,
+            skipped = skipped,
+            total = open_orders.len(),
+            "Orphaned order cleanup complete"
+        );
+
+        Ok(())
+    }
+
     ///
     /// # Balance Query Strategy
     /// When trading on xyz DEX, funds automatically transfer between L1 and xyz.
@@ -1071,6 +1152,18 @@ impl Application {
                     tick_executor_loop.tick(current_time_ms()).await;
                 }
             });
+
+            // 12.5. Cancel orphaned orders from previous session (MM startup cleanup)
+            if self.config.maker.enabled {
+                if let Some(ref user_addr) = trading_user_address {
+                    if let Err(e) = self
+                        .cancel_orphaned_orders(user_addr, &batch_scheduler)
+                        .await
+                    {
+                        warn!(?e, "Failed to cancel orphaned orders, MM may create duplicates");
+                    }
+                }
+            }
 
             // 13. TimeStopMonitor for automatic position exit
             {

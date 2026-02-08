@@ -731,6 +731,13 @@ impl ExecutorLoop {
                             .record_oid_mapping(cloid.clone(), *oid)
                             .await;
                     }
+                    OrderResponseStatus::Success => {
+                        // ALO order accepted - OID will arrive via orderUpdate
+                        debug!(
+                            cloid = %cloid,
+                            "ALO order accepted (OID pending via orderUpdate)"
+                        );
+                    }
                 }
             }
         }

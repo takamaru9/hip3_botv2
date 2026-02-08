@@ -140,10 +140,11 @@ pub struct ActionResponseDetails {
 
 /// Order status from post response statuses array.
 ///
-/// Hyperliquid returns one of three status types:
-/// - `resting`: Order is on the order book
+/// Hyperliquid returns one of these status types:
+/// - `resting`: Order is on the order book (with OID)
 /// - `filled`: Order was immediately filled
 /// - `error`: Order was rejected
+/// - `"success"`: ALO order accepted (OID comes via orderUpdate)
 #[derive(Debug, Clone)]
 pub enum OrderResponseStatus {
     /// Order is resting on order book.
@@ -165,6 +166,8 @@ pub enum OrderResponseStatus {
         /// Error message.
         message: String,
     },
+    /// ALO order accepted (OID not yet known, will arrive via orderUpdate).
+    Success,
 }
 
 impl ActionResponsePayload {
@@ -185,6 +188,16 @@ impl ActionResponsePayload {
         };
 
         for status in statuses {
+            // Handle plain string statuses (e.g., ALO "success")
+            if let Some(s) = status.as_str() {
+                if s == "success" {
+                    results.push(OrderResponseStatus::Success);
+                } else {
+                    tracing::warn!(status = %s, "Unknown string status in post response");
+                }
+                continue;
+            }
+
             // Try parsing as resting
             if let Some(resting) = status.get("resting") {
                 if let Some(oid) = resting.get("oid").and_then(|v| v.as_u64()) {

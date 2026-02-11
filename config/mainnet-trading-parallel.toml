@@ -369,7 +369,8 @@ confidence_sizing = true
 baseline_tracking = true
 baseline_alpha = 0.001              # Slow EWMA (~1000 tick half-life)
 baseline_min_samples = 100          # Warmup: 100 updates before trusting baseline
-min_edge_above_baseline_bps = 0     # 0 = observation mode (track but don't filter)
+min_edge_above_baseline_bps = 10    # 2026-02-11: Enable filtering. NVDA edge_above=3.1 bps (structural), BABA=20.8, HOOD=43.8
+                                    # Observation data Feb 9-11: signals with edge_above<10 = mostly NVDA overtrading (-$0.084)
 #
 # Sprint 2: Edge Velocity Gate
 # Requires minimum oracle movement speed for signal generation.
@@ -383,7 +384,8 @@ min_edge_velocity_bps = 5           # 5 bps/tick minimum oracle speed
 # Signals with confidence below this threshold are rejected.
 # 0.0 = disabled (all signals pass). Recommended: 0.3-0.4.
 # Start disabled (observation mode) to measure confidence distribution.
-min_confidence_entry = 0.0
+min_confidence_entry = 0.35          # 2026-02-11: Low-confidence filter. Removes TSLA(0.34,-$0.02), MSFT(0.34,-$0.05)
+                                    # Max possible confidence ~0.60 (velocity+consecutive=0 with Unchanged oracle)
 #
 # Quote Lag Gate (PR-5: True Stale Liquidity)
 # Only generate signals when oracle changed within this time window.

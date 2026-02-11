@@ -328,7 +328,8 @@ taker_fee_bps = 2              # Actual fee ~0.79 bps, but 2 bps for safety (HIP
 # 2026-02-03: Measured spread 8-13 bps per side, 16-26 bps round trip
 slippage_bps = 25              # 20 → 25: More realistic spread estimate (25 bps round trip)
 min_edge_bps = 30              # 25 → 30: Require edge > spread cost to be profitable
-oracle_direction_filter = false # Disable: 40+ bps signals being blocked by Unchanged oracle direction
+oracle_direction_filter = true  # 2026-02-11: Re-enabled. Now uses OracleMovementTracker (windowed) instead of tick-by-tick
+                                # Buy requires consecutive_up>0, Sell requires consecutive_down>0
 min_oracle_change_bps = 0      # Disable: Velocity filter blocking signals with stale oracle
 # Oracle consecutive filter (P2): エントリー前にオラクルがN回連続で同方向に動いていることを要求
 # データ分析結果:

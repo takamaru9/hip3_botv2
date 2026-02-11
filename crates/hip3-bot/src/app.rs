@@ -1160,7 +1160,10 @@ impl Application {
                         .cancel_orphaned_orders(user_addr, &batch_scheduler)
                         .await
                     {
-                        warn!(?e, "Failed to cancel orphaned orders, MM may create duplicates");
+                        warn!(
+                            ?e,
+                            "Failed to cancel orphaned orders, MM may create duplicates"
+                        );
                     }
                 }
             }

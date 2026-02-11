@@ -350,9 +350,10 @@ impl MetaClient {
             return Err(RegistryError::HttpClient(format!("HTTP {status}: {body}")));
         }
 
-        let orders: Vec<OpenOrder> = response.json().await.map_err(|e| {
-            RegistryError::HttpClient(format!("Failed to parse openOrders: {e}"))
-        })?;
+        let orders: Vec<OpenOrder> = response
+            .json()
+            .await
+            .map_err(|e| RegistryError::HttpClient(format!("Failed to parse openOrders: {e}")))?;
 
         info!(
             order_count = orders.len(),

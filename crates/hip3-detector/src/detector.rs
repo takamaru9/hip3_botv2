@@ -459,17 +459,26 @@ impl DislocationDetector {
 
         // Oracle Direction Filter: Buy only when oracle is rising (stale ask)
         // This filters out signals caused by oracle lagging in downtrend
-        if self.config.oracle_direction_filter
-            && !self.is_direction_compatible(OrderSide::Buy, oracle_movement.direction)
-        {
-            tracing::debug!(
-                %key,
-                side = "buy",
-                raw_edge_bps = %raw_edge_bps,
-                oracle_direction = ?oracle_movement.direction,
-                "Signal skipped: oracle not rising (oracle lag in downtrend)"
-            );
-            return None;
+        // Phase 2: Use OracleMovementTracker (windowed) when available, fall back to tick-by-tick
+        if self.config.oracle_direction_filter {
+            let direction_ok = if let Some(tracker) = oracle_tracker {
+                // Windowed direction: oracle has recently moved up at least once
+                tracker.consecutive(&key, MoveDirection::Up) > 0
+            } else {
+                // Fallback: tick-by-tick comparison
+                self.is_direction_compatible(OrderSide::Buy, oracle_movement.direction)
+            };
+            if !direction_ok {
+                tracing::debug!(
+                    %key,
+                    side = "buy",
+                    raw_edge_bps = %raw_edge_bps,
+                    oracle_direction = ?oracle_movement.direction,
+                    tracker_consecutive_up = oracle_tracker.map(|t| t.consecutive(&key, MoveDirection::Up)).unwrap_or(0),
+                    "Signal skipped: oracle not rising (oracle lag in downtrend)"
+                );
+                return None;
+            }
         }
 
         // Oracle Velocity Filter: Skip if oracle movement is too small
@@ -568,8 +577,12 @@ impl DislocationDetector {
             return None;
         }
 
-        // P2-1: Calculate velocity multiplier for sizing
-        let velocity_multiplier = self.config.velocity_multiplier(oracle_movement.change_bps);
+        // P2-1: Calculate velocity - prefer tracker's windowed velocity over tick-by-tick
+        let effective_velocity_bps = oracle_tracker
+            .map(|t| t.velocity_bps(&key))
+            .filter(|v| !v.is_zero())
+            .unwrap_or(oracle_movement.change_bps);
+        let velocity_multiplier = self.config.velocity_multiplier(effective_velocity_bps);
 
         // P3-1: Calculate confidence multiplier for sizing
         let consecutive_up = oracle_tracker
@@ -591,7 +604,7 @@ impl DislocationDetector {
         let confidence = self.confidence_score(
             raw_edge_bps,
             total_cost,
-            oracle_movement.change_bps,
+            effective_velocity_bps,
             consecutive_up,
             liquidity_factor,
             &key,
@@ -663,12 +676,14 @@ impl DislocationDetector {
             ask = %ask,
             oracle_direction = ?oracle_movement.direction,
             oracle_change_bps = %oracle_movement.change_bps,
+            %effective_velocity_bps,
             %velocity_multiplier,
             %confidence,
             %exit_profile,
             %baseline_gap_bps,
             %edge_above_baseline_bps,
             ?oracle_age_ms,
+            consecutive_up,
             "Dislocation detected (P0-24: HIP-3 2x fee applied)"
         );
 
@@ -683,7 +698,7 @@ impl DislocationDetector {
             ask,
             ask_size,
             fee_metadata,
-            oracle_movement.change_bps,
+            effective_velocity_bps,
             confidence,
         );
         signal.baseline_gap_bps = baseline_gap_bps;
@@ -748,17 +763,26 @@ impl DislocationDetector {
 
         // Oracle Direction Filter: Sell only when oracle is falling (stale bid)
         // This filters out signals caused by oracle lagging in uptrend
-        if self.config.oracle_direction_filter
-            && !self.is_direction_compatible(OrderSide::Sell, oracle_movement.direction)
-        {
-            tracing::debug!(
-                %key,
-                side = "sell",
-                raw_edge_bps = %raw_edge_bps,
-                oracle_direction = ?oracle_movement.direction,
-                "Signal skipped: oracle not falling (oracle lag in uptrend)"
-            );
-            return None;
+        // Phase 2: Use OracleMovementTracker (windowed) when available, fall back to tick-by-tick
+        if self.config.oracle_direction_filter {
+            let direction_ok = if let Some(tracker) = oracle_tracker {
+                // Windowed direction: oracle has recently moved down at least once
+                tracker.consecutive(&key, MoveDirection::Down) > 0
+            } else {
+                // Fallback: tick-by-tick comparison
+                self.is_direction_compatible(OrderSide::Sell, oracle_movement.direction)
+            };
+            if !direction_ok {
+                tracing::debug!(
+                    %key,
+                    side = "sell",
+                    raw_edge_bps = %raw_edge_bps,
+                    oracle_direction = ?oracle_movement.direction,
+                    tracker_consecutive_down = oracle_tracker.map(|t| t.consecutive(&key, MoveDirection::Down)).unwrap_or(0),
+                    "Signal skipped: oracle not falling (oracle lag in uptrend)"
+                );
+                return None;
+            }
         }
 
         // Oracle Velocity Filter: Skip if oracle movement is too small
@@ -857,8 +881,12 @@ impl DislocationDetector {
             return None;
         }
 
-        // P2-1: Calculate velocity multiplier for sizing
-        let velocity_multiplier = self.config.velocity_multiplier(oracle_movement.change_bps);
+        // P2-1: Calculate velocity - prefer tracker's windowed velocity over tick-by-tick
+        let effective_velocity_bps = oracle_tracker
+            .map(|t| t.velocity_bps(&key))
+            .filter(|v| !v.is_zero())
+            .unwrap_or(oracle_movement.change_bps);
+        let velocity_multiplier = self.config.velocity_multiplier(effective_velocity_bps);
 
         // P3-1: Calculate confidence multiplier for sizing
         let consecutive_down = oracle_tracker
@@ -879,7 +907,7 @@ impl DislocationDetector {
         let confidence = self.confidence_score(
             raw_edge_bps,
             total_cost,
-            oracle_movement.change_bps,
+            effective_velocity_bps,
             consecutive_down,
             liquidity_factor,
             &key,
@@ -949,12 +977,14 @@ impl DislocationDetector {
             bid = %bid,
             oracle_direction = ?oracle_movement.direction,
             oracle_change_bps = %oracle_movement.change_bps,
+            %effective_velocity_bps,
             %velocity_multiplier,
             %confidence,
             %exit_profile,
             %baseline_gap_bps,
             %edge_above_baseline_bps,
             ?oracle_age_ms,
+            consecutive_down,
             "Dislocation detected (P0-24: HIP-3 2x fee applied)"
         );
 
@@ -969,7 +999,7 @@ impl DislocationDetector {
             bid,
             bid_size,
             fee_metadata,
-            oracle_movement.change_bps,
+            effective_velocity_bps,
             confidence,
         );
         signal.baseline_gap_bps = baseline_gap_bps;

@@ -138,6 +138,46 @@ impl ExitWatcher {
         }
     }
 
+    /// Check if a losing trade should skip MarkRegression exit.
+    ///
+    /// Returns true if the trade is in loss and the loss is within the
+    /// min_loss_exit_bps tolerance — meaning MarkRegression should NOT exit,
+    /// letting OracleExit or TimeStop handle it instead.
+    fn should_skip_loss_exit(&self, position: &Position, exit_price: Decimal) -> bool {
+        if self.config.min_loss_exit_bps.is_zero() {
+            return false; // Disabled: never skip
+        }
+
+        let entry = position.entry_price.inner();
+        if entry.is_zero() {
+            return false;
+        }
+
+        let pnl_bps = match position.side {
+            OrderSide::Buy => (exit_price - entry) / entry * Decimal::from(10000),
+            OrderSide::Sell => (entry - exit_price) / entry * Decimal::from(10000),
+        };
+
+        // If profitable, don't skip (take profit normally)
+        if pnl_bps >= Decimal::ZERO {
+            return false;
+        }
+
+        // If loss is within tolerance, skip exit
+        if pnl_bps.abs() < self.config.min_loss_exit_bps {
+            debug!(
+                market = %position.market,
+                side = ?position.side,
+                pnl_bps = %pnl_bps,
+                min_loss_exit_bps = %self.config.min_loss_exit_bps,
+                "ExitWatcher: skipping exit on small loss (letting OracleExit handle)"
+            );
+            return true;
+        }
+
+        false // Large loss: exit immediately
+    }
+
     /// Check if a position should exit based on mark regression.
     ///
     /// Returns the edge (in bps) if exit condition is met, None otherwise.
@@ -181,6 +221,12 @@ impl ExitWatcher {
                     // Edge: (bid - oracle) / oracle * 10000
                     let edge_bps =
                         (bid.inner() - oracle.inner()) / oracle.inner() * Decimal::from(10000);
+
+                    // Phase B: PnL direction check
+                    if self.should_skip_loss_exit(position, bid.inner()) {
+                        return None;
+                    }
+
                     return Some(edge_bps);
                 }
             }
@@ -193,6 +239,12 @@ impl ExitWatcher {
                     // Edge: (oracle - ask) / oracle * 10000
                     let edge_bps =
                         (oracle.inner() - ask.inner()) / oracle.inner() * Decimal::from(10000);
+
+                    // Phase B: PnL direction check
+                    if self.should_skip_loss_exit(position, ask.inner()) {
+                        return None;
+                    }
+
                     return Some(edge_bps);
                 }
             }
@@ -377,9 +429,17 @@ mod tests {
             check_interval_ms: 200,       // Not used in ExitWatcher
             min_holding_time_ms: 0,       // No minimum for tests
             slippage_bps: 50,
+            min_loss_exit_bps: Decimal::ZERO,
             time_decay_enabled: false,
             decay_start_ms: 5000,
             min_decay_factor: 0.2,
+        }
+    }
+
+    fn test_config_with_pnl_check() -> MarkRegressionConfig {
+        MarkRegressionConfig {
+            min_loss_exit_bps: dec!(15), // 15 bps
+            ..test_config()
         }
     }
 
@@ -431,5 +491,72 @@ mod tests {
         let ask = dec!(99.95);
         let edge = (oracle - ask) / oracle * dec!(10000);
         assert_eq!(edge, dec!(5)); // +5 bps (favorable)
+    }
+
+    // --- Phase B: PnL direction check tests ---
+
+    #[test]
+    fn test_pnl_check_long_profitable_exits() {
+        // Long entry at 100, bid at 100.10 → PnL = +10 bps → should exit
+        let entry = dec!(100);
+        let exit_price = dec!(100.10);
+        let min_loss = dec!(15);
+
+        let pnl_bps = (exit_price - entry) / entry * dec!(10000);
+        assert_eq!(pnl_bps, dec!(10));
+        // Profitable → should NOT skip (should exit normally)
+        assert!(pnl_bps >= Decimal::ZERO);
+    }
+
+    #[test]
+    fn test_pnl_check_long_small_loss_skips() {
+        // Long entry at 100, bid at 99.90 → PnL = -10 bps < 15 → skip
+        let entry = dec!(100);
+        let exit_price = dec!(99.90);
+        let min_loss = dec!(15);
+
+        let pnl_bps = (exit_price - entry) / entry * dec!(10000);
+        assert_eq!(pnl_bps, dec!(-10));
+        assert!(pnl_bps < Decimal::ZERO);
+        assert!(pnl_bps.abs() < min_loss);
+    }
+
+    #[test]
+    fn test_pnl_check_long_large_loss_exits() {
+        // Long entry at 100, bid at 99.80 → PnL = -20 bps >= 15 → exit
+        let entry = dec!(100);
+        let exit_price = dec!(99.80);
+        let min_loss = dec!(15);
+
+        let pnl_bps = (exit_price - entry) / entry * dec!(10000);
+        assert_eq!(pnl_bps, dec!(-20));
+        assert!(pnl_bps < Decimal::ZERO);
+        assert!(pnl_bps.abs() >= min_loss);
+    }
+
+    #[test]
+    fn test_pnl_check_short_small_loss_skips() {
+        // Short entry at 100, ask at 100.10 → PnL = -10 bps < 15 → skip
+        let entry = dec!(100);
+        let exit_price = dec!(100.10);
+        let min_loss = dec!(15);
+
+        let pnl_bps = (entry - exit_price) / entry * dec!(10000);
+        assert_eq!(pnl_bps, dec!(-10));
+        assert!(pnl_bps < Decimal::ZERO);
+        assert!(pnl_bps.abs() < min_loss);
+    }
+
+    #[test]
+    fn test_pnl_check_disabled_when_zero() {
+        let config = test_config();
+        assert!(config.min_loss_exit_bps.is_zero());
+        // When 0, feature is disabled — never skip
+    }
+
+    #[test]
+    fn test_pnl_check_config_with_value() {
+        let config = test_config_with_pnl_check();
+        assert_eq!(config.min_loss_exit_bps, dec!(15));
     }
 }

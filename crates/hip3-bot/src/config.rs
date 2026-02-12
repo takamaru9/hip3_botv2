@@ -120,6 +120,13 @@ pub struct MarkRegressionConfig {
     #[serde(default = "default_mark_regression_slippage_bps")]
     pub slippage_bps: u64,
 
+    // --- Phase B: PnL direction check ---
+    /// Minimum loss (bps) before MarkRegression triggers exit on losing trades.
+    /// 0 = disabled (exit regardless of PnL). Recommended: 15.
+    /// Default: 0.
+    #[serde(default)]
+    pub min_loss_exit_bps: rust_decimal::Decimal,
+
     // --- Time decay ---
     /// Enable time-based decay of exit threshold.
     /// Default: false.
@@ -169,6 +176,7 @@ impl Default for MarkRegressionConfig {
             check_interval_ms: default_mark_regression_check_interval_ms(),
             min_holding_time_ms: default_mark_regression_min_holding_time_ms(),
             slippage_bps: default_mark_regression_slippage_bps(),
+            min_loss_exit_bps: rust_decimal::Decimal::ZERO,
             time_decay_enabled: false,
             decay_start_ms: default_mark_regression_decay_start_ms(),
             min_decay_factor: default_mark_regression_min_decay_factor(),

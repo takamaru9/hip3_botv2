@@ -1235,6 +1235,7 @@ impl Application {
                         check_interval_ms: self.config.mark_regression.check_interval_ms,
                         min_holding_time_ms: self.config.mark_regression.min_holding_time_ms,
                         slippage_bps: self.config.mark_regression.slippage_bps,
+                        min_loss_exit_bps: self.config.mark_regression.min_loss_exit_bps,
                         time_decay_enabled: self.config.mark_regression.time_decay_enabled,
                         decay_start_ms: self.config.mark_regression.decay_start_ms,
                         min_decay_factor: self.config.mark_regression.min_decay_factor,

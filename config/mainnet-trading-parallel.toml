@@ -347,12 +347,18 @@ check_interval_ms = 500
 slippage_bps = 50
 
 [tilt_guard]
-enabled = false  # Enable after observation period
+# 2026-02-14: ENABLED. Prevents cascade losses during losing streaks.
+# Data: 3+ consecutive losses → WR drops from 32.8% to 20.4% (-12%).
+# Effect: After 3 losses, pause 5 min. Win resets counter. Zero impact on winning streaks.
+enabled = true
 max_consecutive_losses = 3
 cooldown_secs = 300
 
 [re_entry_delay]
-enabled = false  # Enable after observation period
+# 2026-02-14: ENABLED. Same-market re-entry quality degradation.
+# Data: First entry WR 45.1% → 2nd+ entry WR 30.2% (-15%).
+# Effect: 30s cooldown after closing position in a market. Per-market isolation.
+enabled = true
 re_entry_delay_ms = 30000
 
 [mark_regression]

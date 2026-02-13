@@ -25,7 +25,8 @@ pub use gates::{
     BlackoutWindow, BurstSignalConfig, BurstSignalGate, CorrelationCooldownConfig,
     CorrelationCooldownGate, CorrelationPositionConfig, CorrelationPositionGate, GateResult,
     MaxDrawdownConfig, MaxDrawdownGate, MaxPositionPerMarketGate, MaxPositionTotalGate,
-    ResolvedCorrelationGroup, RiskGate, RiskGateConfig,
+    ReEntryDelayConfig, ReEntryDelayGate, ResolvedCorrelationGroup, RiskGate, RiskGateConfig,
+    TiltGuardConfig, TiltGuardGate,
 };
 pub use hard_stop::{
     ExecutionEvent, HardStopLatch, HardStopReason, RiskMonitor, RiskMonitorConfig,

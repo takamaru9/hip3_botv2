@@ -37,6 +37,7 @@ use hip3_mm::MakerAction;
 use hip3_position::PositionTrackerHandle;
 use hip3_risk::{
     BurstSignalGate, CorrelationCooldownGate, CorrelationPositionGate, MaxDrawdownGate,
+    ReEntryDelayGate, TiltGuardGate,
 };
 
 use crate::batch::BatchScheduler;
@@ -403,6 +404,10 @@ pub struct Executor {
     correlation_position_gate: Option<Arc<CorrelationPositionGate>>,
     /// BurstSignalGate: per-market signal rate limiting (optional, None = disabled).
     burst_signal_gate: Option<Arc<BurstSignalGate>>,
+    /// TiltGuardGate: consecutive loss cooldown (optional, None = disabled).
+    tilt_guard_gate: Option<Arc<TiltGuardGate>>,
+    /// ReEntryDelayGate: same-market re-entry delay (optional, None = disabled).
+    re_entry_delay_gate: Option<Arc<ReEntryDelayGate>>,
 }
 
 impl Executor {
@@ -429,6 +434,8 @@ impl Executor {
             correlation_cooldown_gate: None,
             correlation_position_gate: None,
             burst_signal_gate: None,
+            tilt_guard_gate: None,
+            re_entry_delay_gate: None,
         }
     }
 
@@ -457,6 +464,20 @@ impl Executor {
     #[must_use]
     pub fn with_burst_signal_gate(mut self, gate: Arc<BurstSignalGate>) -> Self {
         self.burst_signal_gate = Some(gate);
+        self
+    }
+
+    /// Set the TiltGuardGate (consecutive loss cooldown).
+    #[must_use]
+    pub fn with_tilt_guard_gate(mut self, gate: Arc<TiltGuardGate>) -> Self {
+        self.tilt_guard_gate = Some(gate);
+        self
+    }
+
+    /// Set the ReEntryDelayGate (same-market re-entry delay).
+    #[must_use]
+    pub fn with_re_entry_delay_gate(mut self, gate: Arc<ReEntryDelayGate>) -> Self {
+        self.re_entry_delay_gate = Some(gate);
         self
     }
 
@@ -571,6 +592,28 @@ impl Executor {
                 debug!(
                     market = %market,
                     "Signal rejected: BurstSignal gate"
+                );
+                return ExecutionResult::rejected(reason);
+            }
+        }
+
+        // Gate 1e: TiltGuard — block entries during consecutive loss cooldown
+        if let Some(ref gate) = self.tilt_guard_gate {
+            if let Err(reason) = gate.check() {
+                debug!(
+                    market = %market,
+                    "Signal rejected: TiltGuard cooldown"
+                );
+                return ExecutionResult::rejected(reason);
+            }
+        }
+
+        // Gate 1f: ReEntryDelay — block re-entry into same market too soon after close
+        if let Some(ref gate) = self.re_entry_delay_gate {
+            if let Err(reason) = gate.check(market) {
+                debug!(
+                    market = %market,
+                    "Signal rejected: ReEntryDelay"
                 );
                 return ExecutionResult::rejected(reason);
             }

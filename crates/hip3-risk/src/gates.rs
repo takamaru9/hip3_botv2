@@ -2061,6 +2061,171 @@ impl BurstSignalGate {
 }
 
 // ============================================================================
+// TiltGuardGate — consecutive loss cooldown
+// ============================================================================
+
+/// Configuration for tilt guard (consecutive loss cooldown).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TiltGuardConfig {
+    /// Enable tilt guard.
+    pub enabled: bool,
+    /// Number of consecutive losses before cooldown triggers.
+    pub max_consecutive_losses: u32,
+    /// Cooldown duration in seconds after triggering.
+    pub cooldown_secs: u64,
+}
+
+impl Default for TiltGuardConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            max_consecutive_losses: 3,
+            cooldown_secs: 300,
+        }
+    }
+}
+
+/// Per-session tilt guard state.
+struct TiltGuardState {
+    consecutive_losses: u32,
+    cooldown_until_ms: u64,
+}
+
+/// Gate that blocks new entries after consecutive losses.
+///
+/// When N consecutive losses occur, a cooldown period is activated.
+/// During cooldown, all new entries are rejected (TiltGuard).
+/// A winning trade resets the consecutive count.
+pub struct TiltGuardGate {
+    config: TiltGuardConfig,
+    state: parking_lot::Mutex<TiltGuardState>,
+}
+
+impl TiltGuardGate {
+    /// Create a new TiltGuardGate.
+    #[must_use]
+    pub fn new(config: TiltGuardConfig) -> Self {
+        Self {
+            config,
+            state: parking_lot::Mutex::new(TiltGuardState {
+                consecutive_losses: 0,
+                cooldown_until_ms: 0,
+            }),
+        }
+    }
+
+    /// Report a trade P&L. Negative = loss, positive = win.
+    pub fn report_pnl(&self, pnl_usd: f64) {
+        let mut state = self.state.lock();
+        if pnl_usd < 0.0 {
+            state.consecutive_losses += 1;
+            if state.consecutive_losses >= self.config.max_consecutive_losses {
+                let now_ms = chrono::Utc::now().timestamp_millis() as u64;
+                state.cooldown_until_ms = now_ms + self.config.cooldown_secs * 1000;
+                warn!(
+                    consecutive = state.consecutive_losses,
+                    cooldown_secs = self.config.cooldown_secs,
+                    "TiltGuard: cooldown triggered after consecutive losses"
+                );
+            }
+        } else {
+            state.consecutive_losses = 0;
+        }
+    }
+
+    /// Check if trading is allowed.
+    pub fn check(&self) -> Result<(), RejectReason> {
+        if !self.config.enabled {
+            return Ok(());
+        }
+        let state = self.state.lock();
+        let now_ms = chrono::Utc::now().timestamp_millis() as u64;
+        if now_ms < state.cooldown_until_ms {
+            Err(RejectReason::TiltGuard)
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Check if the gate is enabled.
+    #[must_use]
+    pub fn is_enabled(&self) -> bool {
+        self.config.enabled
+    }
+}
+
+// ============================================================================
+// ReEntryDelayGate — same-market re-entry delay
+// ============================================================================
+
+/// Configuration for same-market re-entry delay.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ReEntryDelayConfig {
+    /// Enable re-entry delay.
+    pub enabled: bool,
+    /// Delay in milliseconds before re-entering the same market.
+    pub re_entry_delay_ms: u64,
+}
+
+impl Default for ReEntryDelayConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            re_entry_delay_ms: 30_000,
+        }
+    }
+}
+
+/// Gate that blocks re-entry into a market too soon after closing a position.
+///
+/// Data shows same-market re-entry WR degrades from 45.1% to 30.2%.
+/// This gate enforces a minimum delay between position close and next entry.
+pub struct ReEntryDelayGate {
+    config: ReEntryDelayConfig,
+    last_close: parking_lot::Mutex<std::collections::HashMap<MarketKey, u64>>,
+}
+
+impl ReEntryDelayGate {
+    /// Create a new ReEntryDelayGate.
+    #[must_use]
+    pub fn new(config: ReEntryDelayConfig) -> Self {
+        Self {
+            config,
+            last_close: parking_lot::Mutex::new(std::collections::HashMap::new()),
+        }
+    }
+
+    /// Report a position close for a market.
+    pub fn report_close(&self, market: &MarketKey) {
+        let now_ms = chrono::Utc::now().timestamp_millis() as u64;
+        self.last_close.lock().insert(*market, now_ms);
+    }
+
+    /// Check if re-entry is allowed for a market.
+    pub fn check(&self, market: &MarketKey) -> Result<(), RejectReason> {
+        if !self.config.enabled {
+            return Ok(());
+        }
+        let state = self.last_close.lock();
+        if let Some(&close_ms) = state.get(market) {
+            let now_ms = chrono::Utc::now().timestamp_millis() as u64;
+            if now_ms < close_ms + self.config.re_entry_delay_ms {
+                return Err(RejectReason::ReEntryDelay);
+            }
+        }
+        Ok(())
+    }
+
+    /// Check if the gate is enabled.
+    #[must_use]
+    pub fn is_enabled(&self) -> bool {
+        self.config.enabled
+    }
+}
+
+// ============================================================================
 // P2-3/P2-4 Gate Tests
 // ============================================================================
 

@@ -306,6 +306,19 @@ exit_profile_enabled = false
 # Other (Night/PreMkt): unchanged (preserves profitable time periods)
 # Effect: 20bps threshold → 40bps during MarketOpen, 30bps during USActive
 session_aware = true
+# Structural improvement: signal dedup (default true - eliminates 37x duplicate signals)
+signal_dedup_enabled = true
+# Structural improvement: spread gate (0 = disabled, enable with 150 after observation)
+max_entry_spread_bps = 0
+# Structural improvement: short-side throttle (disabled, enable after observation)
+short_side_throttle = false
+short_threshold_mult = 1.5
+# Structural improvement: velocity weight (disabled, enable after observation)
+velocity_weight_enabled = false
+velocity_reference_bps = 10
+# Structural improvement: correlation filter (disabled, enable after observation)
+correlation_filter_enabled = false
+correlation_max_simultaneous = 3
 
 [persistence]
 data_dir = "./data/signals-trading"
@@ -333,15 +346,24 @@ reduce_only_timeout_ms = 60000
 check_interval_ms = 500
 slippage_bps = 50
 
+[tilt_guard]
+enabled = false  # Enable after observation period
+max_consecutive_losses = 3
+cooldown_secs = 300
+
+[re_entry_delay]
+enabled = false  # Enable after observation period
+re_entry_delay_ms = 30000
+
 [mark_regression]
 enabled = true
 exit_threshold_bps = 25
 check_interval_ms = 100
-min_holding_time_ms = 2000
+min_holding_time_ms = 5000
 slippage_bps = 50
 time_decay_enabled = true
-decay_start_ms = 5000
-min_decay_factor = 0.2
+decay_start_ms = 8000
+min_decay_factor = 0.5
 # Phase B: PnL direction check - skip MarkRegression exit for small losses
 min_loss_exit_bps = 15
 # Phase C: Entry edge-linked dynamic exit threshold

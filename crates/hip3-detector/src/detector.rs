@@ -104,6 +104,8 @@ pub struct DislocationDetector {
     spread_ewma: RefCell<HashMap<MarketKey, Decimal>>,
     /// Sprint 2: Per-market oracle-quote baseline tracker.
     oracle_baselines: RefCell<HashMap<MarketKey, OracleQuoteBaseline>>,
+    /// Item 7: Signal dedup - tracks oracle price of last generated signal per (market, side).
+    last_signaled_oracle: RefCell<HashMap<(MarketKey, OrderSide), Price>>,
 }
 
 impl DislocationDetector {
@@ -126,6 +128,7 @@ impl DislocationDetector {
             prev_oracle: RefCell::new(HashMap::new()),
             spread_ewma: RefCell::new(HashMap::new()),
             oracle_baselines: RefCell::new(HashMap::new()),
+            last_signaled_oracle: RefCell::new(HashMap::new()),
         })
     }
 
@@ -148,6 +151,7 @@ impl DislocationDetector {
             prev_oracle: RefCell::new(HashMap::new()),
             spread_ewma: RefCell::new(HashMap::new()),
             oracle_baselines: RefCell::new(HashMap::new()),
+            last_signaled_oracle: RefCell::new(HashMap::new()),
         })
     }
 
@@ -436,6 +440,29 @@ impl DislocationDetector {
             return None;
         }
 
+        // Item 7: Signal dedup - skip if oracle unchanged since last signal for same market+side
+        if self.config.signal_dedup_enabled {
+            if let Some(&last) = self
+                .last_signaled_oracle
+                .borrow()
+                .get(&(key, OrderSide::Buy))
+            {
+                if last == oracle {
+                    return None;
+                }
+            }
+        }
+
+        // Item 2: Spread-adaptive entry - skip if BBO spread too wide
+        if !self.config.max_entry_spread_bps.is_zero() {
+            if let Some(spread_bps) = snapshot.bbo.spread_bps() {
+                if spread_bps > self.config.max_entry_spread_bps {
+                    tracing::debug!(%key, %spread_bps, max=%self.config.max_entry_spread_bps, "Spread too wide for buy");
+                    return None;
+                }
+            }
+        }
+
         // Calculate raw edge: (oracle - ask) / oracle * 10000
         let raw_edge_bps = (oracle.inner() - ask.inner()) / oracle.inner() * Decimal::from(10000);
 
@@ -451,6 +478,26 @@ impl DislocationDetector {
         // Sprint 4 P2-G: Apply session-aware threshold multiplier
         let (session_threshold_mult, session_sizing_mult) = self.config.session_multipliers();
         let total_cost = base_cost * session_threshold_mult;
+
+        // Item 6: Velocity weight - adjust threshold based on oracle velocity
+        let total_cost = if self.config.velocity_weight_enabled {
+            let velocity = oracle_tracker
+                .map(|t| t.velocity_bps(&key))
+                .filter(|v| !v.is_zero())
+                .unwrap_or(oracle_movement.change_bps);
+            let ref_vel = self.config.velocity_reference_bps;
+            if !ref_vel.is_zero() && !velocity.is_zero() {
+                // weight = clamp(velocity/ref, 0.5, 2.0)
+                let weight = (velocity / ref_vel)
+                    .max(Decimal::new(5, 1)) // floor 0.5
+                    .min(Decimal::from(2)); // cap 2.0
+                total_cost / weight // higher velocity → lower threshold
+            } else {
+                total_cost
+            }
+        } else {
+            total_cost
+        };
 
         let net_edge_bps = raw_edge_bps - total_cost;
 
@@ -704,6 +751,14 @@ impl DislocationDetector {
         signal.baseline_gap_bps = baseline_gap_bps;
         signal.edge_above_baseline_bps = edge_above_baseline_bps;
         signal.exit_profile = exit_profile;
+
+        // Item 7: Record oracle price for dedup on next check
+        if self.config.signal_dedup_enabled {
+            self.last_signaled_oracle
+                .borrow_mut()
+                .insert((key, OrderSide::Buy), oracle);
+        }
+
         Some(signal)
     }
 
@@ -740,6 +795,29 @@ impl DislocationDetector {
             return None;
         }
 
+        // Item 7: Signal dedup - skip if oracle unchanged since last signal for same market+side
+        if self.config.signal_dedup_enabled {
+            if let Some(&last) = self
+                .last_signaled_oracle
+                .borrow()
+                .get(&(key, OrderSide::Sell))
+            {
+                if last == oracle {
+                    return None;
+                }
+            }
+        }
+
+        // Item 2: Spread-adaptive entry - skip if BBO spread too wide
+        if !self.config.max_entry_spread_bps.is_zero() {
+            if let Some(spread_bps) = snapshot.bbo.spread_bps() {
+                if spread_bps > self.config.max_entry_spread_bps {
+                    tracing::debug!(%key, %spread_bps, max=%self.config.max_entry_spread_bps, "Spread too wide for sell");
+                    return None;
+                }
+            }
+        }
+
         // Calculate raw edge: (bid - oracle) / oracle * 10000
         let raw_edge_bps = (bid.inner() - oracle.inner()) / oracle.inner() * Decimal::from(10000);
 
@@ -755,6 +833,32 @@ impl DislocationDetector {
         // Sprint 4 P2-G: Apply session-aware threshold multiplier
         let (session_threshold_mult, session_sizing_mult) = self.config.session_multipliers();
         let total_cost = base_cost * session_threshold_mult;
+
+        // Item 5: Short-side throttle - raise SELL threshold
+        let total_cost = if self.config.short_side_throttle {
+            total_cost * self.config.short_threshold_mult
+        } else {
+            total_cost
+        };
+
+        // Item 6: Velocity weight - adjust threshold based on oracle velocity
+        let total_cost = if self.config.velocity_weight_enabled {
+            let velocity = oracle_tracker
+                .map(|t| t.velocity_bps(&key))
+                .filter(|v| !v.is_zero())
+                .unwrap_or(oracle_movement.change_bps);
+            let ref_vel = self.config.velocity_reference_bps;
+            if !ref_vel.is_zero() && !velocity.is_zero() {
+                let weight = (velocity / ref_vel)
+                    .max(Decimal::new(5, 1))
+                    .min(Decimal::from(2));
+                total_cost / weight
+            } else {
+                total_cost
+            }
+        } else {
+            total_cost
+        };
 
         let net_edge_bps = raw_edge_bps - total_cost;
 
@@ -1005,6 +1109,14 @@ impl DislocationDetector {
         signal.baseline_gap_bps = baseline_gap_bps;
         signal.edge_above_baseline_bps = edge_above_baseline_bps;
         signal.exit_profile = exit_profile;
+
+        // Item 7: Record oracle price for dedup on next check
+        if self.config.signal_dedup_enabled {
+            self.last_signaled_oracle
+                .borrow_mut()
+                .insert((key, OrderSide::Sell), oracle);
+        }
+
         Some(signal)
     }
 
@@ -1719,6 +1831,7 @@ mod tests {
             normal_book_notional: dec!(1000),
             oracle_direction_filter: false, // Disable direction filter
             min_oracle_change_bps: dec!(0), // Disable velocity filter
+            signal_dedup_enabled: false,    // Allow same oracle re-check
             ..Default::default()
         };
         let detector = DislocationDetector::new(config).unwrap();
@@ -2061,6 +2174,7 @@ mod tests {
             min_oracle_change_bps: dec!(0),
             min_quote_lag_ms: 50, // Minimum 50ms
             max_quote_lag_ms: 0,  // No upper bound
+            signal_dedup_enabled: false, // Allow same oracle re-check
             ..Default::default()
         };
         let detector = DislocationDetector::new(config).unwrap();
@@ -2100,6 +2214,7 @@ mod tests {
             min_oracle_change_bps: dec!(0),
             min_quote_lag_ms: 0,   // No lower bound
             max_quote_lag_ms: 500, // Maximum 500ms
+            signal_dedup_enabled: false, // Allow same oracle re-check
             ..Default::default()
         };
         let detector = DislocationDetector::new(config).unwrap();
@@ -2387,6 +2502,7 @@ mod tests {
             baseline_alpha: dec!(1),
             baseline_min_samples: 2,
             min_edge_above_baseline_bps: dec!(0), // Observation mode
+            signal_dedup_enabled: false,           // Allow same oracle re-check
             ..Default::default()
         };
         let detector = DislocationDetector::new(config).unwrap();

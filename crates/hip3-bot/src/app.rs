@@ -147,6 +147,10 @@ pub struct Application {
     /// Sprint 4 P2-F: Cache of last signal ExitProfile per market.
     /// Populated at signal time, consumed at fill time for on_position_opened.
     last_signal_profile: RwLock<HashMap<MarketKey, ExitProfile>>,
+    /// TiltGuardGate: consecutive loss cooldown.
+    tilt_guard_gate: Option<Arc<hip3_risk::TiltGuardGate>>,
+    /// ReEntryDelayGate: same-market re-entry delay.
+    re_entry_delay_gate: Option<Arc<hip3_risk::ReEntryDelayGate>>,
     /// Sprint 3 P2-E: Market health tracker for auto-disable/re-enable.
     market_health_tracker: Option<Arc<hip3_risk::MarketHealthTracker>>,
     /// MM: Quote manager for weekend market making (None if maker disabled).
@@ -244,6 +248,9 @@ impl Application {
             last_signal_edge: RwLock::new(HashMap::new()),
             // Sprint 4 P2-F: Exit profile cache
             last_signal_profile: RwLock::new(HashMap::new()),
+            // TiltGuard and ReEntryDelay gates (initialized in Trading mode)
+            tilt_guard_gate: None,
+            re_entry_delay_gate: None,
             // Sprint 3 P2-E: Market health tracker
             market_health_tracker: None,
             // MM: Initialized in Trading mode if maker.enabled
@@ -997,6 +1004,31 @@ impl Application {
                     "BurstSignalGate enabled"
                 );
                 executor = executor.with_burst_signal_gate(burst_gate);
+            }
+            // TiltGuardGate: consecutive loss cooldown
+            if self.config.tilt_guard.enabled {
+                let gate = Arc::new(hip3_risk::TiltGuardGate::new(
+                    self.config.tilt_guard.clone(),
+                ));
+                info!(
+                    max_consecutive_losses = self.config.tilt_guard.max_consecutive_losses,
+                    cooldown_secs = self.config.tilt_guard.cooldown_secs,
+                    "TiltGuardGate enabled"
+                );
+                self.tilt_guard_gate = Some(gate.clone());
+                executor = executor.with_tilt_guard_gate(gate);
+            }
+            // ReEntryDelayGate: same-market re-entry delay
+            if self.config.re_entry_delay.enabled {
+                let gate = Arc::new(hip3_risk::ReEntryDelayGate::new(
+                    self.config.re_entry_delay.clone(),
+                ));
+                info!(
+                    re_entry_delay_ms = self.config.re_entry_delay.re_entry_delay_ms,
+                    "ReEntryDelayGate enabled"
+                );
+                self.re_entry_delay_gate = Some(gate.clone());
+                executor = executor.with_re_entry_delay_gate(gate);
             }
             // P3-3: CorrelationPositionGate
             if self.config.correlation_position.enabled {
@@ -2188,6 +2220,35 @@ impl Application {
                     );
                 }
 
+                // TiltGuard: Report P&L for consecutive loss tracking
+                if let Some(ref gate) = self.tilt_guard_gate {
+                    use rust_decimal::prelude::ToPrimitive;
+                    let tilt_pnl_bps = match existing_pos.side {
+                        OrderSide::Buy => {
+                            (price.inner() - existing_pos.entry_price.inner())
+                                / existing_pos.entry_price.inner()
+                                * Decimal::from(10000)
+                        }
+                        OrderSide::Sell => {
+                            (existing_pos.entry_price.inner() - price.inner())
+                                / existing_pos.entry_price.inner()
+                                * Decimal::from(10000)
+                        }
+                    };
+                    let notional = size.inner() * price.inner();
+                    let tilt_pnl_usd = tilt_pnl_bps / Decimal::from(10000) * notional;
+                    if let Some(pnl) = tilt_pnl_usd.to_f64() {
+                        gate.report_pnl(pnl);
+                        debug!(market = %market, pnl_usd = pnl, "TiltGuard: reported PnL");
+                    }
+                }
+
+                // ReEntryDelay: Report close event for same-market delay
+                if let Some(ref gate) = self.re_entry_delay_gate {
+                    gate.report_close(&market);
+                    debug!(market = %market, "ReEntryDelay: reported position close");
+                }
+
                 // P3-4: Report completed trade to dashboard for PnL summary
                 if let Some(ref ds) = self.dashboard_state {
                     use rust_decimal::prelude::ToPrimitive;
@@ -2755,6 +2816,53 @@ impl Application {
 
         // Edge tracking: Periodic logging for threshold calibration
         self.edge_tracker.maybe_log();
+
+        // Item 1: Multi-market correlation filter
+        // When 3+ markets fire same-direction signals, keep only top N by edge
+        if self.config.detector.correlation_filter_enabled && signals.len() >= 2 {
+            let max_sim = self.config.detector.correlation_max_simultaneous as usize;
+            let buy_count = signals.iter().filter(|s| s.side == OrderSide::Buy).count();
+            let sell_count = signals.iter().filter(|s| s.side == OrderSide::Sell).count();
+
+            if buy_count >= max_sim {
+                signals.sort_by(|a, b| b.raw_edge_bps.cmp(&a.raw_edge_bps));
+                let top_buys: Vec<_> = signals
+                    .iter()
+                    .filter(|s| s.side == OrderSide::Buy)
+                    .take(2)
+                    .cloned()
+                    .collect();
+                let sells: Vec<_> = signals
+                    .iter()
+                    .filter(|s| s.side == OrderSide::Sell)
+                    .cloned()
+                    .collect();
+                info!(
+                    buy_count,
+                    max_sim, "Correlation filter: trimming BUY signals"
+                );
+                signals = [top_buys, sells].concat();
+            }
+            if sell_count >= max_sim {
+                signals.sort_by(|a, b| b.raw_edge_bps.cmp(&a.raw_edge_bps));
+                let top_sells: Vec<_> = signals
+                    .iter()
+                    .filter(|s| s.side == OrderSide::Sell)
+                    .take(2)
+                    .cloned()
+                    .collect();
+                let buys: Vec<_> = signals
+                    .iter()
+                    .filter(|s| s.side == OrderSide::Buy)
+                    .cloned()
+                    .collect();
+                info!(
+                    sell_count,
+                    max_sim, "Correlation filter: trimming SELL signals"
+                );
+                signals = [buys, top_sells].concat();
+            }
+        }
 
         if signals.is_empty() {
             None

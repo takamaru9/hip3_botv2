@@ -304,6 +304,10 @@ pub enum RejectReason {
     CorrelationPositionLimit,
     /// Burst signal rate limit exceeded (too many signals per market in window).
     BurstSignal,
+    /// Tilt guard: consecutive loss cooldown active.
+    TiltGuard,
+    /// Same-market re-entry delay active.
+    ReEntryDelay,
 }
 
 /// Reason for skipping signal processing.

@@ -393,6 +393,12 @@ pub struct AppConfig {
     /// Burst signal rate limiting configuration.
     #[serde(default)]
     pub burst_signal: BurstSignalConfig,
+    /// Tilt guard: consecutive loss cooldown.
+    #[serde(default)]
+    pub tilt_guard: hip3_risk::TiltGuardConfig,
+    /// Same-market re-entry delay.
+    #[serde(default)]
+    pub re_entry_delay: hip3_risk::ReEntryDelayConfig,
     /// Sprint 3 P2-E: Market health tracker configuration.
     #[serde(default)]
     pub market_health: MarketHealthConfig,
@@ -606,6 +612,8 @@ impl Default for AppConfig {
             correlation_cooldown: CorrelationCooldownConfig::default(),
             correlation_position: CorrelationPositionConfig::default(),
             burst_signal: BurstSignalConfig::default(),
+            tilt_guard: hip3_risk::TiltGuardConfig::default(),
+            re_entry_delay: hip3_risk::ReEntryDelayConfig::default(),
             market_health: MarketHealthConfig::default(),
             executor: ExecutorConfig::default(),
             dashboard: DashboardConfig::default(),

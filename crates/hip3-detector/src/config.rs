@@ -215,6 +215,63 @@ pub struct DetectorConfig {
     #[serde(default)]
     pub exit_profile_enabled: bool,
 
+    // ---- Structural Improvement: Signal Dedup (Item 7) ----
+    /// Skip signals when oracle price is unchanged since last signal for same market+side.
+    ///
+    /// `check_dislocations()` scans all markets on every WS message. Without dedup,
+    /// the same oracle price can generate 37+ duplicate signals. This eliminates duplicates
+    /// by tracking the oracle price that last produced a signal per (market, side).
+    #[serde(default = "default_true")]
+    pub signal_dedup_enabled: bool,
+
+    // ---- Structural Improvement: Spread-Adaptive Entry (Item 2) ----
+    /// Maximum BBO spread in bps for entry. Signals with wider spread are filtered.
+    ///
+    /// When BBO spread is too wide, edge gets consumed by spread slippage.
+    /// Set to 0 to disable (no spread filtering).
+    #[serde(default)]
+    pub max_entry_spread_bps: Decimal,
+
+    // ---- Structural Improvement: Short-Side Throttle (Item 5) ----
+    /// Enable SHORT-side threshold multiplier.
+    ///
+    /// Data shows SHORT 31.6% WR vs LONG 44.2%. When enabled, SELL-side
+    /// signals require higher edge (threshold × short_threshold_mult).
+    #[serde(default)]
+    pub short_side_throttle: bool,
+
+    /// Multiplier applied to SELL-side threshold when short_side_throttle is enabled.
+    #[serde(default = "default_short_threshold_mult")]
+    pub short_threshold_mult: Decimal,
+
+    // ---- Structural Improvement: Velocity Weight (Item 6) ----
+    /// Enable continuous velocity weighting on threshold.
+    ///
+    /// Higher oracle velocity = more likely genuine signal = lower threshold.
+    /// Lower velocity = more likely structural = higher threshold.
+    /// weight = clamp(velocity / velocity_reference_bps, 0.5, 2.0)
+    /// effective_threshold = total_cost / weight
+    #[serde(default)]
+    pub velocity_weight_enabled: bool,
+
+    /// Reference velocity in bps for velocity weight calculation.
+    /// At this velocity, weight = 1.0 (no adjustment).
+    #[serde(default = "default_velocity_reference_bps")]
+    pub velocity_reference_bps: Decimal,
+
+    // ---- Structural Improvement: Correlation Filter (Item 1) ----
+    /// Filter correlated multi-market signals.
+    ///
+    /// When 3+ markets fire same-direction signals simultaneously,
+    /// it's likely a market-wide move, not individual stale liquidity.
+    /// Keeps only top N signals by edge, filtering the rest.
+    #[serde(default)]
+    pub correlation_filter_enabled: bool,
+
+    /// Maximum simultaneous same-direction signals before correlation filter triggers.
+    #[serde(default = "default_correlation_max_simultaneous")]
+    pub correlation_max_simultaneous: u32,
+
     // ---- Sprint 4: Session-Aware Parameters (P2-G) ----
     /// Enable session-aware threshold/sizing multipliers (Sprint 4).
     ///
@@ -300,6 +357,22 @@ fn default_min_edge_velocity_bps() -> Decimal {
     Decimal::from(5) // 5 bps/tick minimum oracle movement speed
 }
 
+fn default_true() -> bool {
+    true
+}
+
+fn default_short_threshold_mult() -> Decimal {
+    Decimal::new(15, 1) // 1.5x
+}
+
+fn default_velocity_reference_bps() -> Decimal {
+    Decimal::from(10) // 10 bps
+}
+
+fn default_correlation_max_simultaneous() -> u32 {
+    3
+}
+
 fn default_market_open_threshold_mult() -> Decimal {
     Decimal::from(2) // 2.0x threshold during market open
 }
@@ -346,6 +419,14 @@ impl Default for DetectorConfig {
             min_edge_velocity_bps: default_min_edge_velocity_bps(),     // 5 bps
             min_confidence_entry: Decimal::ZERO,                        // 0 = disabled
             exit_profile_enabled: false,                                // Disabled by default
+            signal_dedup_enabled: default_true(),                       // Enabled by default
+            max_entry_spread_bps: Decimal::ZERO,                        // 0 = disabled
+            short_side_throttle: false,                                 // Disabled by default
+            short_threshold_mult: default_short_threshold_mult(),       // 1.5x
+            velocity_weight_enabled: false,                             // Disabled by default
+            velocity_reference_bps: default_velocity_reference_bps(),   // 10 bps
+            correlation_filter_enabled: false,                          // Disabled by default
+            correlation_max_simultaneous: default_correlation_max_simultaneous(), // 3
             session_aware: false,                                       // Disabled by default
             market_open_threshold_mult: default_market_open_threshold_mult(), // 2.0x
             us_active_threshold_mult: default_us_active_threshold_mult(), // 1.5x

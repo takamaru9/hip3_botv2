@@ -1424,6 +1424,7 @@ mod max_position_tests {
                 Size::new(dec!(0.1)),
                 1234567890,
                 None, // cloid for deduplication
+                None, // entry_edge_bps
             )
             .await;
 
@@ -1489,6 +1490,7 @@ mod max_position_tests {
                 Size::new(dec!(0.2)),
                 1234567890,
                 None, // cloid for deduplication
+                None, // entry_edge_bps
             )
             .await;
 
@@ -1501,6 +1503,7 @@ mod max_position_tests {
                 Size::new(dec!(0.1)),
                 1234567891,
                 None, // cloid for deduplication
+                None, // entry_edge_bps
             )
             .await;
 
@@ -2221,6 +2224,7 @@ mod correlation_position_tests {
                     Size::new(dec!(1)),
                     1000,
                     None,
+                    None, // entry_edge_bps
                 )
                 .await;
         }
@@ -2248,6 +2252,7 @@ mod correlation_position_tests {
                 Size::new(dec!(1)),
                 1000,
                 None,
+                None, // entry_edge_bps
             )
             .await;
         tokio::time::sleep(tokio::time::Duration::from_millis(20)).await;
@@ -2277,6 +2282,7 @@ mod correlation_position_tests {
                     Size::new(dec!(1)),
                     1000,
                     None,
+                    None, // entry_edge_bps
                 )
                 .await;
         }
@@ -2290,6 +2296,7 @@ mod correlation_position_tests {
                     Size::new(dec!(1)),
                     1000,
                     None,
+                    None, // entry_edge_bps
                 )
                 .await;
         }
@@ -2325,6 +2332,7 @@ mod correlation_position_tests {
                 Size::new(dec!(1)),
                 1000,
                 None,
+                None, // entry_edge_bps
             )
             .await;
         tokio::time::sleep(tokio::time::Duration::from_millis(20)).await;
@@ -2352,6 +2360,7 @@ mod correlation_position_tests {
                 Size::new(dec!(1)),
                 1000,
                 None,
+                None, // entry_edge_bps
             )
             .await;
         handle
@@ -2362,6 +2371,7 @@ mod correlation_position_tests {
                 Size::new(dec!(1)),
                 1000,
                 None,
+                None, // entry_edge_bps
             )
             .await;
         tokio::time::sleep(tokio::time::Duration::from_millis(20)).await;
@@ -2388,6 +2398,7 @@ mod correlation_position_tests {
                 Size::new(dec!(1)),
                 1000,
                 None,
+                None, // entry_edge_bps
             )
             .await;
         tokio::time::sleep(tokio::time::Duration::from_millis(20)).await;

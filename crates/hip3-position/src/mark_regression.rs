@@ -59,6 +59,19 @@ pub struct MarkRegressionConfig {
     #[serde(default)]
     pub min_loss_exit_bps: Decimal,
 
+    // --- Phase C: Entry edge-linked exit threshold ---
+    /// Enable dynamic exit threshold scaling based on entry edge.
+    /// When enabled, exit threshold = max(base_threshold, entry_edge * scale_factor).
+    /// Higher quality entries get wider exit tolerance.
+    /// Default: false.
+    #[serde(default)]
+    pub entry_edge_scaling: bool,
+    /// Scale factor for entry edge to exit threshold.
+    /// exit_threshold = max(base, entry_edge * this_factor).
+    /// Default: 0.5.
+    #[serde(default = "default_entry_edge_scale_factor")]
+    pub entry_edge_scale_factor: Decimal,
+
     // --- P2-6: Time decay ---
     /// Enable time-based decay of exit threshold.
     /// When enabled, the exit threshold decreases over time, making exits
@@ -97,6 +110,10 @@ fn default_slippage_bps() -> u64 {
     50
 }
 
+fn default_entry_edge_scale_factor() -> Decimal {
+    Decimal::new(5, 1) // 0.5
+}
+
 fn default_decay_start_ms() -> u64 {
     5000
 }
@@ -114,6 +131,8 @@ impl Default for MarkRegressionConfig {
             min_holding_time_ms: default_min_holding_time_ms(),
             slippage_bps: default_slippage_bps(),
             min_loss_exit_bps: Decimal::ZERO,
+            entry_edge_scaling: false,
+            entry_edge_scale_factor: default_entry_edge_scale_factor(),
             time_decay_enabled: false,
             decay_start_ms: default_decay_start_ms(),
             min_decay_factor: default_min_decay_factor(),
@@ -122,6 +141,22 @@ impl Default for MarkRegressionConfig {
 }
 
 impl MarkRegressionConfig {
+    /// Calculate effective exit threshold considering entry edge scaling (Phase C).
+    ///
+    /// Returns `max(base_threshold, entry_edge * scale_factor)` when enabled.
+    #[must_use]
+    pub fn effective_exit_threshold_bps(&self, entry_edge_bps: Option<Decimal>) -> Decimal {
+        if !self.entry_edge_scaling {
+            return self.exit_threshold_bps;
+        }
+        if let Some(entry_edge) = entry_edge_bps {
+            let scaled = entry_edge * self.entry_edge_scale_factor;
+            self.exit_threshold_bps.max(scaled)
+        } else {
+            self.exit_threshold_bps
+        }
+    }
+
     /// Calculate time decay factor for the given holding time.
     ///
     /// Returns a multiplier in [min_factor, 1.0] that should be applied
@@ -320,10 +355,14 @@ impl MarkRegressionMonitor {
             return None;
         }
 
-        // 4. Calculate threshold factor with optional time decay (P2-6)
+        // 4. Calculate threshold factor with optional entry edge scaling (Phase C)
+        //    and time decay (P2-6)
+        let base_threshold_bps = self
+            .config
+            .effective_exit_threshold_bps(position.entry_edge_bps);
         let decay = self.config.decay_factor(held_ms, TIME_STOP_MS);
         let effective_threshold_bps =
-            self.config.exit_threshold_bps * Decimal::try_from(decay).unwrap_or(Decimal::ONE);
+            base_threshold_bps * Decimal::try_from(decay).unwrap_or(Decimal::ONE);
         let threshold_factor = effective_threshold_bps / Decimal::from(10000);
 
         // 5. Check exit condition based on position side
@@ -702,6 +741,83 @@ mod tests {
         // min_loss_exit_bps = 0 → always exit (backward compatible)
         let min_loss_exit_bps = Decimal::ZERO;
         assert!(min_loss_exit_bps.is_zero()); // Feature disabled
+    }
+
+    // --- Phase C: Entry edge-linked exit threshold tests ---
+
+    #[test]
+    fn test_effective_exit_threshold_disabled() {
+        let config = MarkRegressionConfig::default();
+        assert!(!config.entry_edge_scaling);
+        // When disabled, always returns base threshold regardless of entry edge
+        assert_eq!(config.effective_exit_threshold_bps(Some(dec!(50))), dec!(5));
+        assert_eq!(config.effective_exit_threshold_bps(None), dec!(5));
+    }
+
+    #[test]
+    fn test_effective_exit_threshold_enabled_with_edge() {
+        let config = MarkRegressionConfig {
+            entry_edge_scaling: true,
+            entry_edge_scale_factor: dec!(0.5),
+            exit_threshold_bps: dec!(5),
+            ..Default::default()
+        };
+        // entry_edge=50 * 0.5 = 25, max(5, 25) = 25
+        assert_eq!(
+            config.effective_exit_threshold_bps(Some(dec!(50))),
+            dec!(25)
+        );
+    }
+
+    #[test]
+    fn test_effective_exit_threshold_uses_base_when_higher() {
+        let config = MarkRegressionConfig {
+            entry_edge_scaling: true,
+            entry_edge_scale_factor: dec!(0.5),
+            exit_threshold_bps: dec!(10),
+            ..Default::default()
+        };
+        // entry_edge=15 * 0.5 = 7.5, max(10, 7.5) = 10
+        assert_eq!(
+            config.effective_exit_threshold_bps(Some(dec!(15))),
+            dec!(10)
+        );
+    }
+
+    #[test]
+    fn test_effective_exit_threshold_none_edge() {
+        let config = MarkRegressionConfig {
+            entry_edge_scaling: true,
+            entry_edge_scale_factor: dec!(0.5),
+            exit_threshold_bps: dec!(5),
+            ..Default::default()
+        };
+        // None entry_edge → returns base threshold
+        assert_eq!(config.effective_exit_threshold_bps(None), dec!(5));
+    }
+
+    #[test]
+    fn test_entry_edge_scaling_serde() {
+        let toml_str = r#"
+            enabled = true
+            exit_threshold_bps = 10
+            entry_edge_scaling = true
+            entry_edge_scale_factor = 0.4
+        "#;
+        let config: MarkRegressionConfig = toml::from_str(toml_str).unwrap();
+        assert!(config.entry_edge_scaling);
+        assert_eq!(config.entry_edge_scale_factor, dec!(0.4));
+    }
+
+    #[test]
+    fn test_entry_edge_scaling_serde_defaults() {
+        let toml_str = r#"
+            enabled = true
+            exit_threshold_bps = 10
+        "#;
+        let config: MarkRegressionConfig = toml::from_str(toml_str).unwrap();
+        assert!(!config.entry_edge_scaling);
+        assert_eq!(config.entry_edge_scale_factor, dec!(0.5));
     }
 
     #[test]

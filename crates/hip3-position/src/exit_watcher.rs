@@ -204,10 +204,14 @@ impl ExitWatcher {
             return None;
         }
 
-        // 3. Calculate threshold factor with optional time decay (P2-6)
+        // 3. Calculate threshold factor with optional entry edge scaling (Phase C)
+        //    and time decay (P2-6)
+        let base_threshold_bps = self
+            .config
+            .effective_exit_threshold_bps(position.entry_edge_bps);
         let decay = self.config.decay_factor(held_ms, TIME_STOP_MS);
         let effective_threshold_bps =
-            self.config.exit_threshold_bps * Decimal::try_from(decay).unwrap_or(Decimal::ONE);
+            base_threshold_bps * Decimal::try_from(decay).unwrap_or(Decimal::ONE);
         let threshold_factor = effective_threshold_bps / Decimal::from(10000);
 
         // 4. Check exit condition based on position side
@@ -430,6 +434,8 @@ mod tests {
             min_holding_time_ms: 0,       // No minimum for tests
             slippage_bps: 50,
             min_loss_exit_bps: Decimal::ZERO,
+            entry_edge_scaling: false,
+            entry_edge_scale_factor: dec!(0.5),
             time_decay_enabled: false,
             decay_start_ms: 5000,
             min_decay_factor: 0.2,
@@ -500,7 +506,6 @@ mod tests {
         // Long entry at 100, bid at 100.10 → PnL = +10 bps → should exit
         let entry = dec!(100);
         let exit_price = dec!(100.10);
-        let min_loss = dec!(15);
 
         let pnl_bps = (exit_price - entry) / entry * dec!(10000);
         assert_eq!(pnl_bps, dec!(10));
@@ -545,6 +550,36 @@ mod tests {
         assert_eq!(pnl_bps, dec!(-10));
         assert!(pnl_bps < Decimal::ZERO);
         assert!(pnl_bps.abs() < min_loss);
+    }
+
+    // --- Phase C: Entry edge-linked exit threshold tests ---
+
+    #[test]
+    fn test_edge_scaling_disabled_in_test_config() {
+        let config = test_config();
+        assert!(!config.entry_edge_scaling);
+    }
+
+    #[test]
+    fn test_edge_scaling_effective_threshold() {
+        let config = MarkRegressionConfig {
+            entry_edge_scaling: true,
+            entry_edge_scale_factor: dec!(0.5),
+            exit_threshold_bps: dec!(10),
+            ..test_config()
+        };
+        // entry_edge=40 * 0.5 = 20, max(10, 20) = 20
+        assert_eq!(
+            config.effective_exit_threshold_bps(Some(dec!(40))),
+            dec!(20)
+        );
+        // entry_edge=15 * 0.5 = 7.5, max(10, 7.5) = 10
+        assert_eq!(
+            config.effective_exit_threshold_bps(Some(dec!(15))),
+            dec!(10)
+        );
+        // No edge → base threshold
+        assert_eq!(config.effective_exit_threshold_bps(None), dec!(10));
     }
 
     #[test]

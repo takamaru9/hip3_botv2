@@ -1236,6 +1236,11 @@ impl Application {
                         min_holding_time_ms: self.config.mark_regression.min_holding_time_ms,
                         slippage_bps: self.config.mark_regression.slippage_bps,
                         min_loss_exit_bps: self.config.mark_regression.min_loss_exit_bps,
+                        entry_edge_scaling: self.config.mark_regression.entry_edge_scaling,
+                        entry_edge_scale_factor: self
+                            .config
+                            .mark_regression
+                            .entry_edge_scale_factor,
                         time_decay_enabled: self.config.mark_regression.time_decay_enabled,
                         decay_start_ms: self.config.mark_regression.decay_start_ms,
                         min_decay_factor: self.config.mark_regression.min_decay_factor,
@@ -2099,7 +2104,15 @@ impl Application {
         //   - Bot opens LONG position, baseline = { against: 3, with: 0 }
         //   - After 2 more DOWN: delta_against = 5 - 3 = 2
         //   - Exit triggers when delta >= threshold (correct!)
-        if !tracker.has_position(&market) {
+        // Phase C: Capture entry edge before position is created
+        let is_new_position = !tracker.has_position(&market);
+        let entry_edge_for_position = if is_new_position {
+            self.last_signal_edge.read().get(&market).copied()
+        } else {
+            None
+        };
+
+        if is_new_position {
             // New position will be created - record baseline
             // P2-5: Pass cached entry edge for dynamic exit thresholds
             let entry_edge = self.last_signal_edge.write().remove(&market);
@@ -2307,7 +2320,15 @@ impl Application {
         let timestamp = time;
         tokio::spawn(async move {
             tracker
-                .fill(market, side, price, size, timestamp, cloid)
+                .fill(
+                    market,
+                    side,
+                    price,
+                    size,
+                    timestamp,
+                    cloid,
+                    entry_edge_for_position,
+                )
                 .await;
         });
 

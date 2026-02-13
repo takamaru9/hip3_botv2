@@ -1403,6 +1403,7 @@ mod tests {
             Size::new(dec!(0.001)),
             1234567890,
             None,
+            None, // entry_edge_bps
         )
         .await;
 
@@ -1527,6 +1528,7 @@ mod tests {
             hip3_core::Size::new(dec!(0.001)),
             1234567890,
             None, // cloid for deduplication
+            None, // entry_edge_bps
         )
         .await;
 

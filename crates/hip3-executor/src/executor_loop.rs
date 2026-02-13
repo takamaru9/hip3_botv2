@@ -703,6 +703,7 @@ impl ExecutorLoop {
                                 fill_size,
                                 chrono::Utc::now().timestamp_millis() as u64,
                                 Some(cloid.clone()), // cloid for deduplication
+                                None, // entry_edge_bps (not available from post response)
                             )
                             .await;
                     }

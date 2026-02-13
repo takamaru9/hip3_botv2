@@ -127,6 +127,17 @@ pub struct MarkRegressionConfig {
     #[serde(default)]
     pub min_loss_exit_bps: rust_decimal::Decimal,
 
+    // --- Phase C: Entry edge-linked exit threshold ---
+    /// Enable dynamic exit threshold scaling based on entry edge.
+    /// exit_threshold = max(base_threshold, entry_edge * scale_factor).
+    /// Default: false.
+    #[serde(default)]
+    pub entry_edge_scaling: bool,
+    /// Scale factor for entry edge to exit threshold.
+    /// Default: 0.5.
+    #[serde(default = "default_mark_regression_entry_edge_scale_factor")]
+    pub entry_edge_scale_factor: rust_decimal::Decimal,
+
     // --- Time decay ---
     /// Enable time-based decay of exit threshold.
     /// Default: false.
@@ -138,6 +149,10 @@ pub struct MarkRegressionConfig {
     /// Minimum decay factor (0.0-1.0). Default: 0.2.
     #[serde(default = "default_mark_regression_min_decay_factor")]
     pub min_decay_factor: f64,
+}
+
+fn default_mark_regression_entry_edge_scale_factor() -> rust_decimal::Decimal {
+    rust_decimal::Decimal::new(5, 1) // 0.5
 }
 
 fn default_mark_regression_decay_start_ms() -> u64 {
@@ -177,6 +192,8 @@ impl Default for MarkRegressionConfig {
             min_holding_time_ms: default_mark_regression_min_holding_time_ms(),
             slippage_bps: default_mark_regression_slippage_bps(),
             min_loss_exit_bps: rust_decimal::Decimal::ZERO,
+            entry_edge_scaling: false,
+            entry_edge_scale_factor: default_mark_regression_entry_edge_scale_factor(),
             time_decay_enabled: false,
             decay_start_ms: default_mark_regression_decay_start_ms(),
             min_decay_factor: default_mark_regression_min_decay_factor(),

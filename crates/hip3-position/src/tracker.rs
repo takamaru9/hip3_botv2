@@ -75,6 +75,9 @@ pub struct Position {
     pub entry_timestamp_ms: u64,
     /// Timestamp of last update (Unix ms).
     pub last_update_ms: u64,
+    /// Entry edge in bps at the time of position opening (Phase C).
+    /// Used for dynamic exit threshold scaling.
+    pub entry_edge_bps: Option<Decimal>,
 }
 
 impl Position {
@@ -94,6 +97,7 @@ impl Position {
             entry_price: price,
             entry_timestamp_ms: timestamp_ms,
             last_update_ms: timestamp_ms,
+            entry_edge_bps: None,
         }
     }
 
@@ -161,6 +165,8 @@ pub enum PositionTrackerMsg {
         timestamp_ms: u64,
         /// Client order ID for deduplication (optional).
         cloid: Option<ClientOrderId>,
+        /// Entry edge in bps (Phase C: for dynamic exit threshold).
+        entry_edge_bps: Option<Decimal>,
     },
 
     /// Begin snapshot processing (buffer subsequent messages).
@@ -258,7 +264,16 @@ impl PositionTrackerTask {
                 size,
                 timestamp_ms,
                 cloid,
-            } => self.on_fill(market, side, price, size, timestamp_ms, cloid),
+                entry_edge_bps,
+            } => self.on_fill(
+                market,
+                side,
+                price,
+                size,
+                timestamp_ms,
+                cloid,
+                entry_edge_bps,
+            ),
             PositionTrackerMsg::SnapshotStart => {
                 debug!("Snapshot processing started");
                 self.in_snapshot = true;
@@ -336,6 +351,7 @@ impl PositionTrackerTask {
     }
 
     /// Handle Fill message.
+    #[allow(clippy::too_many_arguments)]
     fn on_fill(
         &mut self,
         market: MarketKey,
@@ -344,6 +360,7 @@ impl PositionTrackerTask {
         size: Size,
         timestamp_ms: u64,
         cloid: Option<ClientOrderId>,
+        entry_edge_bps: Option<Decimal>,
     ) {
         // Cloid-based deduplication
         if let Some(ref id) = cloid {
@@ -391,7 +408,8 @@ impl PositionTrackerTask {
             }
         } else {
             // Create new position
-            let pos = Position::new(market, side, size, price, timestamp_ms);
+            let mut pos = Position::new(market, side, size, price, timestamp_ms);
+            pos.entry_edge_bps = entry_edge_bps;
             self.positions.insert(market, pos.clone());
             self.positions_cache.insert(market, true);
             self.positions_data.insert(market, pos);
@@ -707,6 +725,7 @@ impl PositionTrackerHandle {
     /// * `cloid` - Optional client order ID for deduplication. If the same cloid
     ///   is received multiple times (e.g., from both post response and
     ///   userFills), only the first fill is processed.
+    #[allow(clippy::too_many_arguments)]
     pub async fn fill(
         &self,
         market: MarketKey,
@@ -715,6 +734,7 @@ impl PositionTrackerHandle {
         size: Size,
         timestamp_ms: u64,
         cloid: Option<ClientOrderId>,
+        entry_edge_bps: Option<Decimal>,
     ) {
         // NOTE: Position caches are updated by Actor only, not Handle
         // This ensures authoritative state is the single source of truth
@@ -728,6 +748,7 @@ impl PositionTrackerHandle {
                 size,
                 timestamp_ms,
                 cloid,
+                entry_edge_bps,
             })
             .await;
     }
@@ -1165,6 +1186,7 @@ mod tests {
                 Size::new(dec!(0.1)),
                 1234567890,
                 None, // cloid for deduplication
+                None, // entry_edge_bps
             )
             .await;
 
@@ -1197,6 +1219,7 @@ mod tests {
                 Size::new(dec!(0.1)),
                 1234567890,
                 None, // cloid for deduplication
+                None, // entry_edge_bps
             )
             .await;
 
@@ -1212,6 +1235,7 @@ mod tests {
                 Size::new(dec!(0.1)),
                 1234567891,
                 None, // cloid for deduplication
+                None, // entry_edge_bps
             )
             .await;
 

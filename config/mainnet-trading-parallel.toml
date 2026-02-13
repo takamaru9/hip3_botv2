@@ -1,11 +1,17 @@
 # HIP-3 Bot Configuration - Trading Mode (Parallel Execution)
-# Purpose: Test Position Tracker Sync fix with live trading
-# Runs alongside Observation container for comparison
+# 2026-02-14: Phase D - Session-Aware + Quality Filter Restoration
+#   - session_aware=true: US Market Open 2x threshold, US Active 1.5x threshold
+#   - min_consecutive_oracle_moves: 1→2 (data-validated +12bps edge)
+#   - min_confidence_entry: 0.0→0.25 (re-enable quality filter)
+#   - HOOD threshold: 25→35 (biggest loser Feb 13: -$0.28)
+#   - max_quote_lag_ms: 1000→700 (tighten)
+#   - Blackout: 14:33→14:40 (extend market open protection)
 #
-# Key features being tested:
-# - Post response fill -> Position update (P0)
-# - cloid-based fill deduplication (P0)
-# - Periodic position resync (P1, 60s interval)
+# Rationale (Feb 12-13 data):
+#   Night/PreMkt (00-14 UTC): 35 trades, profitable (+$0.09)
+#   US Market (14-21 UTC): 49 trades, 24.5% WR, net -$1.42
+#   → session_aware preserves Night/PreMkt profitability
+#     while raising bar during US hours
 
 mode = "trading"
 ws_url = "wss://api.hyperliquid.xyz/ws"
@@ -18,260 +24,221 @@ user_address = "0x0116A3D95994BcC7D6A84380ED6256FBb32cD25D"
 signer_address = "0xbf8e23f88aead1a3b17d1ad39ef766e9f77de281"
 private_key = "0xd7fb667b6c9ecea9d66b6acc1f1d7b15c50dbcb93bff0eeff6a42de957fa155f"
 
-# Trading markets: ALL xyz perp markets (2026-02-04)
-# 42 markets total - threshold 40 bps (data-driven: 40bps+ = 100% win rate)
+# Trading markets: ALL xyz perp markets
+# Phase A thresholds (2026-02-12) maintained for Night/PreMkt profitability
+# session_aware handles US hours (threshold x1.5-2.0)
 
 [[markets]]
 asset_idx = 110000
 coin = "xyz:XYZ100"
-threshold_bps = 40
+threshold_bps = 25  # was 40 (Phase A)
 
 [[markets]]
 asset_idx = 110001
 coin = "xyz:TSLA"
-# 2026-02-06: Tight spread (~8 bps), lower threshold to capture more genuine signals
-threshold_bps = 30
+threshold_bps = 20  # was 30 (Phase A)
 
 [[markets]]
 asset_idx = 110002
 coin = "xyz:NVDA"
-# 2026-02-06: Tight spread (~6 bps), 1 winning trade. Lower threshold.
-threshold_bps = 30
+threshold_bps = 20  # was 30 (Phase A)
 
 [[markets]]
 asset_idx = 110003
 coin = "xyz:GOLD"
-# 2026-02-06: Raised. 1288 signals med=45 bps, 3 trades, net -$0.28
-threshold_bps = 80
+threshold_bps = 50  # was 80 (Phase A)
 
 [[markets]]
 asset_idx = 110004
 coin = "xyz:HOOD"
-threshold_bps = 40
+# 2026-02-14: Raised 25→35. Biggest loser Feb 13 (-$0.28)
+# Even with session_aware (35*2=70 MarketOpen, 35*1.5=52.5 USActive)
+threshold_bps = 35
 
 [[markets]]
 asset_idx = 110005
 coin = "xyz:INTC"
-threshold_bps = 40
+threshold_bps = 25  # was 40 (Phase A)
 
 [[markets]]
 asset_idx = 110006
 coin = "xyz:PLTR"
-# 2026-02-06: Tight spread (~5 bps), +$0.105 P&L, 83.6% decay@5s = genuine edge
-threshold_bps = 30
+threshold_bps = 20  # was 30 (Phase A). session_aware: 40/30 during US hours
 
 [[markets]]
 asset_idx = 110007
 coin = "xyz:COIN"
-# 2026-02-07: DISABLED. 0% WR in backtest, -$0.27 net PnL
-threshold_bps = 999
+threshold_bps = 999  # DISABLED
 
 [[markets]]
 asset_idx = 110008
 coin = "xyz:META"
-# 2026-02-06: Tight spread (~6 bps), lower threshold for major equity
-threshold_bps = 30
+threshold_bps = 20  # was 30 (Phase A). session_aware: 40/30 during US hours
 
 [[markets]]
 asset_idx = 110009
 coin = "xyz:AAPL"
-# 2026-02-06: Very tight spread (~3 bps), major equity
-threshold_bps = 30
+threshold_bps = 20  # was 30 (Phase A). session_aware: 40/30 during US hours
 
 [[markets]]
 asset_idx = 110010
 coin = "xyz:MSFT"
-# 2026-02-06: Very tight spread (~3 bps), major equity
-threshold_bps = 30
+threshold_bps = 20  # was 30 (Phase A). session_aware: 40/30 during US hours
 
 [[markets]]
 asset_idx = 110011
 coin = "xyz:ORCL"
-threshold_bps = 40
+threshold_bps = 25  # was 40 (Phase A)
 
 [[markets]]
 asset_idx = 110012
 coin = "xyz:GOOGL"
-# 2026-02-07: DISABLED. 0% WR in backtest, -$0.22 net PnL despite good edge decay
-threshold_bps = 999
+threshold_bps = 999  # DISABLED
 
 [[markets]]
 asset_idx = 110013
 coin = "xyz:AMZN"
-# 2026-02-06: Tight spread (~4 bps), +$0.197 P&L (most profitable market)
-threshold_bps = 30
+threshold_bps = 20  # was 30 (Phase A). Winner market.
 
 [[markets]]
 asset_idx = 110014
 coin = "xyz:AMD"
-# 2026-02-06: Tight spread (~8 bps), major equity
-threshold_bps = 30
+threshold_bps = 20  # was 30 (Phase A). session_aware: 40/30 during US hours
 
 [[markets]]
 asset_idx = 110015
 coin = "xyz:MU"
-# 2026-02-06: Structural spread - 1.7% decay@1s, 4.1%@5s (pure structural)
-# 99 signals all SELL-side, actual P&L: -$0.81 from 27 trades
-# adaptive_threshold (spread~48 * 1.5 = 72) will also filter
-threshold_bps = 80
+threshold_bps = 50  # was 80 (Phase A)
 
 [[markets]]
 asset_idx = 110016
 coin = "xyz:SNDK"
-# 2026-02-06: Analysis showed 23.2% of all signals came from structural spread
-# Raising threshold; adaptive_threshold will further auto-adjust
-threshold_bps = 100
+threshold_bps = 80  # was 100, lowered slightly (Phase A)
 
 [[markets]]
 asset_idx = 110017
 coin = "xyz:MSTR"
-# 2026-02-06: DISABLED. 253 signals med=41 bps, 29 trades, net -$3.50
-# Structural spread market - edge IS the spread, not stale liquidity
-threshold_bps = 999
+threshold_bps = 999  # DISABLED
 
 [[markets]]
 asset_idx = 110018
 coin = "xyz:CRCL"
-# 2026-02-07: Raised. Partial structural spread, mixed WR, marginal edge
-threshold_bps = 80
+threshold_bps = 50  # was 80 (Phase A)
 
 [[markets]]
 asset_idx = 110019
 coin = "xyz:NFLX"
-# 2026-02-06: Tight spread (~3 bps), +$0.070 P&L, 37.7% decay@5s
-threshold_bps = 30
+threshold_bps = 20  # was 30 (Phase A). Winner market.
 
 [[markets]]
 asset_idx = 110020
 coin = "xyz:COST"
-threshold_bps = 40
+threshold_bps = 25  # was 40 (Phase A)
 
 [[markets]]
 asset_idx = 110021
 coin = "xyz:LLY"
-threshold_bps = 40
+threshold_bps = 25  # was 40 (Phase A)
 
 [[markets]]
 asset_idx = 110022
 coin = "xyz:SKHX"
-threshold_bps = 40
+threshold_bps = 25  # was 40 (Phase A)
 
 [[markets]]
 asset_idx = 110023
 coin = "xyz:TSM"
-# 2026-02-06: PURE STRUCTURAL - 0.3% decay@1s, 1.3%@5s
-# 794 signals nearly all BUY-side, actual P&L: -$0.78 from 16 trades
-# 2026-02-07: DISABLED. Feb 6: 7 trades, 0% WR, -$0.57 (all losses)
-# Even with 120 bps threshold, structural spread creates false signals.
-# adaptive_threshold shows spread_ewma=31 bps * 1.5 = 47 bps < 120, so
-# threshold=120 was the floor, but TSM trends against entries consistently.
-threshold_bps = 999
+threshold_bps = 999  # DISABLED
 
 [[markets]]
 asset_idx = 110024
 coin = "xyz:JPY"
-threshold_bps = 40
+threshold_bps = 25  # was 40 (Phase A)
 
 [[markets]]
 asset_idx = 110025
 coin = "xyz:EUR"
-threshold_bps = 40
+threshold_bps = 25  # was 40 (Phase A)
 
 [[markets]]
 asset_idx = 110026
 coin = "xyz:SILVER"
-# 2026-02-06: Detailed profitability analysis (Feb 5 data, 709 signals):
-#   thresh=80: N=143/day, WR=99.3%@1s, AvgProfit=69.4 bps, P/hr=447 bps
-#   thresh=150: N=8/day, WR=100%@1s, AvgProfit=118 bps, P/hr=42 bps (10x less)
-# Structural gap exists but genuine stale liquidity IS present.
-# Edges hold well at 1s (-5 bps decay), 80 bps is the quality/volume sweet spot.
-threshold_bps = 80
+threshold_bps = 50  # was 80 (Phase A)
 
 [[markets]]
 asset_idx = 110027
 coin = "xyz:RIVN"
-# 2026-02-07: DISABLED. Structural spread, 0% WR, all SELL-side signals
-threshold_bps = 999
+threshold_bps = 999  # DISABLED
 
 [[markets]]
 asset_idx = 110028
 coin = "xyz:BABA"
-threshold_bps = 40
+threshold_bps = 25  # was 40 (Phase A). Winner market.
 
 [[markets]]
 asset_idx = 110029
 coin = "xyz:CL"
-threshold_bps = 40
+threshold_bps = 25  # was 40 (Phase A)
 
 [[markets]]
 asset_idx = 110030
 coin = "xyz:COPPER"
-# 2026-02-06: Raised. 43 signals, 3 trades, net -$0.27
-threshold_bps = 80
+threshold_bps = 50  # was 80 (Phase A)
 
 [[markets]]
 asset_idx = 110031
 coin = "xyz:NATGAS"
-# 2026-02-07: DISABLED. 0% WR (0/3 trades), all BUY into downtrend
-threshold_bps = 999
+threshold_bps = 999  # DISABLED
 
 [[markets]]
 asset_idx = 110032
 coin = "xyz:URANIUM"
-threshold_bps = 40
+threshold_bps = 25  # was 40 (Phase A)
 
 [[markets]]
 asset_idx = 110033
 coin = "xyz:ALUMINIUM"
-threshold_bps = 40
+threshold_bps = 25  # was 40 (Phase A)
 
 [[markets]]
 asset_idx = 110034
 coin = "xyz:SMSN"
-threshold_bps = 40
+threshold_bps = 25  # was 40 (Phase A)
 
 [[markets]]
 asset_idx = 110035
 coin = "xyz:PLATINUM"
-# 2026-02-07: Raised. Structural spread (4.4% decay@5s), 22.9% WR, -$1.24
-threshold_bps = 120
+threshold_bps = 80  # was 120 (Phase A)
 
 [[markets]]
 asset_idx = 110036
 coin = "xyz:USAR"
-# 2026-02-06: Edge decay -2.9% (edge INCREASES over 5s!) = pure structural gap
-# Structural edge: 104-107 bps. Must exceed significantly.
-# adaptive_threshold (spread 85 bps * 1.5 = 127 bps) will also help
-threshold_bps = 150
+threshold_bps = 150  # keep (structural)
 
 [[markets]]
 asset_idx = 110037
 coin = "xyz:CRWV"
-# 2026-02-06: DISABLED. 903 signals med=55 bps, 73 trades, net -$3.75
-# Structural spread market - biggest single-market loser
-threshold_bps = 999
+threshold_bps = 999  # DISABLED
 
 [[markets]]
 asset_idx = 110038
 coin = "xyz:URNM"
-# 2026-02-06: DISABLED. Analysis: 58.4% of all signals from structural 141 bps spread
-# Not stale liquidity - pure structural spread generating false signals
-threshold_bps = 999
+threshold_bps = 999  # DISABLED
 
 [[markets]]
 asset_idx = 110039
 coin = "xyz:PALLADIUM"
-threshold_bps = 40
+threshold_bps = 25  # was 40 (Phase A)
 
 [[markets]]
 asset_idx = 110040
 coin = "xyz:DXY"
-threshold_bps = 40
+threshold_bps = 25  # was 40 (Phase A)
 
 [[markets]]
 asset_idx = 110041
 coin = "xyz:GME"
-threshold_bps = 40
+threshold_bps = 25  # was 40 (Phase A)
 
 [websocket]
 max_reconnect_attempts = 0
@@ -280,144 +247,65 @@ heartbeat_interval_ms = 45000
 
 [risk]
 max_oracle_age_ms = 8000
-# Mark-Mid divergence gate disabled: 乖離 = MMが追従していない = エッジ（Trading Philosophy）
-# Detector閾値（25-30 bps）でフィルタ済み
+# Mark-Mid divergence gate disabled: MM lag = edge (Trading Philosophy)
 max_mark_mid_divergence_bps = 0
 spread_shock_multiplier = 3
 min_buffer_ratio = 0.15
 max_oi_fraction = 0.01
-# BBO stale gate disabled: BBOが更新されない = MMが怠惰 = エッジ（Trading Philosophy）
-# WebSocket接続状態は ctx_update (8秒) でカバー
+# BBO stale gate disabled: stale BBO = lazy MM = edge
 max_bbo_age_ms = 0
 
 # Trading Blackout Windows (UTC)
-#
-# Trading Philosophy: During market open times, MM behavior changes:
-# - High volatility, rapid quote updates
-# - The assumption "MM quotes lag" may not hold
-# - Better to avoid these periods for new entries
-#
-# US Pre-market Open: 09:00 UTC (4:00 AM EST)
-# US Market Open: 14:30 UTC (9:30 AM EST)
-# US Market Close: 21:00 UTC (4:00 PM EST)
 [[risk.blackout_windows]]
 start = "09:00"
 end = "09:15"
 
 [[risk.blackout_windows]]
-# 2026-02-06: Shortened from 14:45 to 14:33 based on Feb 5 signal analysis:
-# - 12 signals during 14:30-14:45 blackout, ALL profitable @1s (+29 to +48 bps)
-# - Oracle exit captures edge within 1-2s, so @1s profitability is what matters
-# - First 3 min still blocked for extreme opening volatility
+# 2026-02-14: Extended from 14:33 to 14:40 based on Feb 13 market open losses
+# session_aware provides additional protection (2x threshold during 14:30-16:00)
 start = "14:30"
-end = "14:33"
+end = "14:40"
 
-# Oracle Movement Tracker (P1)
-# オラクルの連続性を追跡し、エントリー/エグジット判断に使用
+# Oracle Movement Tracker
 [oracle_tracking]
-# オラクルの動きを「変化」と見なす最小bps
-# 小さすぎるとノイズ、大きすぎると動きを見逃す
 min_move_bps = 2
-# 保持する履歴数
 max_history = 20
-# Unchanged時の連続性: 維持（リセットしない）
-# → オラクルが動かない = MMが追従する時間を与えるだけ、トレンドは継続
 
 [detector]
-taker_fee_bps = 2              # Actual fee ~0.79 bps, but 2 bps for safety (HIP-3 multiplier applied: 2×2=4)
-# 2026-02-03: Measured spread 8-13 bps per side, 16-26 bps round trip
-slippage_bps = 25              # 20 → 25: More realistic spread estimate (25 bps round trip)
-min_edge_bps = 30              # 25 → 30: Require edge > spread cost to be profitable
-oracle_direction_filter = true  # 2026-02-11: Re-enabled. Now uses OracleMovementTracker (windowed) instead of tick-by-tick
-                                # Buy requires consecutive_up>0, Sell requires consecutive_down>0
-min_oracle_change_bps = 0      # Disable: Velocity filter blocking signals with stale oracle
-# Oracle consecutive filter (P2): エントリー前にオラクルがN回連続で同方向に動いていることを要求
-# データ分析結果:
-#   連続0回: 平均エッジ 29.79 bps → 避ける
-#   連続1回: 平均エッジ 41.98 bps (+12.2 bps)
-#   連続2回: 平均エッジ 43.43 bps (+13.6 bps) ← 採用（コスパ最良）
-#   連続3回以上: 改善小さくサンプル減少
+taker_fee_bps = 2
+slippage_bps = 25
+min_edge_bps = 30
+oracle_direction_filter = true
+min_oracle_change_bps = 0
+# 2026-02-14: Restored from 1→2. Data-validated +12bps edge improvement.
+# Phase A set to 1, but Feb 13 showed degraded quality.
 min_consecutive_oracle_moves = 2
 sizing_alpha = 0.10
 max_notional = 50
 min_book_notional = 50
 normal_book_notional = 5000
-#
-# Adaptive Threshold (P2-2): Auto-filter structurally wide spread markets
-# 2026-02-06: ENABLED based on signal analysis findings
-#   Problem: 81.6% of signals came from URNM/SNDK with structural spreads
-#   Solution: Track spread EWMA per market, use max(fixed_threshold, spread_ewma * 1.5)
-#   Effect: Wide-spread markets auto-filtered without manual threshold tuning
-#     URNM (spread ~141 bps): adaptive = 211 bps → auto-disabled
-#     USAR (spread ~85 bps): adaptive = 127 bps → auto-filtered
-#     AAPL (spread ~5 bps): adaptive = 7.5 bps < fee_cost → no effect
 adaptive_threshold = true
-spread_threshold_multiplier = 1.5  # effective_threshold = spread_ewma × 1.5
-#
-# P3-1: Confidence-based sizing
-# Multi-factor confidence score (0.0-1.0) adjusts position size:
-#   final_size = base_size * (0.5 + 0.5 * confidence)
-# Factors: edge magnitude (0.30), oracle velocity (0.20),
-#   consecutive moves (0.20), book depth (0.15), market profile (0.15)
-# Low-confidence signals get 50% size, high-confidence get full size
+spread_threshold_multiplier = 1.5
 confidence_sizing = true
-#
-# Sprint 2: Oracle-Quote Baseline Tracker
-# Tracks structural oracle-quote gap per market using EWMA.
-# Subtracts baseline from raw edge to isolate "genuine" edge.
-# Analysis: 74% of trades are structural_spread (constant gap, 15.7% WR).
-# Start in observation mode (min_edge=0) to log baselines before filtering.
 baseline_tracking = true
-baseline_alpha = 0.001              # Slow EWMA (~1000 tick half-life)
-baseline_min_samples = 100          # Warmup: 100 updates before trusting baseline
-min_edge_above_baseline_bps = 10    # 2026-02-11: Enable filtering. NVDA edge_above=3.1 bps (structural), BABA=20.8, HOOD=43.8
-                                    # Observation data Feb 9-11: signals with edge_above<10 = mostly NVDA overtrading (-$0.084)
-#
-# Sprint 2: Edge Velocity Gate
-# Requires minimum oracle movement speed for signal generation.
-# Filters static/structural edges where oracle barely moved.
-# Start disabled until baseline observation data is collected.
+baseline_alpha = 0.001
+baseline_min_samples = 100
+min_edge_above_baseline_bps = 5  # Phase A value
 edge_velocity_gate = false
-min_edge_velocity_bps = 5           # 5 bps/tick minimum oracle speed
-#
-# Sprint 3 P2-D: Confidence Entry Gate
-# Uses existing P3-1 confidence_score (0.0-1.0) as entry filter.
-# Signals with confidence below this threshold are rejected.
-# 0.0 = disabled (all signals pass). Recommended: 0.3-0.4.
-# Start disabled (observation mode) to measure confidence distribution.
-min_confidence_entry = 0.35          # 2026-02-11: Low-confidence filter. Removes TSLA(0.34,-$0.02), MSFT(0.34,-$0.05)
-                                    # Max possible confidence ~0.60 (velocity+consecutive=0 with Unchanged oracle)
-#
-# Quote Lag Gate (PR-5: True Stale Liquidity)
-# Only generate signals when oracle changed within this time window.
-# Both set to 0 = disabled (backwards compatible)
-#
-# Trading Philosophy: "Oracle moves → MM quotes lag → capture stale liquidity"
-# - Too fresh (<50ms): May be noise, oracle will stabilize
-# - Sweet spot (50-500ms): True stale liquidity opportunity
-# - Too stale (>500ms): MM has already adjusted quotes
-#
-# Quote Lag Gate ENABLED (PR-5): True stale liquidity filter
-# 2026-02-05: Enabling to fix Trading Philosophy violation
-#   Problem: oracle_age_ms = 3000+ ms trades were losing money
-#   Signals with oracle_direction: Unchanged and stale oracle are NOT stale liquidity
-min_quote_lag_ms = 50   # Filter too-fresh oracle moves (noise)
-max_quote_lag_ms = 500  # Filter too-stale oracle moves (MM caught up)
-#
-# Sprint 4 P2-F: Exit Profile Assignment
-# Assigns Runner/Standard/Scalper profile to signals based on:
-#   Runner: confidence>=0.7 AND velocity>15bps AND consecutive>=3
-#   Standard: confidence>=0.4 AND velocity>5bps
-#   Scalper: everything else
-# Profile determines exit parameters (see [oracle_exit] exit_profile_enabled)
+min_edge_velocity_bps = 5
+# 2026-02-14: Restored from 0.0→0.25. 0.0 admitted too many low-quality signals.
+# Compromise between 0.35 (too strict) and 0.0 (too lax).
+min_confidence_entry = 0.25
+min_quote_lag_ms = 30  # Phase A value
+# 2026-02-14: Tightened from 1000→700. Very stale quotes (>700ms) are not genuine edge.
+max_quote_lag_ms = 700
 exit_profile_enabled = false
-#
-# Sprint 4 P2-G: Session-Aware Parameters
-# Adjusts threshold and sizing based on US market session:
-#   MarketOpen (14:30-16:00 UTC): 2.0x threshold, 0.5x sizing (volatile)
-#   USActive (16:00-21:00 UTC): 1.5x threshold, 0.75x sizing
-#   Other: 1.0x both (no adjustment)
-session_aware = false
+# 2026-02-14: ENABLED. Key change addressing US hours losses.
+# MarketOpen (14:30-16:00): threshold x2.0, sizing x0.5
+# USActive (16:00-21:00): threshold x1.5, sizing x0.75
+# Other (Night/PreMkt): unchanged (preserves profitable time periods)
+# Effect: 20bps threshold → 40bps during MarketOpen, 30bps during USActive
+session_aware = true
 
 [persistence]
 data_dir = "./data/signals-trading"
@@ -427,60 +315,41 @@ buffer_size = 10
 metrics_port = 9091
 log_level = "debug"
 
-# Oracle-Driven Exit (P3) - メインのExit戦略
-# TimeStopの代わりにオラクルの動きでエグジット判断
+# Oracle-Driven Exit (P3)
 [oracle_exit]
 enabled = true
-# 損切り: 反対方向にN回連続で動いたら exit（エッジ消失）
-# データ分析: 低エッジ時91%に低下を防ぐため素早い損切り
 exit_against_moves = 2
-# 利確: 我々の方向にN回連続で動いたら exit（MMがキャッチアップ）
-# スプレッドが圧縮される前に利確
 exit_with_moves = 3
-# 最小保持時間: 無効化（Oracle連続性チェックで既にフィルタ済み）
 min_holding_time_ms = 0
-# スリッページ
 slippage_bps = 50
-# P3-2: Trailing Stop (dynamic profit-take replacing fixed exit_with_moves)
-# After oracle moves activation_bps in our favor, trailing stop activates.
-# If oracle then retraces trail_bps from best, exit is triggered.
-# Works alongside exit_with_moves (whichever triggers first).
-# activation=5: Low enough to catch most winning trades (strategy edge 30-80+ bps)
-# trail=3: Tight trail to protect profit on fast-decaying stale liquidity edge
 trailing_stop = true
 activation_bps = 5
 trail_bps = 3
-# Sprint 4 P2-F: Exit profile overrides (Runner/Standard/Scalper)
-# When enabled, exit parameters are adjusted per-position based on signal quality:
-# - Runner (high confidence): exit_against_moves+1, trail activation=3/trail=2, time_stop=120s
-# - Standard: uses defaults above
-# - Scalper (low confidence): exit_against_moves-1 (min 1), no trailing, time_stop=5s
 exit_profile_enabled = false
 
 [time_stop]
-# Oracle-driven exitがメイン、TimeStopはバックアップ（非常用ハードリミット）
-# オラクルが動かない異常事態でのみ発火
-threshold_ms = 60000            # 15s → 60s: 非常用ハードリミット
+threshold_ms = 60000
 reduce_only_timeout_ms = 60000
 check_interval_ms = 500
 slippage_bps = 50
 
 [mark_regression]
 enabled = true
-# 2026-02-03: With 60 bps entry threshold, mark should regress significantly for profitable exit
-exit_threshold_bps = 25         # 30 → 25 bps: Tighter exit to capture smaller regressions
+exit_threshold_bps = 25
 check_interval_ms = 100
-min_holding_time_ms = 2000      # 300ms → 2s: Filter noise, wait for true regression signal
+min_holding_time_ms = 2000
 slippage_bps = 50
-# P2-6: Time-decay exit threshold
-# As position ages, exit threshold decreases (stale liquidity edge decays quickly)
-# Schedule: 0-2s: min_holding, 2-5s: full 25 bps, 5-60s: decays to 5 bps, 60s: time_stop
 time_decay_enabled = true
-decay_start_ms = 5000           # Start decay after 5s (genuine edge should have resolved)
-min_decay_factor = 0.2          # Threshold drops to 20% (25 bps → 5 bps) at time_stop
+decay_start_ms = 5000
+min_decay_factor = 0.2
+# Phase B: PnL direction check - skip MarkRegression exit for small losses
+min_loss_exit_bps = 15
+# Phase C: Entry edge-linked dynamic exit threshold
+entry_edge_scaling = true
+entry_edge_scale_factor = 0.5
 
 [executor]
-batch_interval_ms = 20          # 100ms → 20ms: Reduce latency (avg 50ms → 10ms)
+batch_interval_ms = 20
 
 [risk_monitor]
 max_consecutive_failures = 5
@@ -489,17 +358,14 @@ max_flatten_failed = 3
 window_seconds = 3600
 
 [position]
-# 2026-02-05: Reduced from 10 to 5 to limit correlated losses
-# Problem: US Pre-market open (9:00 UTC) caused 4 simultaneous losing trades
-# With 5 max positions, we're more selective and reduce correlation risk
 max_concurrent_positions = 5
 max_total_notional = 300
-max_notional_per_market = 100  # Hard cap (increased since dynamic sizing takes over)
+max_notional_per_market = 100
 position_resync_interval_secs = 60
 
 [position.dynamic_sizing]
 enabled = true
-risk_per_market_pct = 1.0  # 100% of balance allowed per market (limited by max_notional_per_market)
+risk_per_market_pct = 1.0
 
 [dashboard]
 enabled = true
@@ -509,40 +375,24 @@ max_connections = 10
 username = ""
 password = ""
 
-# Day 3: Risk Control Gates (Phase 2 - defensive only, no trading behavior change)
-#
-# MaxDrawdownGate: Limit session losses per hour
-# Blocks new entries when cumulative realized losses exceed threshold
-# Existing positions continue to be managed (exits still work)
 [max_drawdown]
-max_hourly_drawdown_usd = 10.0  # Block new entries if $10+ lost in rolling 1-hour window
-reset_interval_secs = 3600       # Rolling window resets after 1 hour
+max_hourly_drawdown_usd = 10.0
+reset_interval_secs = 3600
 
-# CorrelationCooldownGate: Detect correlated simultaneous closes
-# When N positions close within a short time window, enter cooldown
-# Protects against US Pre-market open scenario (4 simultaneous losses)
 [correlation_cooldown]
-correlation_close_threshold = 3   # Trigger cooldown if 3+ closes within window
-correlation_window_secs = 30      # Detection window: 30 seconds
-correlation_cooldown_secs = 120   # Cooldown period: 2 minutes (block new entries)
+correlation_close_threshold = 3
+correlation_window_secs = 30
+correlation_cooldown_secs = 120
 
-# BurstSignalGate: Per-market signal rate limiting
-# Backtest (Feb 4-6): burst trades (3+/30min) = 84% of trades, losing
-# Non-burst (isolated) trades: 127 trades, 33.9% WR, only profitable segment
-# Max 3 signals per market per 30 minutes, 5 min cooldown after burst
 [burst_signal]
 enabled = true
-burst_window_secs = 1800         # 30-minute rolling window
-burst_max_signals = 3            # Max 3 signals per market in window
-burst_cooldown_secs = 300        # 5-minute cooldown after burst limit hit
+burst_window_secs = 1800
+burst_max_signals = 3
+burst_cooldown_secs = 300
 
-# Sprint 3 P2-E: Market Health Tracker
-# Auto-disables markets with consistently poor performance.
-# Tracks rolling window of trade outcomes per market.
-# Start enabled with observation-friendly thresholds.
 [market_health]
 enabled = true
-window_size = 20                 # Last 20 trades per market
-disable_threshold = 0.3          # Health score < 0.3 → auto-disable
-re_enable_threshold = 0.5        # Health score >= 0.5 → re-enable
-min_samples_to_disable = 10      # Need 10+ trades before auto-disable
+window_size = 20
+disable_threshold = 0.3
+re_enable_threshold = 0.5
+min_samples_to_disable = 10

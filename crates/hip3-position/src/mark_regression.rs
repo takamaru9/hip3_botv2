@@ -19,7 +19,7 @@ use hip3_core::{MarketKey, OrderSide, PendingOrder};
 use hip3_feed::MarketState;
 
 use crate::time_stop::{FlattenOrderBuilder, TIME_STOP_MS};
-use crate::tracker::{Position, PositionTrackerHandle};
+use crate::tracker::{Position, PositionTrackerHandle, SharedFlatteningGuard};
 
 // ============================================================================
 // MarkRegressionConfig
@@ -209,6 +209,8 @@ pub struct MarkRegressionMonitor {
     /// without waiting for the position tracker to be updated asynchronously.
     /// Cleared when the market is no longer in positions snapshot.
     local_flattening: HashSet<MarketKey>,
+    /// Shared guard across all exit monitors to prevent duplicate flatten requests.
+    shared_flattening: Option<SharedFlatteningGuard>,
 }
 
 impl MarkRegressionMonitor {
@@ -219,6 +221,7 @@ impl MarkRegressionMonitor {
         position_handle: PositionTrackerHandle,
         flatten_tx: mpsc::Sender<PendingOrder>,
         market_state: Arc<MarketState>,
+        shared_flattening: Option<SharedFlatteningGuard>,
     ) -> Self {
         Self {
             config,
@@ -226,6 +229,7 @@ impl MarkRegressionMonitor {
             flatten_tx,
             market_state,
             local_flattening: HashSet::new(),
+            shared_flattening,
         }
     }
 
@@ -288,6 +292,17 @@ impl MarkRegressionMonitor {
                 }
 
                 if let Some(edge_bps) = self.check_exit(&position, now_ms) {
+                    // Shared guard: prevent cross-monitor duplicates
+                    if let Some(ref guard) = self.shared_flattening {
+                        if !guard.try_claim(&position.market) {
+                            debug!(
+                                market = %position.market,
+                                "MarkRegression: flatten already claimed by another monitor"
+                            );
+                            continue;
+                        }
+                    }
+
                     // Mark as flattening BEFORE sending to prevent duplicates
                     self.local_flattening.insert(position.market);
                     self.trigger_exit(&position, edge_bps, now_ms).await;

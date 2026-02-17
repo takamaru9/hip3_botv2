@@ -13,11 +13,11 @@ use std::sync::Arc;
 
 use rust_decimal::Decimal;
 use tokio::sync::mpsc;
-use tracing::{debug, info, warn};
+use tracing::{debug, info, trace, warn};
 
 use hip3_core::{ClientOrderId, MarketKey, OrderSide, PendingOrder, Price, TrackedOrder};
 
-use crate::tracker::{Position, PositionTrackerHandle};
+use crate::tracker::{Position, PositionTrackerHandle, SharedFlatteningGuard};
 
 /// Default time stop threshold: 30 seconds.
 /// Positions held longer than this will be flattened.
@@ -311,6 +311,9 @@ pub struct TimeStopMonitor<P: PriceProvider> {
     /// without waiting for the position tracker to be updated asynchronously.
     /// Cleared when the market is no longer in positions snapshot.
     local_flattening: HashSet<MarketKey>,
+
+    /// Shared guard across all exit monitors to prevent duplicate flatten requests.
+    shared_flattening: Option<SharedFlatteningGuard>,
 }
 
 impl<P: PriceProvider + 'static> TimeStopMonitor<P> {
@@ -323,6 +326,7 @@ impl<P: PriceProvider + 'static> TimeStopMonitor<P> {
     /// * `price_provider` - Provider for current prices
     /// * `slippage_bps` - Slippage tolerance in basis points (default: 50)
     /// * `check_interval_ms` - How often to check (default: 1000ms)
+    /// * `shared_flattening` - Shared guard across exit monitors
     #[must_use]
     pub fn new(
         config: TimeStopConfig,
@@ -331,6 +335,7 @@ impl<P: PriceProvider + 'static> TimeStopMonitor<P> {
         price_provider: Arc<P>,
         slippage_bps: u64,
         check_interval_ms: u64,
+        shared_flattening: Option<SharedFlatteningGuard>,
     ) -> Self {
         Self {
             time_stop: TimeStop::from_config(&config),
@@ -340,6 +345,7 @@ impl<P: PriceProvider + 'static> TimeStopMonitor<P> {
             slippage_bps,
             check_interval_ms,
             local_flattening: HashSet::new(),
+            shared_flattening,
         }
     }
 
@@ -358,6 +364,7 @@ impl<P: PriceProvider + 'static> TimeStopMonitor<P> {
             price_provider,
             50,   // 0.5% slippage
             1000, // 1 second interval
+            None,
         )
     }
 
@@ -505,6 +512,17 @@ impl<P: PriceProvider + 'static> TimeStopMonitor<P> {
                     "TimeStop triggered for market {}: creating flatten order cloid={}, side={:?}, size={}, price={}",
                     market, order.cloid, order.side, order.size, order.price
                 );
+
+                // Shared guard: prevent cross-monitor duplicates
+                if let Some(ref guard) = self.shared_flattening {
+                    if !guard.try_claim(&market) {
+                        trace!(
+                            market = %market,
+                            "TimeStopMonitor: flatten already claimed by another monitor"
+                        );
+                        continue;
+                    }
+                }
 
                 // Mark as flattening BEFORE sending to prevent duplicates in next check cycle
                 self.local_flattening.insert(market);

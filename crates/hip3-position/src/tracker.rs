@@ -1054,6 +1054,55 @@ pub fn spawn_position_tracker(capacity: usize) -> (PositionTrackerHandle, JoinHa
 }
 
 // ============================================================================
+// SharedFlatteningGuard
+// ============================================================================
+
+/// Shared guard across all exit monitors to prevent duplicate flatten requests.
+///
+/// When multiple exit monitors (ExitWatcher, MarkRegressionMonitor, OracleExitWatcher)
+/// detect an exit condition for the same market, only the first to call `try_claim()`
+/// will succeed. This prevents 3+ redundant flatten orders and the resulting
+/// "Reduce only" rejects from the exchange.
+#[derive(Clone)]
+pub struct SharedFlatteningGuard {
+    active: Arc<parking_lot::RwLock<HashSet<MarketKey>>>,
+}
+
+impl SharedFlatteningGuard {
+    /// Create a new SharedFlatteningGuard.
+    pub fn new() -> Self {
+        Self {
+            active: Arc::new(parking_lot::RwLock::new(HashSet::new())),
+        }
+    }
+
+    /// Try to claim flatten for this market. Returns true if claimed (first caller wins).
+    pub fn try_claim(&self, market: &MarketKey) -> bool {
+        let mut guard = self.active.write();
+        guard.insert(*market) // true if newly inserted
+    }
+
+    /// Release flatten claim when position is closed.
+    pub fn release(&self, market: &MarketKey) {
+        let mut guard = self.active.write();
+        guard.remove(market);
+    }
+
+    /// Check if a market is claimed.
+    #[allow(dead_code)]
+    pub fn is_claimed(&self, market: &MarketKey) -> bool {
+        let guard = self.active.read();
+        guard.contains(market)
+    }
+}
+
+impl Default for SharedFlatteningGuard {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+// ============================================================================
 // Tests
 // ============================================================================
 
@@ -1505,5 +1554,51 @@ mod tests {
             .block_on(async { spawn_position_tracker(100) });
         let unknown_cloid = ClientOrderId::new();
         handle.remove_oid_mapping(&unknown_cloid); // Should not panic
+    }
+
+    // SharedFlatteningGuard tests
+
+    #[test]
+    fn test_shared_flattening_first_claim_wins() {
+        let guard = SharedFlatteningGuard::new();
+        let market = MarketKey::new(DexId::XYZ, AssetId::new(0));
+
+        // First claim succeeds
+        assert!(guard.try_claim(&market));
+        assert!(guard.is_claimed(&market));
+
+        // Second claim fails (already claimed)
+        assert!(!guard.try_claim(&market));
+    }
+
+    #[test]
+    fn test_shared_flattening_release_allows_reclaim() {
+        let guard = SharedFlatteningGuard::new();
+        let market = MarketKey::new(DexId::XYZ, AssetId::new(0));
+
+        assert!(guard.try_claim(&market));
+        guard.release(&market);
+        assert!(!guard.is_claimed(&market));
+
+        // Can claim again after release
+        assert!(guard.try_claim(&market));
+    }
+
+    #[test]
+    fn test_shared_flattening_different_markets_independent() {
+        let guard = SharedFlatteningGuard::new();
+        let market_a = MarketKey::new(DexId::XYZ, AssetId::new(0));
+        let market_b = MarketKey::new(DexId::XYZ, AssetId::new(1));
+
+        assert!(guard.try_claim(&market_a));
+        // Different market is independent
+        assert!(guard.try_claim(&market_b));
+
+        assert!(guard.is_claimed(&market_a));
+        assert!(guard.is_claimed(&market_b));
+
+        guard.release(&market_a);
+        assert!(!guard.is_claimed(&market_a));
+        assert!(guard.is_claimed(&market_b));
     }
 }

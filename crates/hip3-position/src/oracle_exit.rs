@@ -45,7 +45,7 @@ use hip3_core::{ExitProfile, MarketKey, OrderSide, PendingOrder};
 use hip3_feed::OracleMovementTracker;
 
 use crate::time_stop::FlattenOrderBuilder;
-use crate::tracker::{Position, PositionTrackerHandle};
+use crate::tracker::{Position, PositionTrackerHandle, SharedFlatteningGuard};
 
 // ============================================================================
 // Oracle Baseline
@@ -313,6 +313,9 @@ pub struct OracleExitWatcher {
     /// Local tracking of markets with pending flatten orders.
     local_flattening: RwLock<HashSet<MarketKey>>,
 
+    /// Shared guard across all exit monitors to prevent duplicate flatten requests.
+    shared_flattening: Option<SharedFlatteningGuard>,
+
     /// Baseline consecutive counts at position entry time.
     /// Key: MarketKey, Value: OracleBaseline
     ///
@@ -335,6 +338,7 @@ impl OracleExitWatcher {
         position_handle: PositionTrackerHandle,
         oracle_tracker: Arc<OracleMovementTracker>,
         flatten_tx: mpsc::Sender<PendingOrder>,
+        shared_flattening: Option<SharedFlatteningGuard>,
     ) -> Self {
         info!(
             enabled = config.enabled,
@@ -351,6 +355,7 @@ impl OracleExitWatcher {
             oracle_tracker,
             flatten_tx,
             local_flattening: RwLock::new(HashSet::new()),
+            shared_flattening,
             position_baselines: RwLock::new(HashMap::new()),
             reversal_count: AtomicU64::new(0),
             catchup_count: AtomicU64::new(0),
@@ -464,6 +469,13 @@ impl OracleExitWatcher {
         if self.config.exit_profile_enabled {
             if let Some(time_stop_ms) = self.profile_time_stop_ms(&key) {
                 if held_ms >= time_stop_ms {
+                    // Shared guard: prevent cross-monitor duplicates
+                    if let Some(ref guard) = self.shared_flattening {
+                        if !guard.try_claim(&key) {
+                            trace!(market = %key, "OracleExit: flatten already claimed by another monitor");
+                            return;
+                        }
+                    }
                     {
                         let mut flattening = self.local_flattening.write();
                         flattening.insert(key);
@@ -481,6 +493,13 @@ impl OracleExitWatcher {
         // 6. P3-2: Update trailing stop state and check for trail exit
         if self.config.trailing_stop {
             if let Some(reason) = self.update_trailing_state(&key, &position, snapshot) {
+                // Shared guard: prevent cross-monitor duplicates
+                if let Some(ref guard) = self.shared_flattening {
+                    if !guard.try_claim(&key) {
+                        trace!(market = %key, "OracleExit: flatten already claimed by another monitor");
+                        return;
+                    }
+                }
                 {
                     let mut flattening = self.local_flattening.write();
                     flattening.insert(key);
@@ -492,6 +511,13 @@ impl OracleExitWatcher {
 
         // 7. Check oracle-based exit condition (consecutive moves)
         if let Some(reason) = self.check_oracle_exit(&position) {
+            // Shared guard: prevent cross-monitor duplicates
+            if let Some(ref guard) = self.shared_flattening {
+                if !guard.try_claim(&key) {
+                    trace!(market = %key, "OracleExit: flatten already claimed by another monitor");
+                    return;
+                }
+            }
             // 7. Mark as flattening BEFORE sending to prevent duplicates
             {
                 let mut flattening = self.local_flattening.write();
@@ -906,12 +932,14 @@ pub fn new_oracle_exit_watcher(
     position_handle: PositionTrackerHandle,
     oracle_tracker: Arc<OracleMovementTracker>,
     flatten_tx: mpsc::Sender<PendingOrder>,
+    shared_flattening: Option<SharedFlatteningGuard>,
 ) -> OracleExitWatcherHandle {
     Arc::new(OracleExitWatcher::new(
         config,
         position_handle,
         oracle_tracker,
         flatten_tx,
+        shared_flattening,
     ))
 }
 

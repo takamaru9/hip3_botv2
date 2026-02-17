@@ -34,7 +34,7 @@ use hip3_persistence::{FollowupRecord, FollowupWriter, ParquetWriter, SignalReco
 use hip3_position::{
     flatten_all_positions, new_exit_watcher, new_oracle_exit_watcher, spawn_position_tracker,
     ExitWatcherHandle, FlattenReason, MarkRegressionConfig, MarkRegressionMonitor,
-    OracleExitWatcherHandle, Position, PositionTrackerHandle,
+    OracleExitWatcherHandle, Position, PositionTrackerHandle, SharedFlatteningGuard,
     TimeStopConfig as PositionTimeStopConfig, TimeStopMonitor,
 };
 use hip3_registry::{
@@ -161,6 +161,8 @@ pub struct Application {
     mm_shutdown_triggered: bool,
     /// P3-1: Last time wick volatility stats were logged (ms).
     mm_wick_log_ms: u64,
+    /// Shared guard across all exit monitors to prevent duplicate flatten requests.
+    shared_flattening_guard: Option<SharedFlatteningGuard>,
 }
 
 impl Application {
@@ -258,6 +260,7 @@ impl Application {
             mm_inventory: None,
             mm_shutdown_triggered: false,
             mm_wick_log_ms: 0,
+            shared_flattening_guard: None,
         })
     }
 
@@ -1236,6 +1239,10 @@ impl Application {
                 let exit_watcher_flatten_tx = flatten_tx.clone();
                 let oracle_exit_flatten_tx = flatten_tx.clone();
 
+                // Shared guard across all exit monitors to prevent duplicate flatten requests
+                let shared_flattening_guard = SharedFlatteningGuard::new();
+                self.shared_flattening_guard = Some(shared_flattening_guard.clone());
+
                 // Create TimeStopMonitor
                 let time_stop_monitor = TimeStopMonitor::new(
                     time_stop_config,
@@ -1244,6 +1251,7 @@ impl Application {
                     price_provider,
                     self.config.time_stop.slippage_bps,
                     self.config.time_stop.check_interval_ms,
+                    Some(shared_flattening_guard.clone()),
                 );
 
                 // Spawn TimeStopMonitor task
@@ -1283,6 +1291,7 @@ impl Application {
                         position_tracker.clone(),
                         mark_regression_flatten_tx,
                         self.market_state.clone(),
+                        Some(shared_flattening_guard.clone()),
                     );
 
                     tokio::spawn(async move {
@@ -1301,6 +1310,7 @@ impl Application {
                         mark_regression_config,
                         position_tracker.clone(),
                         exit_watcher_flatten_tx,
+                        Some(shared_flattening_guard.clone()),
                     );
                     self.exit_watcher = Some(exit_watcher);
 
@@ -1316,6 +1326,7 @@ impl Application {
                         position_tracker.clone(),
                         self.oracle_tracker.clone(),
                         oracle_exit_flatten_tx,
+                        Some(shared_flattening_guard.clone()),
                     );
                     self.oracle_exit_watcher = Some(oracle_exit_watcher);
 
@@ -1677,6 +1688,7 @@ impl Application {
                                         signal.best_px,
                                         rounded_size, // Use rounded size instead of suggested_size
                                         current_time_ms(),
+                                        signal.raw_edge_bps,
                                     );
 
                                     // P1-4: Record signal-to-order latency
@@ -2181,6 +2193,14 @@ impl Application {
         // P2-4: Skip taker-specific reporting for MM fills
         if let Some(existing_pos) = tracker.get_position(&market) {
             let is_closing = existing_pos.side != side;
+
+            // Release shared flattening guard on any position close (taker or MM)
+            if is_closing {
+                if let Some(ref guard) = self.shared_flattening_guard {
+                    guard.release(&market);
+                }
+            }
+
             if is_closing && !is_mm_fill {
                 // P2-3: Report realized PnL estimate to MaxDrawdownGate
                 if let Some(ref gate) = self.max_drawdown_gate {

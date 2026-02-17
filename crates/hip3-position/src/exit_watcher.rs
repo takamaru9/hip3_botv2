@@ -38,7 +38,7 @@ use hip3_core::{MarketKey, OrderSide, PendingOrder};
 
 use crate::mark_regression::MarkRegressionConfig;
 use crate::time_stop::{FlattenOrderBuilder, TIME_STOP_MS};
-use crate::tracker::{Position, PositionTrackerHandle};
+use crate::tracker::{Position, PositionTrackerHandle, SharedFlatteningGuard};
 
 // ============================================================================
 // ExitWatcher
@@ -62,6 +62,9 @@ pub struct ExitWatcher {
     /// Protected by RwLock for thread-safe access from WS handler.
     local_flattening: RwLock<HashSet<MarketKey>>,
 
+    /// Shared guard across all exit monitors to prevent duplicate flatten requests.
+    shared_flattening: Option<SharedFlatteningGuard>,
+
     /// Counter for exit triggers (for metrics/debugging).
     exit_count: std::sync::atomic::AtomicU64,
 }
@@ -73,6 +76,7 @@ impl ExitWatcher {
         config: MarkRegressionConfig,
         position_handle: PositionTrackerHandle,
         flatten_tx: mpsc::Sender<PendingOrder>,
+        shared_flattening: Option<SharedFlatteningGuard>,
     ) -> Self {
         info!(
             exit_threshold_bps = %config.exit_threshold_bps,
@@ -85,6 +89,7 @@ impl ExitWatcher {
             position_handle,
             flatten_tx,
             local_flattening: RwLock::new(HashSet::new()),
+            shared_flattening,
             exit_count: std::sync::atomic::AtomicU64::new(0),
         }
     }
@@ -127,6 +132,14 @@ impl ExitWatcher {
         // 4. Check exit condition
         let now_ms = chrono::Utc::now().timestamp_millis() as u64;
         if let Some(edge_bps) = self.check_exit(&position, snapshot, now_ms) {
+            // 4b. Shared guard: prevent cross-monitor duplicates
+            if let Some(ref guard) = self.shared_flattening {
+                if !guard.try_claim(&key) {
+                    trace!(market = %key, "ExitWatcher: flatten already claimed by another monitor");
+                    return;
+                }
+            }
+
             // 5. Mark as flattening BEFORE sending to prevent duplicates
             {
                 let mut flattening = self.local_flattening.write();
@@ -394,8 +407,14 @@ pub fn new_exit_watcher(
     config: MarkRegressionConfig,
     position_handle: PositionTrackerHandle,
     flatten_tx: mpsc::Sender<PendingOrder>,
+    shared_flattening: Option<SharedFlatteningGuard>,
 ) -> ExitWatcherHandle {
-    Arc::new(ExitWatcher::new(config, position_handle, flatten_tx))
+    Arc::new(ExitWatcher::new(
+        config,
+        position_handle,
+        flatten_tx,
+        shared_flattening,
+    ))
 }
 
 // ============================================================================

@@ -555,6 +555,7 @@ impl Executor {
         price: Price,
         size: Size,
         now_ms: u64,
+        edge_bps: Decimal,
     ) -> ExecutionResult {
         // Gate 1: HardStop
         if self.hard_stop_latch.is_triggered() {
@@ -588,7 +589,7 @@ impl Executor {
         // Gate 1d: BurstSignal — per-market signal rate limiting (check only)
         // record() is called after all gates pass, so only actual trades count.
         if let Some(ref gate) = self.burst_signal_gate {
-            if let Err(reason) = gate.check(market) {
+            if let Err(reason) = gate.check(market, edge_bps) {
                 debug!(
                     market = %market,
                     "Signal rejected: BurstSignal gate"
@@ -1251,6 +1252,7 @@ mod tests {
             Price::new(dec!(50000)),
             Size::new(dec!(0.001)),
             1234567890,
+            Decimal::ZERO,
         );
 
         assert!(matches!(
@@ -1279,6 +1281,7 @@ mod tests {
             Price::new(dec!(50000)),
             Size::new(dec!(0.0005)),
             1234567890,
+            Decimal::ZERO,
         );
 
         assert!(
@@ -1305,6 +1308,7 @@ mod tests {
             Price::new(dec!(50000)),
             Size::new(dec!(0.0004)),
             1234567890,
+            Decimal::ZERO,
         );
         assert!(matches!(result1, ExecutionResult::Queued { .. }));
 
@@ -1318,6 +1322,7 @@ mod tests {
             Price::new(dec!(50000)),
             Size::new(dec!(0.0004)),
             1234567891,
+            Decimal::ZERO,
         );
         assert!(
             matches!(
@@ -1351,6 +1356,7 @@ mod tests {
             Price::new(dec!(50000)),
             Size::new(dec!(0.0005)),
             1234567890,
+            Decimal::ZERO,
         );
         assert!(matches!(result1, ExecutionResult::Queued { .. }));
 
@@ -1362,6 +1368,7 @@ mod tests {
             Price::new(dec!(3000)),
             Size::new(dec!(0.01)),
             1234567890,
+            Decimal::ZERO,
         );
         assert!(matches!(result2, ExecutionResult::Queued { .. }));
     }
@@ -1421,6 +1428,7 @@ mod tests {
             Price::new(dec!(50000)),
             Size::new(dec!(0.002)),
             1234567890,
+            Decimal::ZERO,
         );
 
         // Size is scaled from 0.002 to 0.001 ($50), so order is queued
@@ -1460,6 +1468,7 @@ mod tests {
             Price::new(dec!(50000)),
             Size::new(dec!(0.001)),
             1234567891,
+            Decimal::ZERO,
         );
 
         assert!(matches!(
@@ -1495,6 +1504,7 @@ mod tests {
             Price::new(dec!(50000)),
             Size::new(dec!(0.0009)),
             1234567890,
+            Decimal::ZERO,
         );
         assert!(matches!(result1, ExecutionResult::Queued { .. }));
 
@@ -1506,6 +1516,7 @@ mod tests {
             Price::new(dec!(3000)),
             Size::new(dec!(0.015)),
             1234567891,
+            Decimal::ZERO,
         );
         assert!(matches!(result2, ExecutionResult::Queued { .. }));
 
@@ -1517,6 +1528,7 @@ mod tests {
             Price::new(dec!(1000)),
             Size::new(dec!(0.02)),
             1234567892,
+            Decimal::ZERO,
         );
 
         assert!(
@@ -1542,6 +1554,7 @@ mod tests {
             Price::new(dec!(50000)),
             Size::new(dec!(0.001)),
             1234567890,
+            Decimal::ZERO,
         );
 
         assert!(matches!(
@@ -1587,6 +1600,7 @@ mod tests {
             Price::new(dec!(50000)),
             Size::new(dec!(0.0005)),
             1234567890,
+            Decimal::ZERO,
         );
 
         assert!(matches!(
@@ -1618,6 +1632,7 @@ mod tests {
             Price::new(dec!(3000)),
             Size::new(dec!(0.01)),
             1234567890,
+            Decimal::ZERO,
         );
         assert!(matches!(result1, ExecutionResult::Queued { .. }));
 
@@ -1633,6 +1648,7 @@ mod tests {
             Price::new(dec!(50000)),
             Size::new(dec!(0.0005)),
             1234567891,
+            Decimal::ZERO,
         );
 
         assert!(matches!(

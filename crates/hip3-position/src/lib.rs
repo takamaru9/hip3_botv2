@@ -46,5 +46,5 @@ pub use time_stop::{
 };
 pub use tracker::{
     spawn_position_tracker, Position, PositionTrackerHandle, PositionTrackerMsg,
-    PositionTrackerTask,
+    PositionTrackerTask, SharedFlatteningGuard,
 };

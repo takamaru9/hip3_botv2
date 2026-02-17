@@ -414,9 +414,10 @@ correlation_cooldown_secs = 120
 
 [burst_signal]
 enabled = true
-burst_window_secs = 1800
-burst_max_signals = 3
-burst_cooldown_secs = 300
+burst_window_secs = 900       # 1800→900 (30min→15min window)
+burst_max_signals = 5         # 3→5 (allow more signals per window)
+burst_cooldown_secs = 180     # 300→180 (5min→3min cooldown)
+burst_bypass_edge_bps = 100   # 100bps+ signals bypass burst limit
 
 [market_health]
 enabled = true

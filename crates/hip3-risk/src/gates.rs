@@ -1882,6 +1882,10 @@ pub struct BurstSignalConfig {
     /// Default: 300 (5 minutes).
     #[serde(default = "default_burst_cooldown_secs")]
     pub burst_cooldown_secs: u64,
+    /// Edge threshold (bps) above which burst limit is bypassed.
+    /// 0 = disabled (all signals respect burst limit).
+    #[serde(default)]
+    pub burst_bypass_edge_bps: Decimal,
 }
 
 fn default_burst_window_secs() -> u64 {
@@ -1903,6 +1907,7 @@ impl Default for BurstSignalConfig {
             burst_window_secs: default_burst_window_secs(),
             burst_max_signals: default_burst_max_signals(),
             burst_cooldown_secs: default_burst_cooldown_secs(),
+            burst_bypass_edge_bps: Decimal::ZERO,
         }
     }
 }
@@ -1950,8 +1955,24 @@ impl BurstSignalGate {
     /// Called at Gate 1d (early in the pipeline). Does NOT record the signal.
     /// Returns `Ok(())` if the signal may proceed, or `Err(RejectReason::BurstSignal)`
     /// if cooldown is active or the burst limit is already reached.
-    pub fn check(&self, market: &MarketKey) -> Result<(), RejectReason> {
+    ///
+    /// Signals with `edge_bps >= burst_bypass_edge_bps` (when non-zero) bypass
+    /// the burst limit, allowing high-quality signals through even during bursts.
+    pub fn check(&self, market: &MarketKey, edge_bps: Decimal) -> Result<(), RejectReason> {
         if !self.config.enabled {
+            return Ok(());
+        }
+
+        // Edge-aware bypass: high-quality signals skip burst check
+        if !self.config.burst_bypass_edge_bps.is_zero()
+            && edge_bps >= self.config.burst_bypass_edge_bps
+        {
+            debug!(
+                market = %market,
+                %edge_bps,
+                bypass_threshold = %self.config.burst_bypass_edge_bps,
+                "BurstSignalGate: bypassed (high edge)"
+            );
             return Ok(());
         }
 
@@ -2584,6 +2605,7 @@ mod correlation_position_tests {
 mod burst_signal_tests {
     use super::*;
     use hip3_core::{AssetId, DexId};
+    use rust_decimal_macros::dec;
 
     fn market(idx: u32) -> MarketKey {
         MarketKey::new(DexId::XYZ, AssetId::new(idx))
@@ -2595,7 +2617,7 @@ mod burst_signal_tests {
         assert!(!gate.is_enabled());
         // Should always pass when disabled
         for _ in 0..5 {
-            assert!(gate.check(&market(0)).is_ok());
+            assert!(gate.check(&market(0), Decimal::ZERO).is_ok());
             gate.record(&market(0));
         }
     }
@@ -2607,20 +2629,21 @@ mod burst_signal_tests {
             burst_window_secs: 1800,
             burst_max_signals: 3,
             burst_cooldown_secs: 300,
+            ..Default::default()
         };
         let gate = BurstSignalGate::new(config);
 
         // First 2 check+record cycles pass without triggering cooldown
-        assert!(gate.check(&market(0)).is_ok());
+        assert!(gate.check(&market(0), Decimal::ZERO).is_ok());
         gate.record(&market(0));
         assert_eq!(gate.signal_count(&market(0)), 1);
 
-        assert!(gate.check(&market(0)).is_ok());
+        assert!(gate.check(&market(0), Decimal::ZERO).is_ok());
         gate.record(&market(0));
         assert_eq!(gate.signal_count(&market(0)), 2);
 
         // 3rd check passes (count=2 < 3)
-        assert!(gate.check(&market(0)).is_ok());
+        assert!(gate.check(&market(0), Decimal::ZERO).is_ok());
         // 3rd record triggers cooldown (count reaches 3) and clears signals
         gate.record(&market(0));
         assert!(gate.is_market_in_cooldown(&market(0)));
@@ -2633,17 +2656,21 @@ mod burst_signal_tests {
             burst_window_secs: 1800,
             burst_max_signals: 3,
             burst_cooldown_secs: 300,
+            ..Default::default()
         };
         let gate = BurstSignalGate::new(config);
 
         // Use up all 3 signals (3rd record triggers cooldown)
         for _ in 0..3 {
-            assert!(gate.check(&market(0)).is_ok());
+            assert!(gate.check(&market(0), Decimal::ZERO).is_ok());
             gate.record(&market(0));
         }
 
         // 4th signal should be blocked (cooldown active after 3rd record)
-        assert_eq!(gate.check(&market(0)), Err(RejectReason::BurstSignal));
+        assert_eq!(
+            gate.check(&market(0), Decimal::ZERO),
+            Err(RejectReason::BurstSignal)
+        );
         assert!(gate.is_market_in_cooldown(&market(0)));
     }
 
@@ -2654,27 +2681,34 @@ mod burst_signal_tests {
             burst_window_secs: 1800,
             burst_max_signals: 2,
             burst_cooldown_secs: 300,
+            ..Default::default()
         };
         let gate = BurstSignalGate::new(config);
 
         // Market 0: use up limit (2nd record triggers cooldown)
         for _ in 0..2 {
-            assert!(gate.check(&market(0)).is_ok());
+            assert!(gate.check(&market(0), Decimal::ZERO).is_ok());
             gate.record(&market(0));
         }
-        assert_eq!(gate.check(&market(0)), Err(RejectReason::BurstSignal));
+        assert_eq!(
+            gate.check(&market(0), Decimal::ZERO),
+            Err(RejectReason::BurstSignal)
+        );
 
         // Market 1: should still be allowed
         for _ in 0..2 {
-            assert!(gate.check(&market(1)).is_ok());
+            assert!(gate.check(&market(1), Decimal::ZERO).is_ok());
             gate.record(&market(1));
         }
 
         // Market 1: now blocked too
-        assert_eq!(gate.check(&market(1)), Err(RejectReason::BurstSignal));
+        assert_eq!(
+            gate.check(&market(1), Decimal::ZERO),
+            Err(RejectReason::BurstSignal)
+        );
 
         // Market 2: unaffected
-        assert!(gate.check(&market(2)).is_ok());
+        assert!(gate.check(&market(2), Decimal::ZERO).is_ok());
         gate.record(&market(2));
         assert!(!gate.is_market_in_cooldown(&market(2)));
     }
@@ -2686,17 +2720,24 @@ mod burst_signal_tests {
             burst_window_secs: 1800,
             burst_max_signals: 1,
             burst_cooldown_secs: 300,
+            ..Default::default()
         };
         let gate = BurstSignalGate::new(config);
 
         // First signal passes check; record triggers cooldown (1 >= 1)
-        assert!(gate.check(&market(0)).is_ok());
+        assert!(gate.check(&market(0), Decimal::ZERO).is_ok());
         gate.record(&market(0));
         assert!(gate.is_market_in_cooldown(&market(0)));
 
         // During cooldown, all checks for this market blocked
-        assert_eq!(gate.check(&market(0)), Err(RejectReason::BurstSignal));
-        assert_eq!(gate.check(&market(0)), Err(RejectReason::BurstSignal));
+        assert_eq!(
+            gate.check(&market(0), Decimal::ZERO),
+            Err(RejectReason::BurstSignal)
+        );
+        assert_eq!(
+            gate.check(&market(0), Decimal::ZERO),
+            Err(RejectReason::BurstSignal)
+        );
     }
 
     #[test]
@@ -2706,6 +2747,7 @@ mod burst_signal_tests {
         assert_eq!(config.burst_window_secs, 1800);
         assert_eq!(config.burst_max_signals, 3);
         assert_eq!(config.burst_cooldown_secs, 300);
+        assert!(config.burst_bypass_edge_bps.is_zero());
     }
 
     #[test]
@@ -2715,6 +2757,7 @@ mod burst_signal_tests {
             burst_window_secs: 1800,
             burst_max_signals: 10,
             burst_cooldown_secs: 300,
+            ..Default::default()
         };
         let gate = BurstSignalGate::new(config);
 
@@ -2736,12 +2779,13 @@ mod burst_signal_tests {
             burst_window_secs: 1800,
             burst_max_signals: 3,
             burst_cooldown_secs: 300,
+            ..Default::default()
         };
         let gate = BurstSignalGate::new(config);
 
         // Multiple checks should not change state
         for _ in 0..10 {
-            assert!(gate.check(&market(0)).is_ok());
+            assert!(gate.check(&market(0), Decimal::ZERO).is_ok());
         }
         // No signals recorded (check is read-only)
         assert_eq!(gate.signal_count(&market(0)), 0);
@@ -2755,21 +2799,113 @@ mod burst_signal_tests {
             burst_window_secs: 1800,
             burst_max_signals: 3,
             burst_cooldown_secs: 300,
+            ..Default::default()
         };
         let gate = BurstSignalGate::new(config);
 
         // Simulate: 5 signals check, but only 2 pass downstream gates and record
-        assert!(gate.check(&market(0)).is_ok());
+        assert!(gate.check(&market(0), Decimal::ZERO).is_ok());
         gate.record(&market(0)); // signal 1: passes all gates
-        assert!(gate.check(&market(0)).is_ok()); // signal 2: check ok
-                                                 // signal 2: rejected by downstream gate, no record()
-        assert!(gate.check(&market(0)).is_ok()); // signal 3: check ok
+        assert!(gate.check(&market(0), Decimal::ZERO).is_ok()); // signal 2: check ok
+                                                                // signal 2: rejected by downstream gate, no record()
+        assert!(gate.check(&market(0), Decimal::ZERO).is_ok()); // signal 3: check ok
         gate.record(&market(0)); // signal 3: passes all gates
-        assert!(gate.check(&market(0)).is_ok()); // signal 4: check ok
-                                                 // signal 4: rejected by downstream gate, no record()
+        assert!(gate.check(&market(0), Decimal::ZERO).is_ok()); // signal 4: check ok
+                                                                // signal 4: rejected by downstream gate, no record()
 
         // Only 2 signals recorded (not 4)
         assert_eq!(gate.signal_count(&market(0)), 2);
         assert!(!gate.is_market_in_cooldown(&market(0)));
+    }
+
+    // Edge-aware bypass tests
+
+    #[test]
+    fn test_burst_bypass_disabled_when_zero() {
+        let config = BurstSignalConfig {
+            enabled: true,
+            burst_window_secs: 1800,
+            burst_max_signals: 1,
+            burst_cooldown_secs: 300,
+            burst_bypass_edge_bps: Decimal::ZERO, // disabled
+        };
+        let gate = BurstSignalGate::new(config);
+
+        // Use up limit
+        assert!(gate.check(&market(0), dec!(200)).is_ok());
+        gate.record(&market(0));
+
+        // Even with high edge, bypass disabled → blocked
+        assert_eq!(
+            gate.check(&market(0), dec!(200)),
+            Err(RejectReason::BurstSignal)
+        );
+    }
+
+    #[test]
+    fn test_burst_bypass_high_edge() {
+        let config = BurstSignalConfig {
+            enabled: true,
+            burst_window_secs: 1800,
+            burst_max_signals: 1,
+            burst_cooldown_secs: 300,
+            burst_bypass_edge_bps: dec!(100),
+        };
+        let gate = BurstSignalGate::new(config);
+
+        // Use up limit
+        assert!(gate.check(&market(0), dec!(50)).is_ok());
+        gate.record(&market(0));
+        assert!(gate.is_market_in_cooldown(&market(0)));
+
+        // High edge (166 >= 100) bypasses burst limit
+        assert!(gate.check(&market(0), dec!(166)).is_ok());
+    }
+
+    #[test]
+    fn test_burst_bypass_low_edge_still_blocked() {
+        let config = BurstSignalConfig {
+            enabled: true,
+            burst_window_secs: 1800,
+            burst_max_signals: 1,
+            burst_cooldown_secs: 300,
+            burst_bypass_edge_bps: dec!(100),
+        };
+        let gate = BurstSignalGate::new(config);
+
+        // Use up limit
+        assert!(gate.check(&market(0), dec!(50)).is_ok());
+        gate.record(&market(0));
+
+        // Low edge (50 < 100) does NOT bypass
+        assert_eq!(
+            gate.check(&market(0), dec!(50)),
+            Err(RejectReason::BurstSignal)
+        );
+    }
+
+    #[test]
+    fn test_burst_bypass_exact_boundary() {
+        let config = BurstSignalConfig {
+            enabled: true,
+            burst_window_secs: 1800,
+            burst_max_signals: 1,
+            burst_cooldown_secs: 300,
+            burst_bypass_edge_bps: dec!(100),
+        };
+        let gate = BurstSignalGate::new(config);
+
+        // Use up limit
+        assert!(gate.check(&market(0), dec!(50)).is_ok());
+        gate.record(&market(0));
+
+        // Exact boundary (100 >= 100) bypasses
+        assert!(gate.check(&market(0), dec!(100)).is_ok());
+
+        // Just below (99 < 100) does not
+        assert_eq!(
+            gate.check(&market(0), dec!(99)),
+            Err(RejectReason::BurstSignal)
+        );
     }
 }

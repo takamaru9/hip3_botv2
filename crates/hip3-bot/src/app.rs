@@ -1281,6 +1281,20 @@ impl Application {
                             .config
                             .mark_regression
                             .entry_edge_scale_factor,
+                        quick_profit_bps: self.config.mark_regression.quick_profit_bps,
+                        quick_profit_min_holding_ms: self
+                            .config
+                            .mark_regression
+                            .quick_profit_min_holding_ms,
+                        edge_evap_enabled: self.config.mark_regression.edge_evap_enabled,
+                        edge_evap_min_holding_ms: self
+                            .config
+                            .mark_regression
+                            .edge_evap_min_holding_ms,
+                        edge_evap_threshold_bps: self
+                            .config
+                            .mark_regression
+                            .edge_evap_threshold_bps,
                         time_decay_enabled: self.config.mark_regression.time_decay_enabled,
                         decay_start_ms: self.config.mark_regression.decay_start_ms,
                         min_decay_factor: self.config.mark_regression.min_decay_factor,

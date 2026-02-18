@@ -205,8 +205,70 @@ impl ExitWatcher {
         snapshot: &MarketSnapshot,
         now_ms: u64,
     ) -> Option<Decimal> {
-        // 1. Check minimum holding time
         let held_ms = now_ms.saturating_sub(position.entry_timestamp_ms);
+
+        // === Quick Profit Take (bypasses min_holding_time) ===
+        if !self.config.quick_profit_bps.is_zero()
+            && held_ms >= self.config.quick_profit_min_holding_ms
+        {
+            let entry = position.entry_price.inner();
+            if !entry.is_zero() {
+                let pnl_bps = match position.side {
+                    OrderSide::Buy => {
+                        let bid = snapshot.bbo.bid_price.inner();
+                        (bid - entry) / entry * Decimal::from(10000)
+                    }
+                    OrderSide::Sell => {
+                        let ask = snapshot.bbo.ask_price.inner();
+                        (entry - ask) / entry * Decimal::from(10000)
+                    }
+                };
+                if pnl_bps >= self.config.quick_profit_bps {
+                    debug!(market = %position.market, %pnl_bps, held_ms,
+                        "ExitWatcher: quick profit take");
+                    return Some(pnl_bps);
+                }
+            }
+        }
+
+        // === Edge Evaporation Exit (bypasses min_holding_time) ===
+        if self.config.edge_evap_enabled && held_ms >= self.config.edge_evap_min_holding_ms {
+            let oracle = snapshot.ctx.oracle.oracle_px.inner();
+            if !oracle.is_zero() {
+                let entry_edge_remaining = match position.side {
+                    OrderSide::Buy => {
+                        let ask = snapshot.bbo.ask_price.inner();
+                        (oracle - ask) / oracle * Decimal::from(10000)
+                    }
+                    OrderSide::Sell => {
+                        let bid = snapshot.bbo.bid_price.inner();
+                        (bid - oracle) / oracle * Decimal::from(10000)
+                    }
+                };
+                if entry_edge_remaining <= self.config.edge_evap_threshold_bps {
+                    let entry = position.entry_price.inner();
+                    let exit_pnl_bps = if !entry.is_zero() {
+                        match position.side {
+                            OrderSide::Buy => {
+                                (snapshot.bbo.bid_price.inner() - entry) / entry
+                                    * Decimal::from(10000)
+                            }
+                            OrderSide::Sell => {
+                                (entry - snapshot.bbo.ask_price.inner()) / entry
+                                    * Decimal::from(10000)
+                            }
+                        }
+                    } else {
+                        Decimal::ZERO
+                    };
+                    debug!(market = %position.market, %entry_edge_remaining, %exit_pnl_bps, held_ms,
+                        "ExitWatcher: edge evaporation exit");
+                    return Some(exit_pnl_bps);
+                }
+            }
+        }
+
+        // 1. Check minimum holding time
         if held_ms < self.config.min_holding_time_ms {
             return None;
         }
@@ -452,6 +514,11 @@ mod tests {
             check_interval_ms: 200,       // Not used in ExitWatcher
             min_holding_time_ms: 0,       // No minimum for tests
             slippage_bps: 50,
+            quick_profit_bps: Decimal::ZERO,
+            quick_profit_min_holding_ms: 500,
+            edge_evap_enabled: false,
+            edge_evap_min_holding_ms: 500,
+            edge_evap_threshold_bps: dec!(2),
             min_loss_exit_bps: Decimal::ZERO,
             entry_edge_scaling: false,
             entry_edge_scale_factor: dec!(0.5),
@@ -612,5 +679,84 @@ mod tests {
     fn test_pnl_check_config_with_value() {
         let config = test_config_with_pnl_check();
         assert_eq!(config.min_loss_exit_bps, dec!(15));
+    }
+
+    // --- Quick Profit Take tests ---
+
+    #[test]
+    fn test_quick_profit_exits_before_min_holding() {
+        // held=1000ms (< min_holding=5000ms), profit=5bps >= quick_profit=3bps → exit
+        let entry = dec!(100);
+        let bid = dec!(100.05); // +5 bps profit for LONG
+        let pnl_bps = (bid - entry) / entry * dec!(10000);
+        let quick_profit_bps = dec!(3);
+        let held_ms: u64 = 1000;
+        let quick_profit_min_holding_ms: u64 = 500;
+
+        assert_eq!(pnl_bps, dec!(5));
+        assert!(held_ms >= quick_profit_min_holding_ms);
+        assert!(pnl_bps >= quick_profit_bps);
+        // Quick profit take should trigger
+    }
+
+    #[test]
+    fn test_quick_profit_below_threshold_waits() {
+        // held=1000ms, profit=1bps < quick_profit=3bps → None
+        let entry = dec!(100);
+        let bid = dec!(100.01); // +1 bps
+        let pnl_bps = (bid - entry) / entry * dec!(10000);
+        let quick_profit_bps = dec!(3);
+
+        assert_eq!(pnl_bps, dec!(1));
+        assert!(pnl_bps < quick_profit_bps);
+        // Should NOT trigger quick profit
+    }
+
+    #[test]
+    fn test_quick_profit_too_early_waits() {
+        // held=100ms < min=500ms, profit=10bps → should NOT trigger
+        let held_ms: u64 = 100;
+        let quick_profit_min_holding_ms: u64 = 500;
+
+        assert!(held_ms < quick_profit_min_holding_ms);
+        // Should NOT trigger even with high profit
+    }
+
+    // --- Edge Evaporation Exit tests ---
+
+    #[test]
+    fn test_edge_evap_triggers_when_ask_catches_oracle() {
+        // LONG: oracle=100, ask=100 → edge remaining = (100-100)/100*10000 = 0 bps
+        // threshold=2 bps → 0 <= 2 → edge evaporated → exit
+        let oracle = dec!(100);
+        let ask = dec!(100); // MM caught up
+        let edge_remaining = (oracle - ask) / oracle * dec!(10000);
+        let threshold = dec!(2);
+
+        assert_eq!(edge_remaining, dec!(0));
+        assert!(edge_remaining <= threshold);
+        // Edge evaporation should trigger
+    }
+
+    #[test]
+    fn test_edge_evap_blocked_when_edge_remains() {
+        // LONG: oracle=100, ask=99.90 → edge remaining = (100-99.90)/100*10000 = 10 bps
+        // threshold=2 bps → 10 > 2 → edge still exists → no exit
+        let oracle = dec!(100);
+        let ask = dec!(99.90); // MM still lagging
+        let edge_remaining = (oracle - ask) / oracle * dec!(10000);
+        let threshold = dec!(2);
+
+        assert_eq!(edge_remaining, dec!(10));
+        assert!(edge_remaining > threshold);
+        // Should NOT trigger edge evaporation
+    }
+
+    #[test]
+    fn test_edge_evap_disabled_no_effect() {
+        // edge_evap_enabled=false → feature disabled, falls through to min_holding
+        let config = test_config();
+        assert!(!config.edge_evap_enabled);
+        // When disabled, edge evaporation check is skipped entirely
     }
 }

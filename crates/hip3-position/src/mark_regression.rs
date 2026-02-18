@@ -72,6 +72,34 @@ pub struct MarkRegressionConfig {
     #[serde(default = "default_entry_edge_scale_factor")]
     pub entry_edge_scale_factor: Decimal,
 
+    // --- Quick Profit Take ---
+    /// Unrealized PnL threshold (bps) for immediate exit.
+    /// If position profit >= this value, exit immediately bypassing min_holding_time.
+    /// 0 = disabled.
+    /// Default: 0 (disabled).
+    #[serde(default)]
+    pub quick_profit_bps: Decimal,
+    /// Minimum holding time (ms) before quick profit can trigger.
+    /// Safety floor to avoid exit on sub-second BBO noise.
+    /// Default: 500.
+    #[serde(default = "default_quick_profit_min_holding_ms")]
+    pub quick_profit_min_holding_ms: u64,
+
+    // --- Edge Evaporation Exit ---
+    /// Enable edge evaporation exit. When entry-side edge disappears
+    /// (MM caught up to oracle), exit regardless of min_holding_time.
+    /// Default: false.
+    #[serde(default)]
+    pub edge_evap_enabled: bool,
+    /// Minimum holding time (ms) before edge evaporation can trigger.
+    /// Default: 500.
+    #[serde(default = "default_edge_evap_min_holding_ms")]
+    pub edge_evap_min_holding_ms: u64,
+    /// Entry-side edge threshold (bps) below which edge is considered evaporated.
+    /// Default: 2.
+    #[serde(default = "default_edge_evap_threshold_bps")]
+    pub edge_evap_threshold_bps: Decimal,
+
     // --- P2-6: Time decay ---
     /// Enable time-based decay of exit threshold.
     /// When enabled, the exit threshold decreases over time, making exits
@@ -110,6 +138,18 @@ fn default_slippage_bps() -> u64 {
     50
 }
 
+fn default_quick_profit_min_holding_ms() -> u64 {
+    500
+}
+
+fn default_edge_evap_min_holding_ms() -> u64 {
+    500
+}
+
+fn default_edge_evap_threshold_bps() -> Decimal {
+    Decimal::from(2)
+}
+
 fn default_entry_edge_scale_factor() -> Decimal {
     Decimal::new(5, 1) // 0.5
 }
@@ -130,6 +170,11 @@ impl Default for MarkRegressionConfig {
             check_interval_ms: default_check_interval_ms(),
             min_holding_time_ms: default_min_holding_time_ms(),
             slippage_bps: default_slippage_bps(),
+            quick_profit_bps: Decimal::ZERO,
+            quick_profit_min_holding_ms: default_quick_profit_min_holding_ms(),
+            edge_evap_enabled: false,
+            edge_evap_min_holding_ms: default_edge_evap_min_holding_ms(),
+            edge_evap_threshold_bps: default_edge_evap_threshold_bps(),
             min_loss_exit_bps: Decimal::ZERO,
             entry_edge_scaling: false,
             entry_edge_scale_factor: default_entry_edge_scale_factor(),
@@ -355,8 +400,74 @@ impl MarkRegressionMonitor {
     ///
     /// Returns the edge (in bps) if exit condition is met, None otherwise.
     fn check_exit(&self, position: &Position, now_ms: u64) -> Option<Decimal> {
-        // 1. Check minimum holding time
         let held_ms = now_ms.saturating_sub(position.entry_timestamp_ms);
+
+        // === Quick Profit Take (bypasses min_holding_time) ===
+        if !self.config.quick_profit_bps.is_zero()
+            && held_ms >= self.config.quick_profit_min_holding_ms
+        {
+            if let Some(snap) = self.market_state.get_snapshot(&position.market) {
+                let entry = position.entry_price.inner();
+                if !entry.is_zero() {
+                    let pnl_bps = match position.side {
+                        OrderSide::Buy => {
+                            let bid = snap.bbo.bid_price.inner();
+                            (bid - entry) / entry * Decimal::from(10000)
+                        }
+                        OrderSide::Sell => {
+                            let ask = snap.bbo.ask_price.inner();
+                            (entry - ask) / entry * Decimal::from(10000)
+                        }
+                    };
+                    if pnl_bps >= self.config.quick_profit_bps {
+                        debug!(market = %position.market, %pnl_bps, held_ms,
+                            "MarkRegression: quick profit take");
+                        return Some(pnl_bps);
+                    }
+                }
+            }
+        }
+
+        // === Edge Evaporation Exit (bypasses min_holding_time) ===
+        if self.config.edge_evap_enabled && held_ms >= self.config.edge_evap_min_holding_ms {
+            if let Some(snap) = self.market_state.get_snapshot(&position.market) {
+                let oracle = snap.ctx.oracle.oracle_px.inner();
+                if !oracle.is_zero() {
+                    let entry_edge_remaining = match position.side {
+                        OrderSide::Buy => {
+                            let ask = snap.bbo.ask_price.inner();
+                            (oracle - ask) / oracle * Decimal::from(10000)
+                        }
+                        OrderSide::Sell => {
+                            let bid = snap.bbo.bid_price.inner();
+                            (bid - oracle) / oracle * Decimal::from(10000)
+                        }
+                    };
+                    if entry_edge_remaining <= self.config.edge_evap_threshold_bps {
+                        let entry = position.entry_price.inner();
+                        let exit_pnl_bps = if !entry.is_zero() {
+                            match position.side {
+                                OrderSide::Buy => {
+                                    (snap.bbo.bid_price.inner() - entry) / entry
+                                        * Decimal::from(10000)
+                                }
+                                OrderSide::Sell => {
+                                    (entry - snap.bbo.ask_price.inner()) / entry
+                                        * Decimal::from(10000)
+                                }
+                            }
+                        } else {
+                            Decimal::ZERO
+                        };
+                        debug!(market = %position.market, %entry_edge_remaining, %exit_pnl_bps, held_ms,
+                            "MarkRegression: edge evaporation exit");
+                        return Some(exit_pnl_bps);
+                    }
+                }
+            }
+        }
+
+        // 1. Check minimum holding time
         if held_ms < self.config.min_holding_time_ms {
             return None;
         }
@@ -861,5 +972,141 @@ mod tests {
         assert!(config.time_decay_enabled);
         assert_eq!(config.decay_start_ms, 3000);
         assert!((config.min_decay_factor - 0.3).abs() < 0.001);
+    }
+
+    // --- Quick Profit Take tests ---
+
+    #[test]
+    fn test_quick_profit_config_default() {
+        let config = MarkRegressionConfig::default();
+        assert!(config.quick_profit_bps.is_zero());
+        assert_eq!(config.quick_profit_min_holding_ms, 500);
+    }
+
+    #[test]
+    fn test_quick_profit_exits_before_min_holding() {
+        // LONG entry at 100, bid=100.05 (+5bps), quick_profit=3bps → exit
+        let entry = dec!(100);
+        let bid = dec!(100.05);
+        let pnl_bps = (bid - entry) / entry * dec!(10000);
+        let quick_profit_bps = dec!(3);
+        let held_ms: u64 = 1000;
+        let quick_profit_min_holding_ms: u64 = 500;
+
+        assert_eq!(pnl_bps, dec!(5));
+        assert!(held_ms >= quick_profit_min_holding_ms);
+        assert!(pnl_bps >= quick_profit_bps);
+    }
+
+    #[test]
+    fn test_quick_profit_below_threshold_waits() {
+        // LONG entry at 100, bid=100.01 (+1bps) < quick_profit=3bps → None
+        let entry = dec!(100);
+        let bid = dec!(100.01);
+        let pnl_bps = (bid - entry) / entry * dec!(10000);
+        let quick_profit_bps = dec!(3);
+
+        assert_eq!(pnl_bps, dec!(1));
+        assert!(pnl_bps < quick_profit_bps);
+    }
+
+    #[test]
+    fn test_quick_profit_too_early_waits() {
+        // held=100ms < min=500ms → should NOT trigger
+        let held_ms: u64 = 100;
+        let quick_profit_min_holding_ms: u64 = 500;
+        assert!(held_ms < quick_profit_min_holding_ms);
+    }
+
+    #[test]
+    fn test_quick_profit_short_side() {
+        // SHORT entry at 100, ask=99.95 (+5bps), quick_profit=3bps → exit
+        let entry = dec!(100);
+        let ask = dec!(99.95);
+        let pnl_bps = (entry - ask) / entry * dec!(10000);
+        let quick_profit_bps = dec!(3);
+
+        assert_eq!(pnl_bps, dec!(5));
+        assert!(pnl_bps >= quick_profit_bps);
+    }
+
+    #[test]
+    fn test_quick_profit_serde() {
+        let toml_str = r#"
+            enabled = true
+            exit_threshold_bps = 10
+            quick_profit_bps = 3
+            quick_profit_min_holding_ms = 600
+        "#;
+        let config: MarkRegressionConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.quick_profit_bps, dec!(3));
+        assert_eq!(config.quick_profit_min_holding_ms, 600);
+    }
+
+    // --- Edge Evaporation Exit tests ---
+
+    #[test]
+    fn test_edge_evap_config_default() {
+        let config = MarkRegressionConfig::default();
+        assert!(!config.edge_evap_enabled);
+        assert_eq!(config.edge_evap_min_holding_ms, 500);
+        assert_eq!(config.edge_evap_threshold_bps, dec!(2));
+    }
+
+    #[test]
+    fn test_edge_evap_triggers_when_ask_catches_oracle() {
+        // LONG: oracle=100, ask=100 → edge remaining = 0 bps ≤ 2 → exit
+        let oracle = dec!(100);
+        let ask = dec!(100);
+        let edge_remaining = (oracle - ask) / oracle * dec!(10000);
+        let threshold = dec!(2);
+
+        assert_eq!(edge_remaining, dec!(0));
+        assert!(edge_remaining <= threshold);
+    }
+
+    #[test]
+    fn test_edge_evap_blocked_when_edge_remains() {
+        // LONG: oracle=100, ask=99.90 → edge remaining = 10 bps > 2 → no exit
+        let oracle = dec!(100);
+        let ask = dec!(99.90);
+        let edge_remaining = (oracle - ask) / oracle * dec!(10000);
+        let threshold = dec!(2);
+
+        assert_eq!(edge_remaining, dec!(10));
+        assert!(edge_remaining > threshold);
+    }
+
+    #[test]
+    fn test_edge_evap_short_side() {
+        // SHORT: oracle=100, bid=100 → edge remaining = (100-100)/100 = 0 bps ≤ 2 → exit
+        let oracle = dec!(100);
+        let bid = dec!(100);
+        let edge_remaining = (bid - oracle) / oracle * dec!(10000);
+        let threshold = dec!(2);
+
+        assert_eq!(edge_remaining, dec!(0));
+        assert!(edge_remaining <= threshold);
+    }
+
+    #[test]
+    fn test_edge_evap_disabled_no_effect() {
+        let config = MarkRegressionConfig::default();
+        assert!(!config.edge_evap_enabled);
+    }
+
+    #[test]
+    fn test_edge_evap_serde() {
+        let toml_str = r#"
+            enabled = true
+            exit_threshold_bps = 10
+            edge_evap_enabled = true
+            edge_evap_min_holding_ms = 600
+            edge_evap_threshold_bps = 3
+        "#;
+        let config: MarkRegressionConfig = toml::from_str(toml_str).unwrap();
+        assert!(config.edge_evap_enabled);
+        assert_eq!(config.edge_evap_min_holding_ms, 600);
+        assert_eq!(config.edge_evap_threshold_bps, dec!(3));
     }
 }

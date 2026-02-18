@@ -120,6 +120,26 @@ pub struct MarkRegressionConfig {
     #[serde(default = "default_mark_regression_slippage_bps")]
     pub slippage_bps: u64,
 
+    // --- Quick Profit Take ---
+    /// Unrealized PnL threshold (bps) for immediate exit bypassing min_holding_time.
+    /// 0 = disabled. Default: 0.
+    #[serde(default)]
+    pub quick_profit_bps: rust_decimal::Decimal,
+    /// Minimum holding time (ms) before quick profit can trigger. Default: 500.
+    #[serde(default = "default_mark_regression_quick_profit_min_holding_ms")]
+    pub quick_profit_min_holding_ms: u64,
+
+    // --- Edge Evaporation Exit ---
+    /// Enable edge evaporation exit. Default: false.
+    #[serde(default)]
+    pub edge_evap_enabled: bool,
+    /// Minimum holding time (ms) before edge evaporation can trigger. Default: 500.
+    #[serde(default = "default_mark_regression_edge_evap_min_holding_ms")]
+    pub edge_evap_min_holding_ms: u64,
+    /// Entry-side edge threshold (bps) below which edge is considered evaporated. Default: 2.
+    #[serde(default = "default_mark_regression_edge_evap_threshold_bps")]
+    pub edge_evap_threshold_bps: rust_decimal::Decimal,
+
     // --- Phase B: PnL direction check ---
     /// Minimum loss (bps) before MarkRegression triggers exit on losing trades.
     /// 0 = disabled (exit regardless of PnL). Recommended: 15.
@@ -149,6 +169,18 @@ pub struct MarkRegressionConfig {
     /// Minimum decay factor (0.0-1.0). Default: 0.2.
     #[serde(default = "default_mark_regression_min_decay_factor")]
     pub min_decay_factor: f64,
+}
+
+fn default_mark_regression_quick_profit_min_holding_ms() -> u64 {
+    500
+}
+
+fn default_mark_regression_edge_evap_min_holding_ms() -> u64 {
+    500
+}
+
+fn default_mark_regression_edge_evap_threshold_bps() -> rust_decimal::Decimal {
+    rust_decimal::Decimal::from(2)
 }
 
 fn default_mark_regression_entry_edge_scale_factor() -> rust_decimal::Decimal {
@@ -191,6 +223,11 @@ impl Default for MarkRegressionConfig {
             check_interval_ms: default_mark_regression_check_interval_ms(),
             min_holding_time_ms: default_mark_regression_min_holding_time_ms(),
             slippage_bps: default_mark_regression_slippage_bps(),
+            quick_profit_bps: rust_decimal::Decimal::ZERO,
+            quick_profit_min_holding_ms: default_mark_regression_quick_profit_min_holding_ms(),
+            edge_evap_enabled: false,
+            edge_evap_min_holding_ms: default_mark_regression_edge_evap_min_holding_ms(),
+            edge_evap_threshold_bps: default_mark_regression_edge_evap_threshold_bps(),
             min_loss_exit_bps: rust_decimal::Decimal::ZERO,
             entry_edge_scaling: false,
             entry_edge_scale_factor: default_mark_regression_entry_edge_scale_factor(),

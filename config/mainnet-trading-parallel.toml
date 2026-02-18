@@ -345,7 +345,7 @@ trail_bps = 3
 exit_profile_enabled = false
 
 [time_stop]
-threshold_ms = 60000
+threshold_ms = 20000   # was 60000. 20s hard stop (edge decays well before 60s).
 reduce_only_timeout_ms = 60000
 check_interval_ms = 500
 slippage_bps = 50
@@ -369,16 +369,23 @@ re_entry_delay_ms = 30000
 enabled = true
 exit_threshold_bps = 25
 check_interval_ms = 100
-min_holding_time_ms = 5000
+min_holding_time_ms = 1500  # was 5000. Quick Profit/Edge Evap bypass this safely.
 slippage_bps = 50
 time_decay_enabled = true
-decay_start_ms = 8000
-min_decay_factor = 0.5
+decay_start_ms = 3000      # was 8000. Edge 1-3s → start decay at 3s.
+min_decay_factor = 0.4     # was 0.5. 25bps × 0.4 = 10bps minimum threshold.
 # Phase B: PnL direction check - skip MarkRegression exit for small losses
 min_loss_exit_bps = 15
 # Phase C: Entry edge-linked dynamic exit threshold
 entry_edge_scaling = true
 entry_edge_scale_factor = 0.5
+# Quick Profit Take: immediate exit when profit >= 3bps (bypasses min_holding)
+quick_profit_bps = 3
+quick_profit_min_holding_ms = 500
+# Edge Evaporation Exit: exit when entry-side edge disappears (MM caught up)
+edge_evap_enabled = true
+edge_evap_min_holding_ms = 500
+edge_evap_threshold_bps = 2
 
 [executor]
 batch_interval_ms = 20

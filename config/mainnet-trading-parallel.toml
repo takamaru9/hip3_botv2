@@ -51,9 +51,9 @@ threshold_bps = 50  # was 80 (Phase A)
 [[markets]]
 asset_idx = 110004
 coin = "xyz:HOOD"
-# 2026-02-14: Raised 25→35. Biggest loser Feb 13 (-$0.28)
-# Even with session_aware (35*2=70 MarketOpen, 35*1.5=52.5 USActive)
-threshold_bps = 35
+# 2026-02-17: Raised 35→60. Edge decay 5%@5s = structural spread, not stale liquidity.
+# Feb 17: -$0.014 loss. Consistent loser across all sessions.
+threshold_bps = 60
 
 [[markets]]
 asset_idx = 110005
@@ -163,7 +163,9 @@ threshold_bps = 25  # was 40 (Phase A)
 [[markets]]
 asset_idx = 110026
 coin = "xyz:SILVER"
-threshold_bps = 50  # was 80 (Phase A)
+# 2026-02-17: Raised 50→70. Mixed edge decay (40%), but consistent loser.
+# Feb 17: -$0.060. All SILVER trades this period are losses.
+threshold_bps = 70
 
 [[markets]]
 asset_idx = 110027
@@ -261,9 +263,9 @@ start = "09:00"
 end = "09:15"
 
 [[risk.blackout_windows]]
-# 2026-02-14: Extended from 14:33 to 14:40 based on Feb 13 market open losses
-# session_aware provides additional protection (2x threshold during 14:30-16:00)
-start = "14:30"
+# 2026-02-17: Extended to 14:25 start. Feb 17 data: 14:28 UTC trades (pre-open)
+# caused -$0.251 (71% of total loss). Oracle whipsaw in final 5min before open.
+start = "14:25"
 end = "14:40"
 
 # Oracle Movement Tracker
@@ -290,7 +292,9 @@ confidence_sizing = true
 baseline_tracking = true
 baseline_alpha = 0.001
 baseline_min_samples = 100
-min_edge_above_baseline_bps = 5  # Phase A value
+# 2026-02-17: Raised 5→8. Feb 17: trades with net_edge <5bps all lost.
+# Round-trip fees ~$0.008 on $10 notional = 8bps. Must exceed fee threshold.
+min_edge_above_baseline_bps = 8
 edge_velocity_gate = false
 min_edge_velocity_bps = 5
 # 2026-02-14: Restored from 0.0→0.25. 0.0 admitted too many low-quality signals.

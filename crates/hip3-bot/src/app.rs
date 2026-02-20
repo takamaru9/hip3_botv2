@@ -728,24 +728,22 @@ impl Application {
             positions_to_sync.len()
         );
 
-        // Record oracle baselines for existing positions BEFORE syncing to tracker.
-        // This ensures OracleExitWatcher won't immediately exit positions that were
-        // opened before the bot started (e.g., manual trades or bot restart).
-        //
-        // Note: We record baselines with current oracle consecutive counts.
-        // This means we only track movements AFTER the bot starts, not the full
-        // position history. This is the safest approach since we don't know the
-        // market state when the position was originally opened.
+        // Record oracle baselines ONLY for genuinely NEW positions.
+        // Previously, this called on_position_opened for ALL positions on every resync,
+        // which reset Oracle baselines every 60s and effectively disabled OracleExit
+        // (trailing stop, loss cut) for API-synced positions.
         if let Some(ref oracle_exit) = self.oracle_exit_watcher {
             for position in &positions_to_sync {
-                // Startup sync: no entry edge/oracle data, use Standard profile
-                oracle_exit.on_position_opened(
-                    position.market,
-                    position.side,
-                    None,
-                    None,
-                    ExitProfile::Standard,
-                );
+                // Only set baseline for positions not already tracked
+                if !position_tracker.has_position(&position.market) {
+                    oracle_exit.on_position_opened(
+                        position.market,
+                        position.side,
+                        None,
+                        None,
+                        ExitProfile::Standard,
+                    );
+                }
             }
         }
 

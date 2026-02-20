@@ -492,9 +492,16 @@ impl PositionTrackerTask {
             new_positions.iter().map(|p| p.market).collect();
 
         // Step 1: Add/update all new positions FIRST (before removing anything)
-        for pos in new_positions {
+        // Preserve entry_timestamp_ms and entry_edge_bps for existing positions
+        // to avoid resetting exit mechanism timers on every resync.
+        for mut pos in new_positions {
             if !pos.is_empty() {
                 let market = pos.market;
+                if let Some(existing) = self.positions.get(&market) {
+                    // Preserve tracking state from existing position
+                    pos.entry_timestamp_ms = existing.entry_timestamp_ms;
+                    pos.entry_edge_bps = existing.entry_edge_bps;
+                }
                 self.positions_cache.insert(market, true);
                 self.positions_data.insert(market, pos.clone());
                 self.positions.insert(market, pos);
